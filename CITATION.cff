@@ -1,0 +1,18 @@
+cff-version: 1.2.0
+message: "If you use Wise Explorer in a scientific publication, I would appreciate if you cite my thesis:"
+title: "Wise Explorer"
+type: software
+authors:
+  - family-names: "Banda"
+    given-names: "Mathewe"
+repository-code: "https://github.com/MatheweB/WiseExplorer"
+preferred-citation:
+  type: thesis
+  title: "General Game Playing as a Bandit-Arms Problem: A Multiagent Monte-Carlo Solution Exploiting Nash Equilibria"
+  authors:
+    - family-names: "Banda"
+      given-names: "Brandon Mathewe"
+  year: 2019
+  institution:
+    name: "Oberlin College"
+  url: "https://digitalcommons.oberlin.edu/honors/116/"

@@ -1,0 +1,14 @@
+Wise Explorer
+Copyright 2026 Mathewe Banda
+
+This project implements and extends concepts from the following research:
+
+  "General Game Playing as a Bandit-Arms Problem:
+   A Multiagent Monte-Carlo Solution Exploiting Nash Equilibria"
+
+  Author: Brandon Mathewe Banda
+  Institution: Oberlin College (2019)
+  Available at: https://digitalcommons.oberlin.edu/honors/116/
+
+Licensed under the Apache License, Version 2.0.
+See the LICENSE file for the full license text.
