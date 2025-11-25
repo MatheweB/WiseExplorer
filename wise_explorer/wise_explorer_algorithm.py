@@ -12,9 +12,12 @@ from typing import Iterable
 
 from agent.agent import Agent
 from games.game_base import GameBase
+from omnicron.manager import GameMemory
 
 
-def _set_move(agent: Agent, game: GameBase, is_prune_stage: bool) -> None:
+def _set_move(
+    agent: Agent, game: GameBase, omnicron: GameMemory, is_prune_stage: bool
+) -> None:
     """
     Update ``agent.core_move`` according to the current search stage.
 
@@ -44,13 +47,18 @@ def _set_move(agent: Agent, game: GameBase, is_prune_stage: bool) -> None:
         if not agent.change:  # agent won
             agent.core_move = random.choice(game.valid_moves())
         else:  # agent lost
-            agent.core_move = agent.get_top_move()
+            new_move = omnicron.get_best_move(game.game_id(), game.get_state())
+            if new_move is not None:
+                agent.core_move = new_move
+            else:
+                agent.core_move = random.choice(game.valid_moves())
 
 
 def update_agents(
     agents: Iterable[Agent],
     anti_agents: Iterable[Agent],
     game: GameBase,
+    omnicron: GameMemory,
     is_prune_stage: bool = True,
 ) -> None:
     """
@@ -72,10 +80,8 @@ def update_agents(
     """
     # Treat every agent uniformly: the helper handles the logic
     for agent in agents:
-        _set_move(agent, game, is_prune_stage)
+        _set_move(agent, game, omnicron, is_prune_stage)
 
     # Anti‑agents behave the same way as normal agents
     for anti_agent in anti_agents:
-        # TODO(for anti-agents, we want the game *after* the first agent's move)
-        # (BIG Refactor, state storage)
-        _set_move(anti_agent, game, is_prune_stage)
+        _set_move(anti_agent, game, omnicron, is_prune_stage)

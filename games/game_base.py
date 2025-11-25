@@ -49,6 +49,13 @@ class GameBase(ABC):
         pass
 
     @abstractmethod
+    def set_state(self, game_state: GameState) -> None:
+        """
+        Sets the current state of the game.
+        """
+        pass
+
+    @abstractmethod
     def current_player(self) -> int:
         """
         Return ID of the player to act: typically 0 or 1.
@@ -86,5 +93,12 @@ class GameBase(ABC):
             tie
             neutral
             loss
+        """
+        pass
+
+    @abstractmethod
+    def print_state(self) -> None:
+        """
+        Prints out the current state of the game in a visually appealing way
         """
         pass

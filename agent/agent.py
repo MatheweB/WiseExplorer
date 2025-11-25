@@ -16,12 +16,12 @@ class State(Enum):
 
 @dataclass
 class Agent:
+    _core_move: np.ndarray = np.array(
+        []
+    )  # The initial move that an agent will make in a simulation (based on the initial board state before simulating)
     _move: np.ndarray = np.array(
         []
     )  # The move that the agent is going to make on a given turn in the simulation.
-    _core_move: np.ndarray = np.array(
-        []
-    )  # The initial move that an agent will make in a simulation.
     _change: bool = (
         False  # A boolean indicating whether the agent should change its coreMove in the next simulation.
     )
@@ -31,7 +31,9 @@ class Agent:
     _move_depth: int = (
         0  # An integer indicating the depth (in turns) before the game outcome was determined.
     )
-    _player_id: int = 0  # An integer indicating the player number/id (e.g. 1 or 2).
+    _player_id: int = (
+        0  # An integer indicating the role/ID of the player (e.g. 1 or 2, or any number of distinct "roles")
+    )
 
     @property
     def move(self) -> np.ndarray:
