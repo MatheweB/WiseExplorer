@@ -97,8 +97,8 @@ class GameBase(ABC):
         pass
 
     @abstractmethod
-    def print_state(self) -> None:
+    def state_string(self) -> str:
         """
-        Prints out the current state of the game in a visually appealing way
+        Returns a visually appealing string of the current state of the game
         """
         pass

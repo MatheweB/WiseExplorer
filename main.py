@@ -38,8 +38,8 @@ def _configure_initial_game() -> GameBase:
 
 def main():
     # TODO(Generalize the player_id, but for now 2-player games are where we are)
-    agents = create_agents(50, 1)
-    anti_agents = create_agents(50, 2)
+    agents = create_agents(30, 1)
+    anti_agents = create_agents(30, 2)
     game = _configure_initial_game()
     omnicron = GameMemory()
     start_simulations(agents, anti_agents, game, TURN_DEPTH, SIMULATIONS, omnicron)

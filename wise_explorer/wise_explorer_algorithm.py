@@ -8,7 +8,6 @@ A *change* flag on each agent tells us whether that agent has won
 from __future__ import annotations
 
 import random
-from typing import Iterable
 
 from agent.agent import Agent
 from games.game_base import GameBase
@@ -42,21 +41,29 @@ def _set_move(
         # Bad‑path: keep losers, shuffle winners
         if not agent.change:  # agent won
             agent.core_move = random.choice(game.valid_moves())
+        else:
+            agent.core_move = random.choice(game.valid_moves()) 
+            # new_move = omnicron.get_worst_move(game.game_id(), game.get_state().clone())
+            # if new_move is not None:
+            #     agent.core_move = new_move
+            # else:
+            #     agent.core_move = random.choice(game.valid_moves()) 
     else:
         # Good‑path: explore winners, exploit losers
         if not agent.change:  # agent won
             agent.core_move = random.choice(game.valid_moves())
         else:  # agent lost
-            new_move = omnicron.get_best_move(game.game_id(), game.get_state())
+            new_move = omnicron.get_best_move(game.game_id(), game.get_state().clone(), debug_move=False)
             if new_move is not None:
                 agent.core_move = new_move
             else:
+                print("move is none!")
                 agent.core_move = random.choice(game.valid_moves())
 
 
 def update_agents(
-    agents: Iterable[Agent],
-    anti_agents: Iterable[Agent],
+    agent: Agent,
+    anti_agent: Agent,
     game: GameBase,
     omnicron: GameMemory,
     is_prune_stage: bool = True,
@@ -66,10 +73,10 @@ def update_agents(
 
     Parameters
     ----------
-    agents : Iterable[Agent]
-        The “friendly” agents in the current game state.
-    anti_agents : Iterable[Agent]
-        The “opponent” agents in the current game state.
+    agent : Agent
+        The “friendly” agent in the current game state.
+    anti_agent : Agent
+        The “opponent” agent in the current game state.
     game : GameBase
         The game instance; needed for generating random valid moves.
     is_prune_stage : bool, optional
@@ -79,9 +86,7 @@ def update_agents(
     This function mutates the agents in place - no value is returned.
     """
     # Treat every agent uniformly: the helper handles the logic
-    for agent in agents:
-        _set_move(agent, game, omnicron, is_prune_stage)
+    _set_move(agent, game, omnicron, is_prune_stage)
 
     # Anti‑agents behave the same way as normal agents
-    for anti_agent in anti_agents:
-        _set_move(anti_agent, game, omnicron, is_prune_stage)
+    _set_move(anti_agent, game, omnicron, is_prune_stage)
