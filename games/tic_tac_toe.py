@@ -6,11 +6,11 @@ import numpy as np
 from typing import Tuple
 
 # Functions
-from game_rules import get_rows, get_cols, get_diagonals, all_equal, board_full
+from games.game_rules import get_rows, get_cols, get_diagonals, board_full
 
 # Classes
-from game_base import GameBase
-from game_state import GameState
+from games.game_base import GameBase
+from games.game_state import GameState
 from agent.agent import State
 
 
@@ -25,8 +25,8 @@ class TicTacToe(GameBase):
     def __init__(self):
         """Initialize a fresh game."""
         empty = np.full((self.SIZE, self.SIZE), None)
-        self.state = GameState(empty, current_player=0)
-        self.winner = None  # 0 or 1, or None
+        self.state = GameState(empty, current_player=1)
+        self.winner = None  # 1 or 2, or None
 
     # --------------------------------------------------------------
     # Required interface methods
@@ -58,25 +58,30 @@ class TicTacToe(GameBase):
         self.state = game_state
 
     def current_player(self) -> int:
-        """Return the index of the current player (0 or 1)."""
+        """Return the index of the current player (1 or 2)."""
         return self.state.current_player
 
     def valid_moves(self) -> np.ndarray:
         """Return list of all (row, col) tuples that are empty."""
         board = self.state.board
-        moves = np.argwhere(board is None)
+        moves = np.argwhere(board == np.array(None))
         return moves
 
-    def apply_move(self, move: Tuple[int, int]) -> None:
+    def apply_move(self, move: np.ndarray) -> None:
         """Apply (r, c) move for current player and update state."""
         r, c = move
         board = self.state.board
+        # The player who just moved
+        current_player_id = self.state.current_player
+
         # Place mark
-        player = self.state.current_player
-        board[r][c] = player
+        board[r, c] = current_player_id
+
         # Check win
         if self._check_winner():
-            self.winner = player
+            # The winner is the player who just moved
+            self.winner = current_player_id
+
         # Change current_player variables
         self._increment_to_next_turn()
 
@@ -85,23 +90,28 @@ class TicTacToe(GameBase):
         return self.winner is not None or board_full(self.state.board)
 
     def get_result(self, agent_id: int) -> State:
-        """
-        Return +1 for win, 0 for draw, -1 for loss.
-        This is exactly the form agents expect.
-        """
-        if self.winner is None:
-            if self.is_over():
-                # tie
-                return State.TIE
-            # incomplete
-            return State.NEUTRAL
-        return State.WIN if self.winner == agent_id else State.LOSS
+            """
+            Return LOSS, NEUTRAL, TIE, or WIN
+            """
+            # 1. Someone won (WIN or LOSS)
+            if self.winner is not None:
+                return State.WIN if self.winner == agent_id else State.LOSS
+            
+            # 2. No one won (winner is None)
+            else:
+                # Check if the game is over (board is full)
+                if self.is_over():
+                    # Game is over, no winner -> TIE
+                    return State.TIE
+                else:
+                    # Game is NOT over, no winner -> NEUTRAL (Incomplete)
+                    return State.NEUTRAL
 
-    def print_state(self) -> None:
+    def state_string(self) -> None:
         """
         Prints out the current state of the game in a visually appealing way
         """
-        symbols = {0: " ", 1: "X", 2: "O"}
+        symbols = {None: " ", 1: "X", 2: "O"}
 
         top = "╭───┬───┬───╮"
         mid = "├───┼───┼───┤"
@@ -121,7 +131,7 @@ class TicTacToe(GameBase):
         if current_player is not None:
             result += f"\n\nCurrent player: {current_player}"
 
-        print(result)
+        return result
 
     # --------------------------------------------------------------
     # Internal helper logic
@@ -130,14 +140,18 @@ class TicTacToe(GameBase):
         """Check if any row/col/diagonal has 3 in a row."""
         board = self.state.board
         lines = []
+        # Collect all lines (rows, cols, diagonals)
         lines.extend(get_rows(board))
         lines.extend(get_cols(board))
         lines.extend(get_diagonals(board))
+
         for line in lines:
-            if all_equal(line):
+            # 1. Check line[0] is not None (prevents winning with empty lines)
+            # 2. Check if all elements in the line equal the first element
+            if line[0] is not None and np.all(line == line[0]):
                 return True
         return False
-    
+        
     # Needed for apply_move to get to the next turn gracefully
     def _increment_to_next_turn(self) -> None:
         if self.current_player() == 1:

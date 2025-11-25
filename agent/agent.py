@@ -3,7 +3,7 @@ A class representing an agent in a simulation with various attributes and behavi
 """
 
 import numpy as np
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum, auto
 
 
@@ -16,12 +16,8 @@ class State(Enum):
 
 @dataclass
 class Agent:
-    _core_move: np.ndarray = np.array(
-        []
-    )  # The initial move that an agent will make in a simulation (based on the initial board state before simulating)
-    _move: np.ndarray = np.array(
-        []
-    )  # The move that the agent is going to make on a given turn in the simulation.
+    _core_move: np.ndarray = field(default_factory=lambda: np.array([]))  # The initial move that an agent will make in a simulation (based on the initial board state before simulating)
+    _move: np.ndarray = field(default_factory=lambda: np.array([]))  # The move that the agent is going to make on a given turn in the simulation.
     _change: bool = (
         False  # A boolean indicating whether the agent should change its coreMove in the next simulation.
     )
@@ -94,7 +90,3 @@ class Agent:
     def player_id(self, value: int):
         """Sets the player id (e.g. 1 or 2)."""
         self._player_id = value
-
-    def get_top_move(self):
-        """Reads omnicron (the collective equilibria so far)."""
-        return np.array([])

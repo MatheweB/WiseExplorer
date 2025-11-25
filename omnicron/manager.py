@@ -1,20 +1,20 @@
-# manager.py
 import os
 import duckdb
 import numpy as np
 
-from serializers import serialize_array, deserialize_array, hash_array
-
-# Classes
+from omnicron.serializers import serialize_array, deserialize_array, hash_array
 from agent.agent import State
 from games.game_state import GameState
 
-# outcome scoring
-OUTCOME_SCORE = {2: 3, 1: 2, 0: 1, -1: 0}
-CERTAINTY_WEIGHT = 100
-
 
 class GameMemory:
+    """
+    Stores game states and moves in a DuckDB table per game.
+
+    - Each (board, move, outcome, current_player) combination has a count.
+    - Non-loss moves are always preferred over loss moves.
+    """
+
     def __init__(
         self,
         base_dir="omnicron/game_memory/games",
@@ -26,34 +26,35 @@ class GameMemory:
         self.con = duckdb.connect(db_path, read_only=False)
         self.known = set()
 
-    # --------------------------
-    # table creation
-    # --------------------------
+    # ------------------------------------------------------------
+    # TABLE INITIALIZATION
+    # ------------------------------------------------------------
     def _ensure_table(self, game_id: str):
         table = f"plays_{game_id}"
         if table in self.known:
             return
 
-        sql = f"""
-        CREATE TABLE IF NOT EXISTS {table} (
-            board_hash BIGINT,
-            move_hash BIGINT,
-            board_bytes BLOB,
-            move_bytes BLOB,
-            board_dtype TEXT,
-            board_dtype2 TEXT,
-            board_shape TEXT,
-            move_dtype TEXT,
-            move_dtype2 TEXT,
-            move_shape TEXT,
-            outcome TINYINT,
-            current_player TINYINT,     -- NEW COLUMN
-            count INTEGER
-        );
-        """
-        self.con.execute(sql)
+        self.con.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS {table} (
+                board_hash BIGINT,
+                move_hash BIGINT,
+                board_bytes BLOB,
+                move_bytes BLOB,
+                board_dtype TEXT,
+                board_dtype2 TEXT,
+                board_shape TEXT,
+                move_dtype TEXT,
+                move_dtype2 TEXT,
+                move_shape TEXT,
+                outcome TINYINT,
+                current_player TINYINT,
+                count INTEGER
+            );
+            """
+        )
 
-        # If parquet exists, load it once
+        # Load snapshot if exists
         parquet_path = f"{self.base_dir}/{game_id}/plays.parquet"
         if os.path.exists(parquet_path):
             self.con.execute(
@@ -62,60 +63,61 @@ class GameMemory:
 
         self.known.add(table)
 
-
-    # --------------------------
-    # PUBLIC API: WRITE
-    # --------------------------
-    def write(self, game_id: str, game_state: GameState, outcome: State, move: np.ndarray):
-        """
-        Stores (board, move, outcome) and increments count if duplicate exists.
-        Very readable, simple, synchronous.
-        """
-        board = game_state.board
-        current_player = game_state.current_player
+    # ------------------------------------------------------------
+    # WRITE OPERATION
+    # ------------------------------------------------------------
+    def write(
+        self, game_id: str, game_state: GameState, outcome: State, move: np.ndarray
+    ):
         game_id = game_id.lower().replace(" ", "_")
-
-        self._ensure_table(game_id)
         table = f"plays_{game_id}"
+        self._ensure_table(game_id)
 
-        # serialize
-        bh = hash_array(board)
-        mh = hash_array(move)
-        (b_bytes, b_dt, b_dt2, b_shape) = serialize_array(board)
-        (m_bytes, m_dt, m_dt2, m_shape) = serialize_array(move)
+        board, player = game_state.board, game_state.current_player
 
-        # Try update count
-        update = f"""
-            UPDATE {table}
-            SET count = count + 1
-            WHERE board_hash={bh}
-            AND move_hash={mh}
-            AND outcome={outcome.value}
-            AND current_player={current_player};
-        """
-        self.con.execute(update)
+        bh = int(hash_array(board))
+        mh = int(hash_array(move))
 
-        # Check if row existed
-        check = f"""
-            SELECT 1 FROM {table}
-            WHERE board_hash={bh} AND move_hash={mh} AND outcome={outcome.value}
+        b_bytes, b_dt, b_dt2, b_shape = serialize_array(board)
+        m_bytes, m_dt, m_dt2, m_shape = serialize_array(move)
+
+        params = (bh, mh, outcome.value, player)
+
+        # Check for existing row
+        row = self.con.execute(
+            f"""
+            SELECT count FROM {table}
+            WHERE board_hash=? AND move_hash=? 
+            AND outcome=? AND current_player=?
             LIMIT 1;
-        """
-        exists = self.con.execute(check).fetchone()
+            """,
+            params,
+        ).fetchone()
 
-        if not exists:
-            insert = f"""
-            INSERT INTO {table} (
-                board_hash, move_hash,
-                board_bytes, move_bytes,
-                board_dtype, board_dtype2, board_shape,
-                move_dtype, move_dtype2, move_shape,
-                outcome, current_player, count
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
-            """
+        if row:
+            # Increment count
             self.con.execute(
-                insert,
+                f"""
+                UPDATE {table}
+                SET count = count + 1
+                WHERE board_hash=? AND move_hash=?
+                AND outcome=? AND current_player=?;
+                """,
+                params,
+            )
+        else:
+            # Insert new row
+            self.con.execute(
+                f"""
+                INSERT INTO {table} (
+                    board_hash, move_hash,
+                    board_bytes, move_bytes,
+                    board_dtype, board_dtype2, board_shape,
+                    move_dtype, move_dtype2, move_shape,
+                    outcome, current_player, count
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                """,
                 (
                     bh,
                     mh,
@@ -128,57 +130,86 @@ class GameMemory:
                     m_dt2,
                     m_shape,
                     outcome.value,
-                    current_player,   # NEW
+                    player,
                     1,
                 ),
             )
 
-        # always persist simple parquet snapshot (small + simple)
+        # Save Parquet snapshot
         game_dir = f"{self.base_dir}/{game_id}"
         os.makedirs(game_dir, exist_ok=True)
         pq = f"{game_dir}/plays.parquet"
         self.con.execute(f"COPY (SELECT * FROM {table}) TO '{pq}' (FORMAT PARQUET)")
 
-    # --------------------------
-    # PUBLIC API: READ BEST MOVE
-    # --------------------------
-    def get_best_move(self, game_id: str, game_state: GameState) -> np.ndarray | None:
+    # ------------------------------------------------------------
+    # READ BEST MOVE
+    # ------------------------------------------------------------
+    def get_best_move(
+        self, game_id: str, game_state: GameState, debug_move: bool = False
+    ) -> np.ndarray | None:
         """
-        Returns best move for a given board, or None.
-        Certainty scoring = count*W + outcome_score.
+        Returns the best move for a given game state.
+        If debug_move=True, prints detailed distributions of considered moves.
         """
-        board = game_state.board
-        current_player = game_state.current_player
         game_id = game_id.lower().replace(" ", "_")
-
-        self._ensure_table(game_id)
         table = f"plays_{game_id}"
+        self._ensure_table(game_id)
 
-        bh = hash_array(board)
+        bh = int(hash_array(game_state.board))
+        player = game_state.current_player
+        loss_val = State.LOSS.value
 
-        sql = f"""
-        SELECT
-            move_bytes,
-            move_dtype2,
-            move_shape,
-            (count * {CERTAINTY_WEIGHT} +
-                CASE outcome
-                    WHEN 2 THEN 3
-                    WHEN 1 THEN 2
-                    WHEN 0 THEN 1
-                    WHEN -1 THEN 0
-                END
-            ) AS score
-        FROM {table}
-        WHERE board_hash = {bh}
-        AND current_player = {current_player}   -- NEW FILTER
-        ORDER BY score DESC
-        LIMIT 1;
-        """
+        # Query for non-loss moves first
+        rows = self.con.execute(
+            f"""
+            SELECT move_bytes, move_dtype, move_shape, outcome, count
+            FROM {table}
+            WHERE board_hash=? AND current_player=? AND outcome != ?
+            ORDER BY count DESC, outcome DESC;
+            """,
+            (bh, player, loss_val),
+        ).fetchall()
 
-        row = self.con.execute(sql).fetchone()
-        if not row:
-            return None
+        if debug_move:
+            print(f"\n--- DEBUG: Non-loss moves for player {player} ---")
+            if not rows:
+                print("No non-loss moves found.")
+            for i, (b, dt, shape, outcome, count) in enumerate(rows):
+                move = deserialize_array(b, dt, shape)
+                print(f"[{i}] Move: {move}, Outcome: {State(outcome).name}, Count: {count}")
 
-        move_bytes, move_dt2, move_shape = row[0], row[1], row[2]
-        return deserialize_array(move_bytes, move_dt2, move_shape)
+        if rows:
+            # Pick the first (highest count / best outcome)
+            selected = rows[0]
+            move = deserialize_array(selected[0], selected[1], selected[2])
+            if debug_move:
+                print(f"-> Selected move: {move} (Reason: highest count / non-loss)")
+            return move
+
+        # Fallback to loss-only moves
+        rows = self.con.execute(
+            f"""
+            SELECT move_bytes, move_dtype, move_shape, outcome, count
+            FROM {table}
+            WHERE board_hash=? AND current_player=? AND outcome = ?
+            ORDER BY count DESC;
+            """,
+            (bh, player, loss_val),
+        ).fetchall()
+
+        if debug_move:
+            print(f"\n--- DEBUG: Loss moves for player {player} ---")
+            if not rows:
+                print("No moves found at all.")
+            for i, (b, dt, shape, outcome, count) in enumerate(rows):
+                move = deserialize_array(b, dt, shape)
+                print(f"[{i}] Move: {move}, Outcome: {State(outcome).name}, Count: {count}")
+
+        if rows:
+            selected = rows[0]
+            move = deserialize_array(selected[0], selected[1], selected[2])
+            if debug_move:
+                print(f"-> Selected move: {move} (Reason: fallback to loss moves)")
+            return move
+
+        return None

@@ -26,9 +26,12 @@ def get_cols(board: np.ndarray) -> np.ndarray:
 
 def get_diagonals(board: np.ndarray) -> List[np.ndarray]:
     """Return both major diagonals from a square board as NumPy arrays."""
-    return [np.diagonal(board), np.diagonal(np.fliplr(board))]
+    return [
+        board.diagonal(),            # Top-Left to Bottom-Right
+        np.fliplr(board).diagonal()  # Top-Right to Bottom-Left
+    ]
 
 
 def board_full(board: np.ndarray) -> bool:
     """Return True if every space is filled."""
-    return bool(np.all(board is not None))
+    return bool(np.all(board != None))
