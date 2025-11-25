@@ -36,7 +36,7 @@ class TicTacToe(GameBase):
         Returns the name of the game we're playing (e.g. tic_tac_toe)
         """
         return "tic_tac_toe"
-    
+
     def clone(self) -> "TicTacToe":
         """Return a shallow copy of the game."""
         return copy(self)
@@ -51,6 +51,11 @@ class TicTacToe(GameBase):
         """
         return self.state
 
+    def set_state(self, game_state: GameState) -> None:
+        """
+        Return the current state of the game.
+        """
+        self.state = game_state
 
     def current_player(self) -> int:
         """Return the index of the current player (0 or 1)."""
@@ -72,8 +77,8 @@ class TicTacToe(GameBase):
         # Check win
         if self._check_winner():
             self.winner = player
-        # Switch player
-        self.state.current_player = 1 - self.state.current_player
+        # Change current_player variables
+        self._increment_to_next_turn()
 
     def is_over(self) -> bool:
         """Game ends if someone won or board is full."""
@@ -92,6 +97,32 @@ class TicTacToe(GameBase):
             return State.NEUTRAL
         return State.WIN if self.winner == agent_id else State.LOSS
 
+    def print_state(self) -> None:
+        """
+        Prints out the current state of the game in a visually appealing way
+        """
+        symbols = {0: " ", 1: "X", 2: "O"}
+
+        top = "╭───┬───┬───╮"
+        mid = "├───┼───┼───┤"
+        bot = "╰───┴───┴───╯"
+
+        board = self.state.board
+        current_player = self.state.current_player
+        lines = [top]
+        for i, row in enumerate(board):
+            line = "│ " + " │ ".join(symbols[x] for x in row) + " │"
+            lines.append(line)
+            if i < 2:
+                lines.append(mid)
+        lines.append(bot)
+
+        result = "\n".join(lines)
+        if current_player is not None:
+            result += f"\n\nCurrent player: {current_player}"
+
+        print(result)
+
     # --------------------------------------------------------------
     # Internal helper logic
     # --------------------------------------------------------------
@@ -106,3 +137,10 @@ class TicTacToe(GameBase):
             if all_equal(line):
                 return True
         return False
+    
+    # Needed for apply_move to get to the next turn gracefully
+    def _increment_to_next_turn(self) -> None:
+        if self.current_player() == 1:
+            self.get_state().current_player = 2
+        else:
+            self.get_state().current_player = 1
