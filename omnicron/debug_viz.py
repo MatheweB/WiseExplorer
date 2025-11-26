@@ -23,6 +23,31 @@ GRAY_FG = "\033[38;5;244m"
 BEST_BG = "\033[48;5;21m"
 BEST_FG = "\033[38;5;255m"
 
+# --- Column Width Definitions (Used for alignment) ---
+WIDTH_MOVE = 10
+WIDTH_STAT = 5
+WIDTH_CERT_UTIL = 6
+WIDTH_TOTAL = 6
+WIDTH_OPP_MOVE = 14
+WIDTH_OPP_UTIL = 6
+WIDTH_OPP_CERT = 6
+WIDTH_NOTES_MIN = 20 # Arbitrary large value for the right-most, non-fixed column
+
+# Total calculated width for the main summary table
+TOTAL_WIDTH = (
+    1  # Initial space
+    + WIDTH_MOVE
+    + 3  # Separator ' │ '
+    + (WIDTH_STAT * 4) + 3 # pW+pT+pN+pL + 3 spaces
+    + 3  # Separator ' │ '
+    + (WIDTH_CERT_UTIL * 3) + 3 # Cert/Util/Adj + 3 spaces
+    + WIDTH_TOTAL
+    + 3  # Separator ' │ '
+    + WIDTH_OPP_MOVE + 1 + WIDTH_OPP_UTIL + 1 + WIDTH_OPP_CERT # OPP_REPLY/OPP_U/OPP_C + 2 spaces
+    + 3  # Separator ' │ '
+    + WIDTH_NOTES_MIN # Note column
+)
+
 # -------------------------
 # Helpers
 # -------------------------
@@ -102,18 +127,32 @@ def render_debug(board: np.ndarray,
     out_lines: List[str] = []
     out_lines.append("")
     out_lines.append(f"{BOLD}Move Analysis Summary{RESET}")
-    out_lines.append(f"{DIM}{'=' * 110}{RESET}")
+    # Use TOTAL_WIDTH for separator alignment
+    out_lines.append(f"{DIM}{'=' * (TOTAL_WIDTH - 2)}{RESET}") 
+    
+    # ------------------------------------------------------------------
+    # Header construction using defined widths for guaranteed alignment
+    # ------------------------------------------------------------------
     header = (
-        f" {'Move':<10s} │ {'pW':<5s} {'pT':<5s} {'pN':<5s} {'pL':<5s} │ "
-        f"{'Cert':<6s} {'Util':<6s} {'Adj':<6s} {'Tot':<6s} │ {'OPP_REPLY':<14s} {'OPP_U':<6s} {'OPP_C':<6s} │ Note"
+        f" {'Move':<{WIDTH_MOVE}s} │ "
+        f"{'pW':<{WIDTH_STAT}s} {'pT':<{WIDTH_STAT}s} {'pN':<{WIDTH_STAT}s} {'pL':<{WIDTH_STAT}s} │ "
+        f"{'Cert':<{WIDTH_CERT_UTIL}s} {'Util':<{WIDTH_CERT_UTIL}s} {'Adj':<{WIDTH_CERT_UTIL}s} {'Tot':<{WIDTH_TOTAL}s} │ "
+        f"{'OPP_REPLY':<{WIDTH_OPP_MOVE}s} {'OPP_U':<{WIDTH_OPP_UTIL}s} {'OPP_C':<{WIDTH_OPP_CERT}s} │ Note"
     )
     out_lines.append(header)
-    out_lines.append(f"{DIM}{'-' * 110}{RESET}")
+    out_lines.append(f"{DIM}{'-' * (TOTAL_WIDTH - 2)}{RESET}") # Use TOTAL_WIDTH for separator alignment
 
     sorted_rows = sorted(debug_rows, key=lambda d: d.get("sort_key", (0, 0, 0)), reverse=True)
+    
+    # ------------------------------------------------------------------
+    # Row printing with robust padding for optional fields
+    # ------------------------------------------------------------------
     for d in sorted_rows:
+        # Move
         mv = d.get("move_array")
         mv_s = f"[{mv[0]}, {mv[1]}]" if mv is not None else "[]"
+        
+        # Player Stats
         pW = d.get("pW", 0.0)
         pT = d.get("pT", 0.0)
         pN = d.get("pN", 0.0)
@@ -122,18 +161,35 @@ def render_debug(board: np.ndarray,
         util = d.get("utility", 0.0)
         adj = d.get("adjusted_utility", 0.0)
         tot = d.get("total", 0)
-        opp_flag = "✅" if d.get("opponent_data_exists") else ""
-        adj_flag = "✅" if d.get("adjusted") else ""
-        best = "★ BEST" if d.get("is_best") else ""
+
+        # Opponent Move
         opp_move = d.get("opponent_best_move")
         opp_move_s = f"[{opp_move[0]}, {opp_move[1]}]" if opp_move else "--"
-        opp_u = d.get("opponent_best_util")
+        
+        # Opponent Stats (using the correct key and robust padding)
+        opp_u = d.get("opponent_best_util_for_them") # Fixed key lookup
         opp_c = d.get("opponent_best_cert")
+        
+        # Create padded string representations for the optional fields
+        # If None, use a string of spaces equal to the WIDTH_OPP_UTIL/CERT to maintain alignment
+        opp_u_str = f"{opp_u:0.3f}" if opp_u is not None else " " * WIDTH_OPP_UTIL
+        opp_c_str = f"{opp_c:0.3f}" if opp_c is not None else " " * WIDTH_OPP_CERT
+        
+        # Flags/Notes (Final Fix: Use join to eliminate spurious spaces)
+        opp_flag = "✅" if d.get("opponent_data_exists") else ""
+        adj_flag = "✅" if d.get("adjusted") else ""
         danger_mark = "🔥" if d.get("dangerous") else ""
+        best = "★ BEST" if d.get("is_best") else ""
+
+        # Join only non-empty items to create a perfectly spaced notes string
+        notes_list = [opp_flag, adj_flag, danger_mark, best]
+        notes = " ".join(item for item in notes_list if item)
+        
         out_lines.append(
-            f" {mv_s:<10s} │ {pW:0.3f} {pT:0.3f} {pN:0.3f} {pL:0.3f} │ "
-            f"{cert:0.3f} {util:0.3f} {adj:0.3f} {tot:6d} │ "
-            f"{opp_move_s:<14s} {('' if opp_u is None else f'{opp_u:0.3f}'):<6s} {('' if opp_c is None else f'{opp_c:0.3f}'):<6s} │ {opp_flag} {adj_flag} {danger_mark} {best}"
+            f" {mv_s:<{WIDTH_MOVE}s} │ "
+            f"{pW:0.3f} {pT:0.3f} {pN:0.3f} {pL:0.3f} │ "
+            f"{cert:0.3f} {util:0.3f} {adj:0.3f} {tot:{WIDTH_TOTAL}d} │ "
+            f"{opp_move_s:<{WIDTH_OPP_MOVE}s} {opp_u_str:<{WIDTH_OPP_UTIL}s} {opp_c_str:<{WIDTH_OPP_CERT}s} │ {notes}"
         )
 
     out_lines.append("")

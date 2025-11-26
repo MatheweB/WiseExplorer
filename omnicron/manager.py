@@ -28,7 +28,7 @@ db = SqliteDatabase(None)
 
 
 # ===========================================================
-# NORMALIZED TABLES (unchanged)
+# NORMALIZED TABLES
 # ===========================================================
 class Position(Model):
     """One row per unique board."""
@@ -107,7 +107,30 @@ class GameMemory:
         db.execute_sql("CREATE INDEX IF NOT EXISTS idx_ps_act ON play_stats(game_id, acting_player);")
 
     # -------------------------------------------------------
-    # WRITE OBSERVATION (unchanged)
+    # Board Normalization Helper
+    # -------------------------------------------------------
+    def _normalize_board(self, board) -> np.ndarray:
+        """
+        Normalize board representation for consistent hashing.
+        Converts None to 0 and ensures consistent dtype.
+        """
+        arr = np.array(board, copy=True)
+        
+        # If object dtype (contains None), convert to numeric
+        if arr.dtype == object:
+            # Replace None with 0
+            arr = np.where(arr == None, 0, arr)
+            # Convert to int64 for consistency
+            arr = arr.astype(np.int64)
+        
+        # Ensure consistent dtype even if already numeric
+        if arr.dtype != np.int64:
+            arr = arr.astype(np.int64)
+        
+        return arr
+
+    # -------------------------------------------------------
+    # WRITE OBSERVATION (with board normalization)
     # -------------------------------------------------------
     def write(
         self,
@@ -122,7 +145,8 @@ class GameMemory:
 
         gid = str(game_id).lower().replace(" ", "_")
 
-        board_arr = np.array(snapshot_state.board, copy=True)
+        # Normalize board before hashing
+        board_arr = self._normalize_board(snapshot_state.board)
         move_arr = np.array(move, copy=True)
         snapshot_player = int(snapshot_state.current_player)
 
@@ -182,7 +206,7 @@ class GameMemory:
                 pass
 
     # -------------------------------------------------------
-    # scoring helper (unchanged)
+    # scoring helper
     # -------------------------------------------------------
     def _score(self, row: PlayStats):
         win = cast(int, row.win_count)
@@ -221,7 +245,6 @@ class GameMemory:
 
     # -------------------------------------------------------
     # Helper: compute best opponent utility across a set of opponents
-    # (now returns chosen opponent move info for debugging and both-perspective utils)
     # -------------------------------------------------------
     def _best_opponent_reply_on_board(self, gid: str, board: np.ndarray, opponents: List[int]) -> Tuple[
         Optional[float], Optional[float], Optional[float], Optional[int], Optional[int], Optional[List[int]]
@@ -236,7 +259,10 @@ class GameMemory:
             - best_util_for_them is the utility from the opponent's POV (Win=+1, Loss=-1)
             - When used in get_best_move we will compute best_util_for_me = -best_util_for_them
         """
-        bh = int(hash_array(board))
+        # Normalize board before hashing
+        board_normalized = self._normalize_board(board)
+        bh = int(hash_array(board_normalized))
+        
         best_pW = -1.0
         best_util_for_them = -9999.0
         best_cert = -1.0
@@ -313,64 +339,88 @@ class GameMemory:
     # BEST MOVE (parameterless N-player minimax with risk-adjustment)
     # -------------------------------------------------------
     def get_best_move(self, game_id: str, game_state: GameState, debug_move=False):
+        """
+        Get the best move for the current game state.
+        
+        Args:
+            game_id: Game identifier
+            game_state: Current game state
+            debug_move: If True, print debug visualization
+        """
         gid = str(game_id).lower().replace(" ", "_")
         snapshot_player = int(game_state.current_player)
-        board_arr = np.array(game_state.board, copy=True)
+        
+        # Normalize board before hashing
+        board_arr = self._normalize_board(game_state.board)
         bh = int(hash_array(board_arr))
 
-        # ----------------------------------------------------
         # Gather all players in the game (opponents = all != snapshot_player)
-        # ----------------------------------------------------
         q = PlayStats.select(PlayStats.snapshot_player).where(
             PlayStats.game_id == gid
         ).distinct()
         players_in_game = [int(r.snapshot_player) for r in q]
         opponents = [p for p in players_in_game if p != snapshot_player]
 
-        # Candidate moves for this snapshot player
+        # Candidate moves for this snapshot player from training data
         rows = list(
             PlayStats.select().where(
-                (PlayStats.game_id == gid) &
-                (PlayStats.board_hash == bh) &
-                (PlayStats.snapshot_player == snapshot_player)
+                (PlayStats.game_id == gid) 
+                & (PlayStats.board_hash == bh) 
+                & (PlayStats.snapshot_player == snapshot_player)
             )
         )
+        
         if not rows:
+            # No data for this position yet - silently return None
             return None
 
         candidates = []
         for r in rows:
-            win = int(r.win_count); tie = int(r.tie_count); neu = int(r.neutral_count); loss = int(r.loss_count)
+            win = int(r.win_count)
+            tie = int(r.tie_count)
+            neu = int(r.neutral_count)
+            loss = int(r.loss_count)
             total = win + tie + neu + loss
+            
             if total == 0:
                 pW = pT = pN = pL = 0.0
             else:
-                pW = win / total; pT = tie / total; pN = neu / total; pL = loss / total
-
+                pW = win / total
+                pT = tie / total
+                pN = neu / total
+                pL = loss / total
+            
             if int(r.acting_player) != snapshot_player:
                 # Flip outcomes to snapshot player's POV
                 pW, pL = pL, pW
-
+            
             cert = max(pW, pT, pN, pL)
-            util = pW*1 + pT*1 + pN*1 - pL*1  # parameterless, including pN
+            util = pW*1 + pT*1 + pN*1 - pL*1
+            
             candidates.append((cert, util, total, r.move_hash, pW, pT, pN, pL))
 
         adjusted_entries: List[dict] = []
+        
         for cert, util, total, mh, pW, pT, pN, pL in candidates:
             next_board = None
+            move_coords = None
+            
             try:
                 mv = Move.get((Move.game_id == gid) & (Move.move_hash == mh))
                 meta = json.loads(mv.meta_json)
                 move_arr = deserialize_array(mv.move_bytes, meta["dtype"], json.dumps(meta["shape"]))
                 arr = np.array(move_arr).ravel()
+                
                 if arr.size >= 2:
                     rpos, cpos = int(arr[0]), int(arr[1])
+                    move_coords = (rpos, cpos)
                     next_board = np.array(board_arr, copy=True)
                     next_board[rpos, cpos] = snapshot_player
             except Exception:
                 next_board = None
 
-            # Evaluate opponent response after this move: find best opponent reply on B'
+            # Initialize opponent reply variables
+            opp_pW = None
             opp_for_them = None
             opp_for_me = None
             opp_cert = None
@@ -379,57 +429,65 @@ class GameMemory:
             opponent_best_move_hash = None
             opponent_best_player = None
 
+            # Evaluate opponent response after this move
             if next_board is not None:
-                next_bh = int(hash_array(next_board))
-
-                # Which players in-game have entries on this next_bh?
+                next_board_normalized = self._normalize_board(next_board)
+                next_bh = int(hash_array(next_board_normalized))
+                
+                # Which players have entries on this next board?
                 opps_next_q = PlayStats.select(PlayStats.snapshot_player).where(
-                    (PlayStats.game_id == gid) & (PlayStats.board_hash == next_bh)
+                    (PlayStats.game_id == gid) 
+                    & (PlayStats.board_hash == next_bh)
                 ).distinct()
-                opps_next = [int(r.snapshot_player) for r in opps_next_q if int(r.snapshot_player) != snapshot_player]
-
+                opps_next = [
+                    int(r.snapshot_player) 
+                    for r in opps_next_q 
+                    if int(r.snapshot_player) != snapshot_player
+                ]
+                
                 if opps_next:
                     (
-                        opp_pW,
-                        opp_util_for_them,
-                        opp_cert_val,
-                        opponent_best_player,
-                        opponent_best_move_hash,
+                        opp_pW, 
+                        opp_util_for_them, 
+                        opp_cert_val, 
+                        opponent_best_player, 
+                        opponent_best_move_hash, 
                         opponent_best_move
-                    ) = self._best_opponent_reply_on_board(gid, next_board, opps_next)
-
-                    # opp_util_for_them is utility from opponent POV (Win=+1)
-                    # convert to our perspective:
+                    ) = self._best_opponent_reply_on_board(gid, next_board_normalized, opps_next)
+                    
                     if opp_util_for_them is not None:
                         opp_for_them = float(opp_util_for_them)
                         opp_for_me = -float(opp_util_for_them)
                         opp_cert = float(opp_cert_val) if opp_cert_val is not None else None
                         opponent_data_exists = True
 
-            # Risk-adjusted utility (correct perspective)
-            # Use opponent certainty as a weighting on how much the opponent's reply matters
+            # Risk-adjusted utility
             risk_adjusted_util = util
             adjusted = False
-            if opp_for_me is not None:
+            
+            if opp_for_me is not None and opp_cert is not None:
                 alpha = 1.0
-                expected_reply_damage = opp_for_me * (opp_cert or 0.0)
+                # Weight opponent's reply by their certainty
+                expected_reply_damage = opp_for_me * opp_cert
                 risk_adjusted_util = util + alpha * expected_reply_damage
                 adjusted = (risk_adjusted_util != util)
 
-            # Forced-win detection (only after move)
+            # Forced-win detection (using properly scoped variables)
             def is_forced_win(pW_val: Optional[float], cert_val: Optional[float]) -> bool:
                 if pW_val is None or cert_val is None:
                     return False
-                return float(cert_val) == 1.0 and float(pW_val) > 0.5
-
-            forced_after = is_forced_win(opp_pW if 'opp_pW' in locals() else None, opp_cert)
+                return float(cert_val) >= 0.95 and float(pW_val) >= 0.95
+            
+            forced_after = is_forced_win(opp_pW, opp_cert)
             blocked = False
             created = forced_after
 
-            # Dangerous if opponent best util (their perspective) >= 1.0 (strict forced win)
+            # Mark as dangerous if opponent has a strong reply
             dangerous = False
-            if opp_for_them is not None and opp_for_them >= 1.0:
-                dangerous = True
+            if opp_for_them is not None and opp_cert is not None:
+                # Dangerous if opponent has high utility AND high certainty
+                if opp_for_them >= 0.9 and opp_cert >= 0.8:
+                    dangerous = True
 
             adjusted_entries.append({
                 "cert": cert,
@@ -455,7 +513,11 @@ class GameMemory:
             })
 
         # Sort by adjusted utility → total → certainty
-        adjusted_entries.sort(key=lambda v: (v["adjusted_util"], v["total"], v["cert"]), reverse=True)
+        adjusted_entries.sort(
+            key=lambda v: (v["adjusted_util"], v["total"], v["cert"]), 
+            reverse=True
+        )
+
         if not adjusted_entries:
             return None
 
@@ -469,13 +531,18 @@ class GameMemory:
                 try:
                     mv = Move.get((Move.game_id == gid) & (Move.move_hash == entry["move_hash"]))
                     meta = json.loads(mv.meta_json)
-                    move_arr = deserialize_array(mv.move_bytes, meta["dtype"], json.dumps(meta["shape"]))
+                    move_arr = deserialize_array(
+                        mv.move_bytes, 
+                        meta["dtype"], 
+                        json.dumps(meta["shape"])
+                    )
                 except Exception:
                     continue
 
                 debug_rows.append({
                     "move_hash": entry["move_hash"],
-                    "move_array": np.array(move_arr).tolist() if not isinstance(move_arr, list) else move_arr,
+                    "move_array": np.array(move_arr).tolist() 
+                        if not isinstance(move_arr, list) else move_arr,
                     "certainty": float(entry["cert"]),
                     "utility": float(entry["util"]),
                     "adjusted_utility": float(entry["adjusted_util"]),
@@ -491,19 +558,30 @@ class GameMemory:
                     "opponent_best_move": entry.get("opponent_best_move"),
                     "opponent_best_move_hash": entry.get("opponent_best_move_hash"),
                     "opponent_best_player": entry.get("opponent_best_player"),
-                    "opponent_best_util_for_them": float(entry["opponent_best_util_for_them"]) if entry.get("opponent_best_util_for_them") is not None else None,
-                    "opponent_best_util_for_me": float(entry["opponent_best_util_for_me"]) if entry.get("opponent_best_util_for_me") is not None else None,
-                    "opponent_best_cert": float(entry["opponent_best_cert"]) if entry.get("opponent_best_cert") is not None else None,
+                    "opponent_best_util_for_them": 
+                        float(entry["opponent_best_util_for_them"]) 
+                        if entry.get("opponent_best_util_for_them") is not None else None,
+                    "opponent_best_util_for_me": 
+                        float(entry["opponent_best_util_for_me"]) 
+                        if entry.get("opponent_best_util_for_me") is not None else None,
+                    "opponent_best_cert": 
+                        float(entry["opponent_best_cert"]) 
+                        if entry.get("opponent_best_cert") is not None else None,
                     "dangerous": bool(entry.get("dangerous", False)),
                     "is_best": entry["move_hash"] == best_hash,
                     "sort_key": (entry["adjusted_util"], entry["total"], entry["cert"]),
                 })
+
             render_debug(board_arr, debug_rows)
 
         # Return deserialized best move
         try:
             mv = Move.get((Move.game_id == gid) & (Move.move_hash == best_hash))
             meta = json.loads(mv.meta_json)
-            return deserialize_array(mv.move_bytes, meta["dtype"], json.dumps(meta["shape"]))
+            return deserialize_array(
+                mv.move_bytes, 
+                meta["dtype"], 
+                json.dumps(meta["shape"])
+            )
         except Exception:
             return None
