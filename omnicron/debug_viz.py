@@ -1,8 +1,13 @@
 """
 Terminal debug visualizer for game move statistics (parameterless).
 
-Primary metric: certainty (max of Win/Tie/Loss probability)
-Secondary metric: utility (Win=+1, Tie=0, Loss=-1)
+Primary metric: certainty (max of Win/Tie/Neutral/Loss probability)
+Secondary metric: utility (Win=+1, Tie=+1, Neutral=+1, Loss=-1) for parameterless setup.
+
+This renderer now:
+ - Shows opponent best reply (coords + util + cert) per candidate
+ - Marks 'dangerous' moves (strict threshold: opponent_best_util >= 1.0) in red
+ - Prints a wider Move Analysis Summary with Opp info
 """
 
 from typing import List, Dict, Any, Optional
@@ -59,11 +64,17 @@ def render_debug(board: np.ndarray,
                  return_str: bool = False) -> Optional[str]:
 
     board_arr = np.array(board)
+    if board_arr.ndim != 2 or board_arr.shape[0] != board_arr.shape[1]:
+        raise ValueError("board must be a square 2D array")
     N = board_arr.shape[0]
+
     primary_mat = np.full((N, N), np.nan, dtype=float)
     secondary_mat = np.full((N, N), np.nan, dtype=float)
     is_best_mat = np.zeros((N, N), dtype=bool)
     danger_mat = np.zeros((N, N), dtype=bool)
+
+    # Map move -> debug entry for easier lookups (optional)
+    entries_by_cell: Dict[tuple, Dict[str, Any]] = {}
 
     for d in debug_rows:
         try:
@@ -76,11 +87,14 @@ def render_debug(board: np.ndarray,
         secondary_mat[r, c] = float(d.get(secondary_metric, np.nan))
         is_best_mat[r, c] = bool(d.get("is_best", False))
         danger_mat[r, c] = bool(d.get("dangerous", False))
+        entries_by_cell[(r, c)] = d
 
     def mark_char(v):
         try:
-            if int(v) == 1: return "X"
-            if int(v) == -1: return "O"
+            if int(v) == 1:
+                return "X"
+            if int(v) == -1:
+                return "O"
             return "·"
         except Exception:
             return "·"
@@ -88,24 +102,43 @@ def render_debug(board: np.ndarray,
     out_lines: List[str] = []
     out_lines.append("")
     out_lines.append(f"{BOLD}Move Analysis Summary{RESET}")
-    out_lines.append(f"{DIM}{'=' * 95}{RESET}")
-    header = f" {'Move':<10s} │ {'pW':<5s} {'pT':<5s} {'pN':<5s} {'pL':<5s} │ {'Cert':<6s} {'Util':<6s} {'Adj':<6s} {'Tot':<6s} │ Note"
+    out_lines.append(f"{DIM}{'=' * 110}{RESET}")
+    header = (
+        f" {'Move':<10s} │ {'pW':<5s} {'pT':<5s} {'pN':<5s} {'pL':<5s} │ "
+        f"{'Cert':<6s} {'Util':<6s} {'Adj':<6s} {'Tot':<6s} │ {'OPP_REPLY':<14s} {'OPP_U':<6s} {'OPP_C':<6s} │ Note"
+    )
     out_lines.append(header)
-    out_lines.append(f"{DIM}{'-' * 95}{RESET}")
+    out_lines.append(f"{DIM}{'-' * 110}{RESET}")
 
     sorted_rows = sorted(debug_rows, key=lambda d: d.get("sort_key", (0, 0, 0)), reverse=True)
     for d in sorted_rows:
         mv = d.get("move_array")
-        mv_s = f"[{mv[0]}, {mv[1]}]" if mv else "[]"
-        pW = d.get("pW", 0.0); pT = d.get("pT",0.0); pN = d.get("pN",0.0); pL = d.get("pL",0.0)
-        cert = d.get("certainty",0.0); util = d.get("utility",0.0); adj = d.get("adjusted_utility",0.0)
-        tot = d.get("total",0)
+        mv_s = f"[{mv[0]}, {mv[1]}]" if mv is not None else "[]"
+        pW = d.get("pW", 0.0)
+        pT = d.get("pT", 0.0)
+        pN = d.get("pN", 0.0)
+        pL = d.get("pL", 0.0)
+        cert = d.get("certainty", 0.0)
+        util = d.get("utility", 0.0)
+        adj = d.get("adjusted_utility", 0.0)
+        tot = d.get("total", 0)
+        opp_flag = "✅" if d.get("opponent_data_exists") else ""
+        adj_flag = "✅" if d.get("adjusted") else ""
         best = "★ BEST" if d.get("is_best") else ""
-        danger = "⚠" if d.get("dangerous") else ""
-        out_lines.append(f" {mv_s:<10s} │ {pW:0.3f} {pT:0.3f} {pN:0.3f} {pL:0.3f} │ {cert:0.3f} {util:0.3f} {adj:0.3f} {tot:6d} │ {best} {danger}")
+        opp_move = d.get("opponent_best_move")
+        opp_move_s = f"[{opp_move[0]}, {opp_move[1]}]" if opp_move else "--"
+        opp_u = d.get("opponent_best_util")
+        opp_c = d.get("opponent_best_cert")
+        danger_mark = "🔥" if d.get("dangerous") else ""
+        out_lines.append(
+            f" {mv_s:<10s} │ {pW:0.3f} {pT:0.3f} {pN:0.3f} {pL:0.3f} │ "
+            f"{cert:0.3f} {util:0.3f} {adj:0.3f} {tot:6d} │ "
+            f"{opp_move_s:<14s} {('' if opp_u is None else f'{opp_u:0.3f}'):<6s} {('' if opp_c is None else f'{opp_c:0.3f}'):<6s} │ {opp_flag} {adj_flag} {danger_mark} {best}"
+        )
 
     out_lines.append("")
-    out_lines.append(f"{BOLD}Heatmap Visualizer{RESET}\n")
+    out_lines.append(f"{BOLD}Heatmap Visualizer{RESET}")
+    out_lines.append("")
 
     TL, TM, TR = "┌", "┬", "┐"
     ML, MM, MR = "├", "┼", "┤"
@@ -114,38 +147,52 @@ def render_debug(board: np.ndarray,
 
     def make_sep(left, mid, right):
         seg = H * cell_width
-        return left + mid.join([seg]*N) + right
+        return left + mid.join([seg] * N) + right
 
     out_lines.append(make_sep(TL, TM, TR))
     bar_width = max(1, cell_width - 4)
 
     for r in range(N):
-        top_line_cells, mid_line_cells, bot_line_cells = [], [], []
+        top_line_cells = []
+        mid_line_cells = []
+        bot_line_cells = []
 
         for c in range(N):
-            p_val = primary_mat[r,c]; s_val = secondary_mat[r,c]
-            m = mark_char(board_arr[r,c])
-            is_best = is_best_mat[r,c]
-            is_danger = danger_mat[r,c]
+            p_val = primary_mat[r, c]
+            s_val = secondary_mat[r, c]
+            is_best = bool(is_best_mat[r, c])
+            is_danger = bool(danger_mat[r, c])
+            m = mark_char(board_arr[r, c])
 
+            # Top: mark
             inner_top = f" {m} ".center(cell_width)
-            inner_mid = f"{p_val:.2f} {s_val:.2f}".center(cell_width) if not np.isnan(p_val) else "--".center(cell_width)
-            inner_bot = (" " + _barstr(float(p_val), bar_width) + " ").ljust(cell_width) if show_bars and not np.isnan(p_val) else " "*cell_width
+            # Mid: primary + secondary
+            p_num = f"{p_val:.2f}" if not np.isnan(p_val) else "--"
+            s_num = f"{s_val:.2f}" if not np.isnan(s_val) else "--"
+            inner_mid = f"{p_num} {s_num}".center(cell_width)
+            # Bottom: bar
+            if show_bars and not np.isnan(p_val):
+                bar = _barstr(float(p_val), bar_width)
+                inner_bot = (" " + bar + " ").ljust(cell_width)
+            else:
+                inner_bot = " " * cell_width
 
-            if is_best and cell_width >=3:
-                inner_top = "▌"+inner_top[1:-1]+"▐"
-                inner_mid = "▌"+inner_mid[1:-1]+"▐"
-                inner_bot = "▌"+inner_bot[1:-1]+"▐"
+            if is_best and cell_width >= 3:
+                inner_top = "▌" + inner_top[1:-1] + "▐"
+                inner_mid = "▌" + inner_mid[1:-1] + "▐"
+                inner_bot = "▌" + inner_bot[1:-1] + "▐"
 
             top_line_cells.append(inner_top)
             mid_line_cells.append(inner_mid)
             bot_line_cells.append(inner_bot)
 
+        # Colorize and join
         def colorize(c_idx, line_cells):
             p_val = primary_mat[r, c_idx]
-            if danger_mat[r,c_idx]:
-                bg, fg = "\033[48;5;196m", WHITE_FG  # red for dangerous
-            elif is_best_mat[r,c_idx]:
+            if danger_mat[r, c_idx]:
+                # red background for dangerous
+                bg, fg = "\033[48;5;196m", WHITE_FG
+            elif is_best_mat[r, c_idx]:
                 bg, fg = BEST_BG, BEST_FG
             else:
                 bg, fg = _bg_color_for(p_val), _fg_for(p_val)
@@ -155,9 +202,14 @@ def render_debug(board: np.ndarray,
         mid_join = V + V.join([colorize(ci, mid_line_cells) for ci in range(N)]) + V
         bot_join = V + V.join([colorize(ci, bot_line_cells) for ci in range(N)]) + V
 
-        out_lines.extend([top_join, mid_join, bot_join])
-        out_lines.append(make_sep(ML, MM, MR) if r<N-1 else make_sep(BL, BM, BR))
+        out_lines.append(top_join)
+        out_lines.append(mid_join)
+        out_lines.append(bot_join)
+
+        # Row separator
+        out_lines.append(make_sep(ML, MM, MR) if r < N - 1 else make_sep(BL, BM, BR))
 
     rendered = "\n".join(out_lines)
-    if return_str: return rendered
+    if return_str:
+        return rendered
     print(rendered)
