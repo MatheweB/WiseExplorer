@@ -12,5 +12,5 @@ tic_tac_toe_init_state = GameState(tic_tac_toe_init_board, current_player=1)
 INITIAL_STATES = {"tic_tac_toe": tic_tac_toe_init_state}
 
 TURN_DEPTH = 20
-SIMULATIONS = 50
+SIMULATIONS = 20
 SELECTED_GAME = "tic_tac_toe"
