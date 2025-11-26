@@ -1,274 +1,213 @@
-# Libraries
-import time
+# simulation.py
+# --------------------------------------------------------------
+# Fixed-agent-per-game N-player simulation with:
+#   • agent swarms (any number of agents per player)
+#   • random agent selection per player for each simulated game
+#   • correct snapshot recording
+#   • outcome storage via omnicron
+#   • clean main loop (no debug logs)
+#
+# Stack item format:
+#   (move: np.ndarray, snapshot_state: GameState, acting_player: int)
+#
+# Public API:
+#   start_simulations(players_map, game, turn_depth, simulations, omnicron)
+#
+# players_map format:
+#   {
+#       1: [Agent, Agent, ...],
+#       2: [Agent, Agent, ...],
+#       ...
+#   }
+
+from typing import Dict, List, Tuple
 import random
 import numpy as np
-from typing import Dict, Tuple, List, Optional
-from omnicron.manager import GameMemory
 
-# Classes
-from agent.agent import Agent
-from agent.agent import State
+from agent.agent import Agent, State
 from games.game_base import GameBase
 from games.game_state import GameState
-
-# Function
+from omnicron.manager import GameMemory
 from wise_explorer import wise_explorer_algorithm
 
+MoveStackItem = Tuple[np.ndarray, GameState, int]
+_TERMINAL_STATES = {State.WIN, State.LOSS, State.TIE}
 
-def randomly_assign_agent_pairs(
-    agents: List[Agent], anti_agents: List[Agent], n: Optional[int] = None
-) -> List[Tuple[int, int]]:
+
+# --------------------------------------------------------------
+# Helpers
+# --------------------------------------------------------------
+
+def reset_agent(agent: Agent) -> None:
+    """Reset the internal working state of a single agent."""
+    agent.core_move = np.array([])
+    agent.move = np.array([])
+    agent.change = False
+    agent.game_state = State.NEUTRAL
+    agent.move_depth = 0
+
+
+def _choose_agents_for_game(players_map: Dict[int, List[Agent]]) -> Dict[int, Agent]:
     """
-    Randomly pair indices from two agent lists.
-    Parameters
-    ----------
-    agents : Sequence
-        First list of agents.
-    anti_agents : Sequence
-        Second list of agents.
-    n : int, optional
-        Maximum number of pairs to return (default: as many as possible).
-    Returns
-    -------
-    list[tuple[int, int]]
-        List of `(i, j)` index pairs, shuffled randomly.
+    Randomly choose ONE agent per player for this entire simulation.
     """
-    idx1 = list(range(len(agents)))
-    idx2 = list(range(len(anti_agents)))
-    random.shuffle(idx1)
-    random.shuffle(idx2)
-    max_pairs = min(len(idx1), len(idx2))
-    if n is not None:
-        max_pairs = min(max_pairs, n)
-    return list(zip(idx1[:max_pairs], idx2[:max_pairs]))
+    chosen = {}
+    for pid, swarm in players_map.items():
+        chosen[pid] = random.choice(swarm)
+        reset_agent(chosen[pid])
+    return chosen
 
 
-# --- Helper that determines *how* to modify a pair of agents after a move has been made ---
-# The tuple is: (opponent_state, player_change, opponent_change)
-_TERMINAL_MAP: Dict[State, Tuple[State, bool, bool]] = {
-    State.WIN: (State.LOSS, False, True),
-    State.TIE: (State.TIE, True, True),
-    State.LOSS: (State.WIN, True, False),
-}
+def _apply_policy(agent: Agent, game: GameBase, omnicron: GameMemory, prune: bool) -> None:
+    """Fill agent.core_move via Wise Explorer."""
+    wise_explorer_algorithm.update_agent(agent, game, omnicron, prune)
 
 
-def _simulate_game(
+def _apply_move_and_record(
     agent: Agent,
-    anti_agent: Agent,
     game: GameBase,
-    turn_depth: int,
-    omnicron: GameMemory,
-    is_prune_stage: bool,
-) -> None:
+    acting_player: int,
+    stack: List[MoveStackItem]
+) -> State:
     """
-    Play a deterministic two-player game for *turn_depth* full cycles
-    (agent + anti_agent per cycle).
-    Parameters
-    ----------
-    agent, anti_agent : Agent
-        The two participants.  The simulator will set their `move`,
-        `game_state`, `change` and `move_depth` attributes in-place.
-    turn_depth : int
-        Number of turns (each turn consists of *agent* followed by
-        *anti_agent*).  Must be > 0.
-    game
-        A :class:`GameBase` that implements a ``get_result(move)`` method returning
-        a :class:`State` for the current board position.
-    Notes
-    -----
-    The simulator terminates early if any player wins or the game ends
-    in a tie.  Otherwise, after *turn_depth* turns all agents are marked
-    as `NEUTRAL` and `change = True`.
+    Snapshot BEFORE move, then apply.
+    stack += (move_copy, snapshot_state, acting_player)
     """
-    if turn_depth <= 0:
-        raise ValueError("turn_depth must be a positive integer")
+    snapshot = game.get_state().clone()
+    agent.move = agent.core_move
 
-    def _set_terminal(
-        player: Agent,
-        opponent: Agent,
-        player_state: State,
-    ) -> None:
-        """
-        Update *player* and *opponent* after a terminal result.
-        """
-        opp_state, p_chg, o_chg = _TERMINAL_MAP[player_state]
-        player.game_state = player_state
-        opponent.game_state = opp_state
-        player.change = p_chg
-        opponent.change = o_chg
+    move_copy = np.array(agent.move, copy=True)
+    stack.append((move_copy, snapshot, acting_player))
 
-    def _add_to_stack(
-        move_state_depth_stack: List[Tuple[np.ndarray, GameState, int]],
-        initial_game_state: GameBase,
-        player: Agent,
-        depth: int,
-    ) -> None:
-        move_state_depth_stack.append(
-            (player.move.copy(), initial_game_state.get_state().clone(), depth)
-        )
+    game.apply_move(move_copy)
 
-    # ------------------------------------------------------------------
-    # Local helper that applies a single move and updates the agents.
-    # ------------------------------------------------------------------
-    def _apply_move(
-        player: Agent,
-        opponent: Agent,
-        depth: int,
-        player_move_state_depth_stack: List[Tuple[np.ndarray, GameState, int]],
-    ) -> State:
-        """
-        Apply the move that *player* decided on, update both agents, and
-        return ``True`` if the game reached a terminal state (WIN, TIE, LOSS).
-        """
-        # Commit the move
-        player.move = player.core_move
-        initial_game_state = game.deep_clone()
-        # Ask the engine what the result is
-        game.apply_move(player.move)
-        player.game_state = game.get_result(player.player_id)
-        # Record depth for this move (both agents see the same depth)
-        player.move_depth = opponent.move_depth = depth
-        # Clone the game state to push on to data stack
-        # Resolve terminal states (if any)
-        if player.game_state in _TERMINAL_MAP:
-            _set_terminal(player, opponent, player.game_state)
-            _add_to_stack(
-                player_move_state_depth_stack, initial_game_state, player, depth
-            )
-            return player.game_state  # game finished
-        # Otherwise we are still playing
-        player.game_state = opponent.game_state = State.NEUTRAL
-        player.change = opponent.change = True
-        _add_to_stack(player_move_state_depth_stack, initial_game_state, player, depth)
-        return State.NEUTRAL  # game undecided
-
-    # ------------------------------------------------------------------
-    # Main simulation loop – one full cycle = two calls to _apply_move.
-    # ------------------------------------------------------------------
-    depth = 0
-    outcome = State.NEUTRAL
-    agent_move_state_depth_stack: List[Tuple[np.ndarray, GameState, int]] = []
-    anti_agent_move_state_depth_stack: List[Tuple[np.ndarray, GameState, int]] = []
-    while depth <= turn_depth:
-        _apply_wise_explorer(agent, anti_agent, game, omnicron, is_prune_stage)
-        # Agent's turn
-        depth += 1
-        outcome = _apply_move(agent, anti_agent, depth, agent_move_state_depth_stack)
-        if outcome in _TERMINAL_MAP:
-            break
-        # Anti-agent's turn
-        _apply_wise_explorer(agent, anti_agent, game, omnicron, is_prune_stage)
-        depth += 1
-        outcome = _apply_move(
-            anti_agent, agent, depth, anti_agent_move_state_depth_stack
-        )
-        if outcome in _TERMINAL_MAP:
-            break
-
-    if outcome is None:
-        raise ValueError("outcome cannot be None")
-
-    _store_outcome_data(
-        game.game_id(),
-        agent.game_state,
-        agent_move_state_depth_stack,
-        anti_agent.game_state,
-        anti_agent_move_state_depth_stack,
-        omnicron,
-    )
+    result = game.get_result(agent.player_id)
+    agent.game_state = result
+    return result
 
 
-def _start_simulation(
-    agents: List[Agent],
-    anti_agents: List[Agent],
-    initial_game: GameBase,
-    turn_depth: int,
-    omnicron: GameMemory,
-    is_prune_stage: bool,
-) -> GameBase:
-    pair_indices = randomly_assign_agent_pairs(agents, anti_agents)
-    for agent, anti_agent in ((agents[i1], anti_agents[i2]) for i1, i2 in pair_indices):
-        _simulate_game(
-            agent,
-            anti_agent,
-            initial_game.deep_clone(),
-            turn_depth,
-            omnicron,
-            is_prune_stage,
-        )
-    return initial_game
-
-
-# TODO(Store/record data here) data-structure = [Move :-> (BoardState, Outcome)]
-# Omnicron
 def _store_outcome_data(
     game_id: str,
-    agent_outcome: State,
-    agent_move_state_depth_stack: List[Tuple[np.ndarray, GameState, int]],
-    anti_agent_outcome: State,
-    anti_agent_move_state_depth_stack: List[Tuple[np.ndarray, GameState, int]],
-    omnicron: GameMemory,
-):
-    for agent_move, game_state, _depth in agent_move_state_depth_stack:
-        omnicron.write(game_id, game_state, agent_outcome, agent_move)
-
-    for anti_agent_move, game_state, _depth in anti_agent_move_state_depth_stack:
-        omnicron.write(game_id, game_state, anti_agent_outcome, anti_agent_move)
-
-
-def _apply_wise_explorer(
-    agent: Agent,
-    anti_agent: Agent,
-    game: GameBase,
-    omnicron: GameMemory,
-    is_prune_stage: bool,
+    stacks: Dict[int, List[MoveStackItem]],
+    results: Dict[int, State],
+    omnicron: GameMemory
 ) -> None:
-    wise_explorer_algorithm.update_agents(
-        agent, anti_agent, game, omnicron, is_prune_stage
-    )
+    """Write all moves for all players to omnicron."""
+    for pid, stack in stacks.items():
+        outcome = results[pid]
+        for move_arr, snapshot_state, acting_player in stack:
+            omnicron.write(game_id, snapshot_state, acting_player, outcome, move_arr)
 
+
+# --------------------------------------------------------------
+# Single simulated game with fixed chosen agents
+# --------------------------------------------------------------
+
+def _simulate_game(
+    players_map: Dict[int, List[Agent]],
+    game: GameBase,
+    turn_depth: int,
+    omnicron: GameMemory,
+    prune_stage: bool
+) -> None:
+    """
+    Run an entire simulation using a FIXED agent per player for the whole game.
+    """
+    num_players = game.num_players()
+
+    # Choose one agent per player
+    agents_for_game: Dict[int, Agent] = _choose_agents_for_game(players_map)
+
+    # Per-player move stacks
+    stacks = {p: [] for p in range(1, num_players + 1)}
+    final_results = {p: State.NEUTRAL for p in range(1, num_players + 1)}
+
+    depth = 0
+
+    while depth < turn_depth:
+        depth += 1
+
+        cp = game.current_player()
+        actor = agents_for_game[cp]
+
+        _apply_policy(actor, game, omnicron, prune_stage)
+        result = _apply_move_and_record(actor, game, cp, stacks[cp])
+
+        # Terminal check
+        if result in _TERMINAL_STATES or game.is_over():
+            for pid in final_results:
+                final_results[pid] = game.get_result(pid)
+            break
+
+    _store_outcome_data(game.game_id(), stacks, final_results, omnicron)
+
+
+# --------------------------------------------------------------
+# Batches
+# --------------------------------------------------------------
+
+def _run_simulation_batch(
+    players_map: Dict[int, List[Agent]],
+    game: GameBase,
+    turn_depth: int,
+    count: int,
+    omnicron: GameMemory,
+    prune_stage: bool
+) -> None:
+    """Runs `count` simulations using fixed agent tuples."""
+    for _ in range(count):
+        cloned = game.deep_clone()
+        _simulate_game(
+            players_map,
+            cloned,
+            turn_depth,
+            omnicron,
+            prune_stage
+        )
+
+
+# --------------------------------------------------------------
+# Public API
+# --------------------------------------------------------------
 
 def start_simulations(
-    agents: List[Agent],
-    anti_agents: List[Agent],
+    players_map: Dict[int, List[Agent]],
     game: GameBase,
     turn_depth: int,
     simulations: int,
-    omnicron: GameMemory,
-):
-    done = False
-    while not done:
-        # Prune stage
-        for _ in range(simulations // 2):
-            _game_from_simulation = _start_simulation(
-                agents,
-                anti_agents,
-                game.deep_clone(),
-                turn_depth,
-                omnicron,
-                is_prune_stage=True,
-            )
-        # Optimize stage
-        for _ in range(simulations // 2):
-            _game_from_simulation = _start_simulation(
-                agents,
-                anti_agents,
-                game.deep_clone(),
-                turn_depth,
-                omnicron,
-                is_prune_stage=False,
-            )
+    omnicron: GameMemory
+) -> None:
+    """
+    Full simulation driver:
+      • prune pass
+      • optimize pass
+      • choose next real move
+      • continue until terminal
+    """
+    if simulations <= 0:
+        raise ValueError("simulations must be positive")
+    if turn_depth <= 0:
+        raise ValueError("turn_depth must be positive")
 
-        # We update the game with the best move given the initial state here, and then move on to the next "step", until we're finished!
-        best_move = omnicron.get_best_move(game.game_id(), game.get_state().clone(),debug_move=True)
-        print(best_move, game.get_state().current_player)
+    while True:
+        prune_count = simulations // 2
+        optimize_count = simulations - prune_count
 
-        if best_move is not None:
-            game.apply_move(best_move)
-        else:
-            game.apply_move(random.choice(game.valid_moves()))
+        _run_simulation_batch(players_map, game, turn_depth, prune_count, omnicron, prune_stage=True)
+        _run_simulation_batch(players_map, game, turn_depth, optimize_count, omnicron, prune_stage=False)
 
+        # Choose best next move for the actual game
+        current_state = game.get_state().clone()
+        best_move = omnicron.get_best_move(game.game_id(), current_state, debug_move=True)
+
+        if best_move is None:
+            valid = game.valid_moves()
+            if not valid:
+                break
+            best_move = random.choice(valid)
+
+        game.apply_move(best_move)
         print(game.state_string())
 
-        if game.get_result(game.current_player()) in _TERMINAL_MAP:
+        if game.is_over():
             break

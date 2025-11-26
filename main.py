@@ -1,48 +1,77 @@
-# Classes
+# main.py
+
 from agent.agent import Agent
-from games.game_base import GameBase
-from games.game_base import GameState
+from games.game_base import GameBase, GameState
 
-
-# Functions
 from simulation.simulation import start_simulations
 from omnicron.manager import GameMemory
 
-# Global variables
-from utils.global_variables import TURN_DEPTH
-from utils.global_variables import SIMULATIONS
-from utils.global_variables import SELECTED_GAME, GAMES
-from utils.global_variables import INITIAL_STATES
+from utils.global_variables import (
+    TURN_DEPTH,
+    SIMULATIONS,
+    SELECTED_GAME,
+    GAMES,
+    INITIAL_STATES,
+)
 
-from typing import List
-
-
-def create_agents(n: int, player_id: int) -> List[Agent]:
-    agents = []
-    for _ in range(n):
-        agent = Agent()
-        agent.player_id = player_id
-        agents.append(agent)
-    return agents
+from typing import Dict, List
 
 
+# ------------------------------------------------------
+# Create a swarm (many agents) per player
+# ------------------------------------------------------
+def create_agent_swarm(players: List[int], agents_per_player: int) -> Dict[int, List[Agent]]:
+    players_map: Dict[int, List[Agent]] = {}
+
+    for pid in players:
+        swarm = []
+        for _ in range(agents_per_player):
+            a = Agent()
+            a.player_id = pid
+            swarm.append(a)
+        players_map[pid] = swarm
+
+    return players_map
+
+
+# ------------------------------------------------------
+# Load game with the initial predefined state
+# ------------------------------------------------------
 def _configure_initial_game() -> GameBase:
     game_class = GAMES[SELECTED_GAME]
     initial_game_state: GameState = INITIAL_STATES[SELECTED_GAME]
-    initialized_game = game_class()
-
-    # Sets the state of the game to whatever is set in global vars
-    initialized_game.set_state(initial_game_state)
-    return initialized_game
+    game = game_class()
+    game.set_state(initial_game_state)
+    return game
 
 
+# ------------------------------------------------------
+# Fully generalized main
+# ------------------------------------------------------
 def main():
-    # TODO(Generalize the player_id, but for now 2-player games are where we are)
-    agents = create_agents(30, 1)
-    anti_agents = create_agents(30, 2)
     game = _configure_initial_game()
+
+    # auto-detect number of players from the game engine
+    num_players = game.num_players()
+    players = list(range(1, num_players + 1))
+
+    # number of agents PER player (tune this!)
+    AGENTS_PER_PLAYER = 40
+
+    # build a multi-agent swarm
+    players_map = create_agent_swarm(players, AGENTS_PER_PLAYER)
+
+    # memory manager
     omnicron = GameMemory()
-    start_simulations(agents, anti_agents, game, TURN_DEPTH, SIMULATIONS, omnicron)
+
+    # start generalized multi-agent, multi-player simulation
+    start_simulations(
+        players_map=players_map,
+        game=game,
+        turn_depth=TURN_DEPTH,
+        simulations=SIMULATIONS,
+        omnicron=omnicron
+    )
 
 
 if __name__ == "__main__":

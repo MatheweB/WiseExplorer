@@ -57,13 +57,11 @@ def _set_move(
             if new_move is not None:
                 agent.core_move = new_move
             else:
-                print("move is none!")
                 agent.core_move = random.choice(game.valid_moves())
 
 
-def update_agents(
+def update_agent(
     agent: Agent,
-    anti_agent: Agent,
     game: GameBase,
     omnicron: GameMemory,
     is_prune_stage: bool = True,
@@ -74,9 +72,7 @@ def update_agents(
     Parameters
     ----------
     agent : Agent
-        The “friendly” agent in the current game state.
-    anti_agent : Agent
-        The “opponent” agent in the current game state.
+        The gent in the current game state.
     game : GameBase
         The game instance; needed for generating random valid moves.
     is_prune_stage : bool, optional
@@ -87,6 +83,3 @@ def update_agents(
     """
     # Treat every agent uniformly: the helper handles the logic
     _set_move(agent, game, omnicron, is_prune_stage)
-
-    # Anti‑agents behave the same way as normal agents
-    _set_move(anti_agent, game, omnicron, is_prune_stage)
