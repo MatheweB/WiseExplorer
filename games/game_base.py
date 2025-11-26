@@ -27,6 +27,13 @@ class GameBase(ABC):
         pass
 
     @abstractmethod
+    def num_players(self) -> int:
+        """
+        Return the number of players in this game.
+        """
+        pass
+
+    @abstractmethod
     def clone(self) -> "GameBase":
         """
         Return a deep copy of the entire game (GameBase + GameState).
@@ -102,3 +109,4 @@ class GameBase(ABC):
         Returns a visually appealing string of the current state of the game
         """
         pass
+
