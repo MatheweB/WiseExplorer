@@ -20,7 +20,9 @@ from typing import Dict, List
 # ------------------------------------------------------
 # Create a swarm (many agents) per player
 # ------------------------------------------------------
-def create_agent_swarm(players: List[int], agents_per_player: int) -> Dict[int, List[Agent]]:
+def create_agent_swarm(
+    players: List[int], agents_per_player: int
+) -> Dict[int, List[Agent]]:
     players_map: Dict[int, List[Agent]] = {}
 
     for pid in players:
@@ -70,7 +72,7 @@ def main():
         game=game,
         turn_depth=TURN_DEPTH,
         simulations=SIMULATIONS,
-        omnicron=omnicron
+        omnicron=omnicron,
     )
 
 

@@ -38,6 +38,7 @@ _TERMINAL_STATES = {State.WIN, State.LOSS, State.TIE}
 # Helpers
 # --------------------------------------------------------------
 
+
 def reset_agent(agent: Agent) -> None:
     """Reset the internal working state of a single agent."""
     agent.core_move = np.array([])
@@ -58,16 +59,15 @@ def _choose_agents_for_game(players_map: Dict[int, List[Agent]]) -> Dict[int, Ag
     return chosen
 
 
-def _apply_policy(agent: Agent, game: GameBase, omnicron: GameMemory, prune: bool) -> None:
+def _apply_policy(
+    agent: Agent, game: GameBase, omnicron: GameMemory, prune: bool
+) -> None:
     """Fill agent.core_move via Wise Explorer."""
     wise_explorer_algorithm.update_agent(agent, game, omnicron, prune)
 
 
 def _apply_move_and_record(
-    agent: Agent,
-    game: GameBase,
-    acting_player: int,
-    stack: List[MoveStackItem]
+    agent: Agent, game: GameBase, acting_player: int, stack: List[MoveStackItem]
 ) -> State:
     """
     Snapshot BEFORE move, then apply.
@@ -90,7 +90,7 @@ def _store_outcome_data(
     game_id: str,
     stacks: Dict[int, List[MoveStackItem]],
     results: Dict[int, State],
-    omnicron: GameMemory
+    omnicron: GameMemory,
 ) -> None:
     """Write all moves for all players to omnicron."""
     for pid, stack in stacks.items():
@@ -103,12 +103,13 @@ def _store_outcome_data(
 # Single simulated game with fixed chosen agents
 # --------------------------------------------------------------
 
+
 def _simulate_game(
     players_map: Dict[int, List[Agent]],
     game: GameBase,
     turn_depth: int,
     omnicron: GameMemory,
-    prune_stage: bool
+    prune_stage: bool,
 ) -> None:
     """
     Run an entire simulation using a FIXED agent per player for the whole game.
@@ -146,43 +147,39 @@ def _simulate_game(
 # Batches
 # --------------------------------------------------------------
 
+
 def _run_simulation_batch(
     players_map: Dict[int, List[Agent]],
     game: GameBase,
     turn_depth: int,
     count: int,
     omnicron: GameMemory,
-    prune_stage: bool
+    prune_stage: bool,
 ) -> None:
     """Runs `count` simulations using fixed agent tuples."""
     for _ in range(count):
         cloned = game.deep_clone()
-        _simulate_game(
-            players_map,
-            cloned,
-            turn_depth,
-            omnicron,
-            prune_stage
-        )
+        _simulate_game(players_map, cloned, turn_depth, omnicron, prune_stage)
 
 
 # --------------------------------------------------------------
 # Public API
 # --------------------------------------------------------------
 
+
 def start_simulations(
     players_map: Dict[int, List[Agent]],
     game: GameBase,
     turn_depth: int,
     simulations: int,
-    omnicron: GameMemory
+    omnicron: GameMemory,
 ) -> None:
     """
     Full simulation driver:
-      • prune pass
-      • optimize pass
-      • choose next real move
-      • continue until terminal
+    • prune pass
+    • optimize pass
+    • choose next real move
+    • continue until terminal
     """
     if simulations <= 0:
         raise ValueError("simulations must be positive")
@@ -193,12 +190,18 @@ def start_simulations(
         prune_count = simulations // 2
         optimize_count = simulations - prune_count
 
-        _run_simulation_batch(players_map, game, turn_depth, prune_count, omnicron, prune_stage=True)
-        _run_simulation_batch(players_map, game, turn_depth, optimize_count, omnicron, prune_stage=False)
+        _run_simulation_batch(
+            players_map, game, turn_depth, prune_count, omnicron, prune_stage=True
+        )
+        _run_simulation_batch(
+            players_map, game, turn_depth, optimize_count, omnicron, prune_stage=False
+        )
 
         # Choose best next move for the actual game
         current_state = game.get_state().clone()
-        best_move = omnicron.get_best_move(game.game_id(), current_state, debug_move=True)
+        best_move = omnicron.get_best_move(
+            game.game_id(), current_state, debug_move=True
+        )
 
         if best_move is None:
             valid = game.valid_moves()
