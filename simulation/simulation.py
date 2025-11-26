@@ -199,7 +199,7 @@ def start_simulations(
 
         # Choose best next move for the actual game
         current_state = game.get_state().clone()
-        best_move = omnicron.get_best_move(
+        best_move = omnicron.get_worst_move(
             game.game_id(), current_state, debug_move=True
         )
 
