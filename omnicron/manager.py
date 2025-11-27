@@ -2,61 +2,93 @@
 import os
 import json
 import logging
+import sqlite3
 import numpy as np
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Dict, Any
+from dataclasses import dataclass
+from functools import lru_cache
 from peewee import (
-    Model,
-    IntegerField,
-    BlobField,
-    TextField,
-    SqliteDatabase,
-    CompositeKey,
-    DoesNotExist,
+    Model, IntegerField, BlobField, TextField, SqliteDatabase, CompositeKey
 )
 from omnicron.serializers import serialize_array, deserialize_array, hash_array
 from agent.agent import State
 from games.game_state import GameState
-
 from omnicron.debug_viz import render_debug
 
 logger = logging.getLogger(__name__)
 if not logger.hasHandlers():
     logging.basicConfig(level=logging.INFO)
-db = SqliteDatabase(None)
 
+# -----------------------------------------------------------
+# CONFIGURATION
+# -----------------------------------------------------------
+db = SqliteDatabase(None, pragmas={
+    'journal_mode': 'WAL',
+    'cache_size': -1024 * 64,
+    'synchronous': 'NORMAL',
+    'mmap_size': 1024 * 1024 * 128,
+    'temp_store': 'MEMORY'
+})
 
-# ===========================================================
+# -----------------------------------------------------------
+# DATA STRUCTURES
+# -----------------------------------------------------------
+@dataclass
+class StatBlock:
+    """Helper to organize raw DB stats."""
+    wins: int
+    ties: int
+    neutral: int
+    losses: int
+    total: int
+
+    @property
+    def probs(self):
+        """Returns tuple (pW, pT, pN, pL)"""
+        if self.total == 0: return (0.0, 0.0, 0.0, 0.0)
+        return (self.wins/self.total, self.ties/self.total, self.neutral/self.total, self.losses/self.total)
+
+    @property
+    def certainty(self) -> float:
+        if self.total == 0: return 0.0
+        return max(self.wins, self.ties, self.neutral, self.losses) / self.total
+
+    @property
+    def utility(self) -> float:
+        if self.total == 0: return 0.0
+        return (self.wins + self.ties + self.neutral - self.losses) / self.total
+
+    @classmethod
+    def from_row(cls, row, snapshot_player: int, acting_player: int):
+        w, t, n, l = row['win_count'], row['tie_count'], row['neutral_count'], row['loss_count']
+        if snapshot_player != acting_player:
+            w, l = l, w 
+        return cls(w, t, n, l, w + t + n + l)
+
+# -----------------------------------------------------------
 # DATABASE MODELS
-# ===========================================================
-class Position(Model):
-    """Stores unique board positions."""
+# -----------------------------------------------------------
+class BaseModel(Model):
+    class Meta:
+        database = db
 
+class Position(BaseModel):
     game_id = TextField()
     board_hash = IntegerField(primary_key=True)
     board_bytes = BlobField()
     meta_json = TextField()
-
     class Meta:
-        database = db
         table_name = "positions"
 
-
-class Move(Model):
-    """Stores unique moves."""
-
+class Move(BaseModel):
     game_id = TextField()
     move_hash = IntegerField(primary_key=True)
     move_bytes = BlobField()
     meta_json = TextField()
-
     class Meta:
-        database = db
         table_name = "moves"
 
-
-class PlayStats(Model):
-    """Stores outcome statistics for (board, move, player) combinations."""
-
+class PlayStats(BaseModel):
     game_id = TextField()
     board_hash = IntegerField()
     move_hash = IntegerField()
@@ -66,493 +98,246 @@ class PlayStats(Model):
     tie_count = IntegerField(default=0)
     neutral_count = IntegerField(default=0)
     loss_count = IntegerField(default=0)
-
     class Meta:
-        database = db
         table_name = "play_stats"
-        primary_key = CompositeKey(
-            "game_id", "board_hash", "move_hash", "snapshot_player", "acting_player"
-        )
+        primary_key = CompositeKey("game_id", "board_hash", "move_hash", "snapshot_player", "acting_player")
+        indexes = ((('game_id', 'board_hash', 'snapshot_player'), False),)
 
-
-# ===========================================================
-# GAME MEMORY
-# ===========================================================
+# -----------------------------------------------------------
+# GAME MEMORY MANAGER
+# -----------------------------------------------------------
 class GameMemory:
-    """
-    Manages game position learning with N-player minimax lookahead.
-    Uses normalized board representations for consistent hashing.
-    """
-
-    def __init__(
-        self,
-        base_dir="omnicron/game_memory/games",
-        db_path="omnicron/game_memory/memory.db",
-        flush_every: int = 5000,
-    ):
+    def __init__(self, base_dir="omnicron/game_memory/games", db_path="omnicron/game_memory/memory.db", flush_every=5000):
         self.base_dir = base_dir
         self.flush_every = int(flush_every)
         self.write_counter = 0
         os.makedirs(self.base_dir, exist_ok=True)
-        # Initialize database
         db.init(db_path)
         db.connect(reuse_if_open=True)
         db.create_tables([Position, Move, PlayStats])
-        # Performance optimizations
-        try:
-            db.execute_sql("PRAGMA journal_mode=WAL;")
-        except Exception:
-            pass
-        # Create indexes for faster queries
-        db.execute_sql(
-            "CREATE INDEX IF NOT EXISTS idx_ps_gb ON play_stats(game_id, board_hash);"
-        )
-        db.execute_sql(
-            "CREATE INDEX IF NOT EXISTS idx_ps_mv ON play_stats(game_id, move_hash);"
-        )
-        db.execute_sql(
-            "CREATE INDEX IF NOT EXISTS idx_ps_snap ON play_stats(game_id, snapshot_player);"
-        )
-        db.execute_sql(
-            "CREATE INDEX IF NOT EXISTS idx_ps_act ON play_stats(game_id, acting_player);"
-        )
+        self._transition_cache: Dict[Tuple[int, int], int] = {}
+
+        # Optimized SQL queries
+        self._sql = {
+            'upsert_stats': """
+                INSERT INTO play_stats (game_id, board_hash, move_hash, snapshot_player, acting_player, win_count, tie_count, neutral_count, loss_count) 
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(game_id, board_hash, move_hash, snapshot_player, acting_player) 
+                DO UPDATE SET win_count=win_count+excluded.win_count, tie_count=tie_count+excluded.tie_count, 
+                              neutral_count=neutral_count+excluded.neutral_count, loss_count=loss_count+excluded.loss_count
+            """,
+            'get_moves': "SELECT move_hash, acting_player, win_count, tie_count, neutral_count, loss_count FROM play_stats WHERE game_id=? AND board_hash=? AND snapshot_player=?",
+            'get_move_bytes': "SELECT move_bytes, meta_json FROM moves WHERE game_id=? AND move_hash=?",
+            'insert_pos': "INSERT OR IGNORE INTO positions (game_id, board_hash, board_bytes, meta_json) VALUES (?, ?, ?, ?)",
+            'insert_move': "INSERT OR IGNORE INTO moves (game_id, move_hash, move_bytes, meta_json) VALUES (?, ?, ?, ?)"
+        }
 
     # -------------------------
-    # Utilities
+    # Utilities (Cached)
     # -------------------------
     def _normalize_board(self, board) -> np.ndarray:
-        """
-        Normalize board representation for consistent hashing.
-        Converts None to 0 and ensures int64 dtype.
-        """
+        if isinstance(board, np.ndarray) and board.dtype == np.int64: return board
         arr = np.array(board, copy=True)
-        if arr.dtype == object:
-            arr = np.where(arr == None, 0, arr).astype(np.int64)
-        elif arr.dtype != np.int64:
-            arr = arr.astype(np.int64)
-        return arr
+        if arr.dtype == object: arr = np.where(arr == None, 0, arr)
+        return arr.astype(np.int64)
 
-    def _decode_move_array(self, gid: str, move_hash: int) -> Optional[np.ndarray]:
-        """Return the move array for a stored move, or None on failure."""
-        try:
-            mv = Move.get((Move.game_id == gid) & (Move.move_hash == move_hash))
-            meta = json.loads(mv.meta_json)
-            return deserialize_array(
-                mv.move_bytes, meta["dtype"], json.dumps(meta["shape"])
-            )
-        except Exception:
-            return None
+    @lru_cache(maxsize=10000)
+    def _decode_move(self, gid: str, move_hash: int) -> Optional[Tuple]:
+        cursor = db.execute_sql(self._sql['get_move_bytes'], (gid, move_hash))
+        row = cursor.fetchone()
+        if not row: return None
+        meta = json.loads(row[1])
+        arr = deserialize_array(row[0], meta["dtype"], json.dumps(meta["shape"]))
+        return tuple(arr.ravel())
 
     # -------------------------
-    # Write training data
+    # Fast Write
     # -------------------------
-    def write(
-        self,
-        game_id: str,
-        snapshot_state: GameState,
-        acting_player: int,
-        outcome: State,
-        move: np.ndarray,
-    ):
-        """Record the outcome of a move from a given board position."""
-        if snapshot_state is None:
-            raise ValueError("snapshot_state must not be None")
+    def write(self, game_id: str, snapshot_state: GameState, acting_player: int, outcome: State, move: np.ndarray):
+        if snapshot_state is None: return
         gid = str(game_id).lower().replace(" ", "_")
         board_arr = self._normalize_board(snapshot_state.board)
         move_arr = np.array(move, copy=True)
-        snapshot_player = int(snapshot_state.current_player)
-        board_hash = int(hash_array(board_arr))
-        move_hash = int(hash_array(move_arr))
-        # Store unique board position
-        try:
-            Position.get(
-                (Position.game_id == gid) & (Position.board_hash == board_hash)
-            )
-        except DoesNotExist:
-            b_bytes, dtype, dtype2, shape_str = serialize_array(board_arr)
-            meta = {"dtype": dtype, "dtype2": dtype2, "shape": json.loads(shape_str)}
-            Position.create(
-                game_id=gid,
-                board_hash=board_hash,
-                board_bytes=b_bytes,
-                meta_json=json.dumps(meta),
-            )
-        # Store unique move
-        try:
-            Move.get((Move.game_id == gid) & (Move.move_hash == move_hash))
-        except DoesNotExist:
-            m_bytes, dtype, dtype2, shape_str = serialize_array(move_arr)
-            meta = {"dtype": dtype, "dtype2": dtype2, "shape": json.loads(shape_str)}
-            Move.create(
-                game_id=gid,
-                move_hash=move_hash,
-                move_bytes=m_bytes,
-                meta_json=json.dumps(meta),
-            )
-        # Update or create play statistics
-        try:
-            row = PlayStats.get(
-                (PlayStats.game_id == gid)
-                & (PlayStats.board_hash == board_hash)
-                & (PlayStats.move_hash == move_hash)
-                & (PlayStats.snapshot_player == snapshot_player)
-                & (PlayStats.acting_player == acting_player)
-            )
-        except DoesNotExist:
-            row = PlayStats.create(
-                game_id=gid,
-                board_hash=board_hash,
-                move_hash=move_hash,
-                snapshot_player=snapshot_player,
-                acting_player=acting_player,
-            )
-        # Increment outcome counts
-        if outcome == State.WIN:
-            row.win_count += 1
-        elif outcome == State.TIE:
-            row.tie_count += 1
-        elif outcome == State.NEUTRAL:
-            row.neutral_count += 1
-        elif outcome == State.LOSS:
-            row.loss_count += 1
-        row.save()
-        # Periodic DB backup
+        b_hash, m_hash = int(hash_array(board_arr)), int(hash_array(move_arr))
+        s_player = int(snapshot_state.current_player)
+
+        # Optimistic Writes
+        b_bytes, b_dtype, _, b_shape = serialize_array(board_arr)
+        db.execute_sql(self._sql['insert_pos'], (gid, b_hash, b_bytes, json.dumps({"dtype": b_dtype, "shape": json.loads(b_shape)})))
+        m_bytes, m_dtype, _, m_shape = serialize_array(move_arr)
+        db.execute_sql(self._sql['insert_move'], (gid, m_hash, m_bytes, json.dumps({"dtype": m_dtype, "shape": json.loads(m_shape)})))
+
+        # Upsert Stats
+        counts = [0, 0, 0, 0]
+        if outcome == State.WIN: counts[0] = 1
+        elif outcome == State.TIE: counts[1] = 1
+        elif outcome == State.NEUTRAL: counts[2] = 1
+        elif outcome == State.LOSS: counts[3] = 1
+        db.execute_sql(self._sql['upsert_stats'], (gid, b_hash, m_hash, s_player, acting_player, *counts))
+        self._check_flush(gid)
+
+    def _check_flush(self, gid):
         self.write_counter += 1
         if self.write_counter % self.flush_every == 0:
             try:
-                game_dir = os.path.join(self.base_dir, gid)
-                os.makedirs(game_dir, exist_ok=True)
-                backup_path = os.path.join(game_dir, "plays.sqlite")
+                backup_path = os.path.join(self.base_dir, gid, "plays.sqlite")
                 db.execute_sql(f"VACUUM main INTO '{backup_path}';")
-            except Exception:
-                pass
+            except Exception: pass
 
     # -------------------------
-    # Opponent analysis
+    # Logic: Evaluation
     # -------------------------
-    def _best_opponent_reply(
-        self, gid: str, board: np.ndarray, opponents: List[int]
-    ) -> Tuple[
-        Optional[float],
-        Optional[float],
-        Optional[float],
-        Optional[float],
-        Optional[float],
-        Optional[float],
-        Optional[List[int]],
-    ]:
-        """
-        Find the best reply move among all opponents for a given board.
-        Returns:
-            (opp_pW, opp_pT, opp_pN, opp_pL, opponent_utility_for_them, certainty, move_coords)
-            where probabilities & utility are from the opponent's perspective.
-        """
-        board_norm = self._normalize_board(board)
-        board_hash = int(hash_array(board_norm))
-        best_util = -9999.0
-        best_pW = best_pT = best_pN = best_pL = best_cert = None
-        best_move_hash = None
+    def _evaluate_candidate(self, gid: str, board_arr: np.ndarray, row_dict: dict, snapshot_player: int) -> dict:
+        """Converts DB row to rich dictionary matching original code's debug schema."""
+        stats = StatBlock.from_row(row_dict, snapshot_player, row_dict['acting_player'])
+        if stats.total == 0: return None
+        pW, pT, pN, pL = stats.probs
 
-        for opp in opponents:
-            rows = list(
-                PlayStats.select().where(
-                    (PlayStats.game_id == gid)
-                    & (PlayStats.board_hash == board_hash)
-                    & (PlayStats.snapshot_player == opp)
-                )
-            )
-            if not rows:
-                continue
-            for row in rows:
-                total = (
-                    row.win_count + row.tie_count + row.neutral_count + row.loss_count
-                )
-                if total == 0:
-                    continue
-                pW = row.win_count / total
-                pT = row.tie_count / total
-                pN = row.neutral_count / total
-                pL = row.loss_count / total
-                # flip perspective if acting_player isn't the snapshot player
-                if int(row.acting_player) != opp:
-                    pW, pL = pL, pW
-                cert = max(pW, pT, pN, pL)
-                util = pW + pT + pN - pL
-                if util > best_util:
-                    best_util = util
-                    best_pW, best_pT, best_pN, best_pL = pW, pT, pN, pL
-                    best_cert = cert
-                    best_move_hash = int(row.move_hash)
+        # Lookahead variables
+        opp_util = None
+        opp_cert = None
+        opp_move_coords = None
+        opp_probs = (None, None, None, None) # pW, pT, pN, pL for opponent
 
-        if best_move_hash is None:
-            return None, None, None, None, None, None, None
-
-        # decode move into coordinates
-        move_coords = None
-        try:
-            mv = Move.get((Move.game_id == gid) & (Move.move_hash == best_move_hash))
-            meta = json.loads(mv.meta_json)
-            move_arr = deserialize_array(
-                mv.move_bytes, meta["dtype"], json.dumps(meta["shape"])
-            )
-            move_coords = list(map(int, np.array(move_arr).ravel()))
-        except Exception:
-            move_coords = None
-
-        return best_pW, best_pT, best_pN, best_pL, best_util, best_cert, move_coords
-
-    # -------------------------
-    # Evaluation helpers
-    # -------------------------
-    def _compute_row_stats(self, row, perspective_player: int):
-        """Compute pW, pT, pN, pL, certainty, utility from row for given perspective."""
-        total = row.win_count + row.tie_count + row.neutral_count + row.loss_count
-        if total == 0:
-            pW = pT = pN = pL = 0.0
-        else:
-            pW = row.win_count / total
-            pT = row.tie_count / total
-            pN = row.neutral_count / total
-            pL = row.loss_count / total
-        # Flip if acting_player != perspective (stored counts are from snapshot's view)
-        if int(row.acting_player) != perspective_player:
-            pW, pL = pL, pW
-        certainty = max(pW, pT, pN, pL)
-        utility = pW + pT + pN - pL
-        return pW, pT, pN, pL, certainty, utility, total
-
-    def _evaluate_move_row(
-        self, gid: str, board_arr: np.ndarray, row, snapshot_player: int
-    ):
-        """Evaluate a single PlayStats row and return an evaluation dict."""
-        pW, pT, pN, pL, certainty, utility, total = self._compute_row_stats(
-            row, snapshot_player
-        )
-
-        # Try to build next board from the move
-        next_board = None
-        move_arr = self._decode_move_array(gid, int(row.move_hash))
-        if move_arr is not None:
-            coords = np.array(move_arr).ravel()
-            if coords.size >= 2:
-                next_board = np.array(board_arr, copy=True)
+        # Calculate Transition
+        move_hash = row_dict['move_hash']
+        cache_key = (int(hash_array(board_arr)), move_hash)
+        
+        if cache_key not in self._transition_cache:
+            move_tup = self._decode_move(gid, move_hash)
+            if move_tup and len(move_tup) >= 2:
+                next_board = board_arr.copy()
                 try:
-                    next_board[int(coords[0]), int(coords[1])] = snapshot_player
-                except Exception:
-                    next_board = None
+                    next_board[int(move_tup[0]), int(move_tup[1])] = snapshot_player
+                    self._transition_cache[cache_key] = int(hash_array(next_board))
+                except IndexError:
+                    self._transition_cache[cache_key] = -1
+            else:
+                self._transition_cache[cache_key] = -1
+        
+        next_hash = self._transition_cache[cache_key]
 
-        # If we have a next board, inspect opponents' best reply
-        opp_pW = opp_pT = opp_pN = opp_pL = opp_util = opp_cert = opp_move = None
-        if next_board is not None:
-            next_norm = self._normalize_board(next_board)
-            next_hash = int(hash_array(next_norm))
-            opps_query = (
-                PlayStats.select(PlayStats.snapshot_player)
-                .where((PlayStats.game_id == gid) & (PlayStats.board_hash == next_hash))
-                .distinct()
-            )
-            opps_with_data = [
-                int(r.snapshot_player)
-                for r in opps_query
-                if int(r.snapshot_player) != snapshot_player
-            ]
-            if opps_with_data:
-                (
-                    opp_pW,
-                    opp_pT,
-                    opp_pN,
-                    opp_pL,
-                    opp_util_for_them,
-                    opp_cert,
-                    opp_move,
-                ) = self._best_opponent_reply(gid, next_norm, opps_with_data)
-                if opp_util_for_them is not None:
-                    opp_util = -opp_util_for_them  # convert to our perspective
+        if next_hash != -1:
+            # We get (StatBlock, move_hash) from the opponent helper
+            opp_res = self._get_best_opponent_stats(gid, next_hash, snapshot_player)
+            if opp_res:
+                opp_stats, opp_m_hash = opp_res
+                opp_util = -opp_stats.utility # Flip utility
+                opp_cert = opp_stats.certainty
+                opp_probs = opp_stats.probs
+                
+                # Decode opponent move for "Opp Reply" visualization
+                opp_move_tup = self._decode_move(gid, opp_m_hash)
+                opp_move_coords = list(opp_move_tup) if opp_move_tup else None
 
-        # Risk adjustment - simple additive model (same as original)
-        adjusted_utility = utility + (opp_util if opp_util is not None else 0)
+        adjusted_utility = stats.utility + (opp_util if opp_util is not None else 0)
+        dangerous = (opp_util is not None and opp_util <= -0.9 and opp_cert >= 0.8)
 
-        # Dangerous indicator (preserve original heuristic)
-        dangerous = False
-        if opp_util is not None and opp_cert is not None:
-            if (-opp_util >= 0.9) and (opp_cert >= 0.8):
-                dangerous = True
-
+        # Full Dictionary expected by debug_viz
         return {
-            "move_hash": int(row.move_hash),
-            "certainty": certainty,
-            "utility": utility,
+            "move_hash": move_hash,
+            "utility": stats.utility,
             "adjusted_utility": adjusted_utility,
-            "total": total,
-            "pW": pW,
-            "pT": pT,
-            "pN": pN,
-            "pL": pL,
-            "opponent_best_move": opp_move,
-            "opponent_pW": opp_pW,
-            "opponent_pT": opp_pT,
-            "opponent_pN": opp_pN,
-            "opponent_pL": opp_pL,
-            "opponent_util_for_them": (-opp_util if opp_util is not None else None),
+            "certainty": stats.certainty,
+            "total": stats.total,
+            "pW": pW, "pT": pT, "pN": pN, "pL": pL,
+            # Opponent Data
+            "opponent_data_exists": opp_util is not None,
+            "adjusted": opp_util is not None, # Triggers "Eye" icon
+            "opponent_best_move": opp_move_coords,
+            "opponent_pW": opp_probs[0],
+            "opponent_pT": opp_probs[1],
+            "opponent_pN": opp_probs[2],
+            "opponent_pL": opp_probs[3],
             "opponent_util_for_me": opp_util,
             "opponent_cert": opp_cert,
-            "opponent_data_exists": opp_util is not None,
-            "adjusted": opp_util is not None,
-            "dangerous": dangerous,
+            "dangerous": dangerous
         }
 
-    def _select_from_evaluations(self, evaluations: List[dict], pick_best: bool = True):
+    def _get_best_opponent_stats(self, gid: str, board_hash: int, my_player_id: int) -> Optional[Tuple[StatBlock, int]]:
+        """Finds best opponent move. Returns (StatBlock, move_hash)."""
+        query = """
+            SELECT win_count, tie_count, neutral_count, loss_count, snapshot_player, acting_player, move_hash 
+            FROM play_stats 
+            WHERE game_id=? AND board_hash=? AND snapshot_player != ?
         """
-        Return the chosen move_hash and the sorted evaluation list.
-        Sorting strategy:
-          - Key is (adjusted_utility, total, certainty)
-          - For best move: prefer larger adjusted_utility, then larger total, then larger certainty.
-          - For worst move: prefer smaller adjusted_utility; among ties prefer larger total and certainty
-            (i.e. reliably bad moves).
-        """
-        if not evaluations:
-            return None, []
+        cursor = db.execute_sql(query, (gid, board_hash, my_player_id))
+        
+        best_block = None
+        best_m_hash = None
+        best_util = -9999.0
 
-        # Key returns tuple where we can reverse for best. For worst we want adjusted_utility ascending,
-        # but prefer larger totals/certainty (so we negate those fields in key to keep ordering consistent).
-        sort_key = lambda m: (m["adjusted_utility"], -m["total"], -m["certainty"])
-
-        # For best: reverse=True (largest adjusted_utility first)
-        evaluations.sort(key=sort_key, reverse=pick_best)
-        chosen = evaluations[0]["move_hash"]
-        return chosen, evaluations
+        for row in cursor.fetchall():
+            row_d = {'win_count': row[0], 'tie_count': row[1], 'neutral_count': row[2], 'loss_count': row[3]}
+            sb = StatBlock.from_row(row_d, row[4], row[5])
+            if sb.utility > best_util:
+                best_util = sb.utility
+                best_block = sb
+                best_m_hash = row[6]
+        
+        if best_block:
+            return (best_block, best_m_hash)
+        return None
 
     # -------------------------
-    # Public API: best and worst
+    # Public API
     # -------------------------
-    def _get_move_rows_for_player(
-        self, gid: str, board_hash: int, snapshot_player: int
-    ):
-        return list(
-            PlayStats.select().where(
-                (PlayStats.game_id == gid)
-                & (PlayStats.board_hash == board_hash)
-                & (PlayStats.snapshot_player == snapshot_player)
-            )
-        )
-
-    def _common_select_move(
-        self,
-        game_id: str,
-        game_state: GameState,
-        pick_best: bool = True,
-        debug_move: bool = False,
-    ):
-        """
-        Shared logic to select best/worst move. pick_best=True -> best, False -> worst.
-        """
+    def _select_move(self, game_id: str, game_state: GameState, pick_best: bool, debug_move: bool):
         gid = str(game_id).lower().replace(" ", "_")
-        snapshot_player = int(game_state.current_player)
+        snap_player = int(game_state.current_player)
         board_arr = self._normalize_board(game_state.board)
         board_hash = int(hash_array(board_arr))
 
-        rows = self._get_move_rows_for_player(gid, board_hash, snapshot_player)
-        if not rows:
-            return None
+        cursor = db.execute_sql(self._sql['get_moves'], (gid, board_hash, snap_player))
+        columns = [c[0] for c in cursor.description]
+        rows = [dict(zip(columns, r)) for r in cursor.fetchall()]
 
-        evaluations = [
-            self._evaluate_move_row(gid, board_arr, r, snapshot_player) for r in rows
-        ]
-        chosen_move_hash, sorted_evals = self._select_from_evaluations(
-            evaluations, pick_best=pick_best
-        )
-        if chosen_move_hash is None:
-            return None
+        if not rows: return None
 
-        # Debug visualization: build debug rows and call render_debug
+        evals = []
+        for r in rows:
+            res = self._evaluate_candidate(gid, board_arr, r, snap_player)
+            if res: evals.append(res)
+
+        if not evals: return None
+
+        # Sort key logic
+        key = lambda x: (x['adjusted_utility'], x['total'], x['certainty'])
+        if not pick_best:
+            # For worst: prefer LOW adjusted utility, but HIGH total/certainty (reliable failure)
+            key = lambda x: (-x['adjusted_utility'], x['total'], x['certainty'])
+            
+        evals.sort(key=key, reverse=True)
+        chosen = evals[0]
+
         if debug_move:
-            debug_rows = []
-            for ev in sorted_evals:
-                try:
-                    mv_array = self._decode_move_array(gid, ev["move_hash"])
-                    debug_rows.append(
-                        {
-                            "move_hash": ev["move_hash"],
-                            "move_array": (
-                                np.array(mv_array).tolist()
-                                if mv_array is not None
-                                and not isinstance(mv_array, list)
-                                else mv_array
-                            ),
-                            "certainty": float(ev["certainty"]),
-                            "utility": float(ev["utility"]),
-                            "adjusted_utility": float(ev["adjusted_utility"]),
-                            "total": int(ev["total"]),
-                            "pW": float(ev["pW"]),
-                            "pT": float(ev["pT"]),
-                            "pN": float(ev["pN"]),
-                            "pL": float(ev["pL"]),
-                            "opponent_data_exists": bool(ev["opponent_data_exists"]),
-                            "adjusted": bool(ev["adjusted"]),
-                            "opponent_best_move": ev["opponent_best_move"],
-                            "opponent_pW": (
-                                float(ev["opponent_pW"])
-                                if ev.get("opponent_pW") is not None
-                                else None
-                            ),
-                            "opponent_pT": (
-                                float(ev["opponent_pT"])
-                                if ev.get("opponent_pT") is not None
-                                else None
-                            ),
-                            "opponent_pN": (
-                                float(ev["opponent_pN"])
-                                if ev.get("opponent_pN") is not None
-                                else None
-                            ),
-                            "opponent_pL": (
-                                float(ev["opponent_pL"])
-                                if ev.get("opponent_pL") is not None
-                                else None
-                            ),
-                            "opponent_best_util_for_them": (
-                                float(ev["opponent_util_for_them"])
-                                if ev.get("opponent_util_for_them") is not None
-                                else None
-                            ),
-                            "opponent_best_util_for_me": (
-                                float(ev["opponent_util_for_me"])
-                                if ev.get("opponent_util_for_me") is not None
-                                else None
-                            ),
-                            "opponent_best_cert": (
-                                float(ev["opponent_cert"])
-                                if ev.get("opponent_cert") is not None
-                                else None
-                            ),
-                            "dangerous": bool(ev["dangerous"]),
-                            "is_selected": ev["move_hash"] == chosen_move_hash,
-                            "is_best": pick_best
-                            and (ev["move_hash"] == chosen_move_hash),
-                            "is_worst": (not pick_best)
-                            and (ev["move_hash"] == chosen_move_hash),
-                            "sort_key": (
-                                ev["adjusted_utility"],
-                                ev["total"],
-                                ev["certainty"],
-                            ),
-                        }
-                    )
-                except Exception:
-                    continue
-            render_debug(board_arr, debug_rows)
+            self._debug_render(gid, board_arr, evals, chosen['move_hash'], pick_best)
 
-        # Return the chosen move array
-        return self._decode_move_array(gid, chosen_move_hash)
+        tup = self._decode_move(gid, chosen['move_hash'])
+        return np.array(tup) if tup else None
+
+    def _debug_render(self, gid, board, evals, chosen_hash, pick_best):
+        """Passes full data context to visualizer."""
+        debug_rows = []
+        for e in evals:
+            tup = self._decode_move(gid, e['move_hash'])
+            # Merge the evaluation dict with the specific flags the UI needs
+            row_data = {
+                **e,
+                "move_array": list(tup) if tup else None,
+                "is_selected": e['move_hash'] == chosen_hash,
+                "is_best": pick_best and (e['move_hash'] == chosen_hash),  # Triggers Best Badge
+                "is_worst": (not pick_best) and (e['move_hash'] == chosen_hash), # Triggers Worst Badge
+                # Opponent metrics mapping for display
+                "opponent_best_util_for_them": (-e['opponent_util_for_me']) if e['opponent_util_for_me'] is not None else None,
+                "opponent_best_util_for_me": e['opponent_util_for_me'],
+                "opponent_best_cert": e['opponent_cert'],
+            }
+            debug_rows.append(row_data)
+        render_debug(board, debug_rows)
 
     def get_best_move(self, game_id: str, game_state: GameState, debug_move=False):
-        """Public wrapper to get the best move (highest adjusted utility)."""
-        return self._common_select_move(
-            game_id, game_state, pick_best=True, debug_move=debug_move
-        )
+        return self._select_move(game_id, game_state, True, debug_move)
 
     def get_worst_move(self, game_id: str, game_state: GameState, debug_move=False):
-        """Public wrapper to get the worst move (lowest adjusted utility, preferring reliably-bad moves)."""
-        return self._common_select_move(
-            game_id, game_state, pick_best=False, debug_move=debug_move
-        )
+        return self._select_move(game_id, game_state, False, debug_move)

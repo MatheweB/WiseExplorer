@@ -33,7 +33,7 @@ MoveStackItem = Tuple[np.ndarray, GameState, int]
 _TERMINAL_STATES = {State.WIN, State.LOSS, State.TIE}
 
 # Performance tuning
-PARALLEL_WORKERS = 4  # Concurrent simulations
+PARALLEL_WORKERS = 16  # Concurrent simulations
 
 
 # ==============================================================
