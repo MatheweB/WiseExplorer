@@ -51,12 +51,21 @@ class StatBlock:
     @property
     def certainty(self) -> float:
         if self.total == 0: return 0.0
-        return max(self.wins, self.ties, self.neutral, self.losses) / self.total
+        # return max(self.wins, self.ties, self.neutral, self.losses) / self.total
+        pW = self.probs[0]
+        return pW
 
     @property
     def utility(self) -> float:
-        if self.total == 0: return 0.0
-        return (self.wins + self.ties + self.neutral - self.losses) / self.total
+        if self.total == 0: return 0.5 # natural midpoint
+        # return (self.wins + self.ties + self.neutral - self.losses) / self.total
+        pW = self.probs[0]
+        pL = self.probs[3]
+        return ((1-pL) + pW)/2  # Prioritize anything that isn't a los, and bump it up with a win! Normalize with 2
+                                # If pL = 0, pW = 1, we get 1 -> Perfect move
+                                # If pL = 0.5, pW = 0.5, we get 0.5 -> Balanced/uncertain
+                                # If pL = pW = 0, we get 0.5 baseline -> All ties/neutral
+                                # If pL = 1, pW = 0, we get 0 -> Worst possible move
 
     @classmethod
     def from_row(cls, row, snapshot_player: int, acting_player: int):
