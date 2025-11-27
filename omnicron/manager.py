@@ -18,6 +18,7 @@ from agent.agent import State
 from games.game_state import GameState
 
 from omnicron.debug_viz import render_debug
+
 logger = logging.getLogger(__name__)
 if not logger.hasHandlers():
     logging.basicConfig(level=logging.INFO)
@@ -29,6 +30,7 @@ db = SqliteDatabase(None)
 # ===========================================================
 class Position(Model):
     """Stores unique board positions."""
+
     game_id = TextField()
     board_hash = IntegerField(primary_key=True)
     board_bytes = BlobField()
@@ -41,6 +43,7 @@ class Position(Model):
 
 class Move(Model):
     """Stores unique moves."""
+
     game_id = TextField()
     move_hash = IntegerField(primary_key=True)
     move_bytes = BlobField()
@@ -53,6 +56,7 @@ class Move(Model):
 
 class PlayStats(Model):
     """Stores outcome statistics for (board, move, player) combinations."""
+
     game_id = TextField()
     board_hash = IntegerField()
     move_hash = IntegerField()
@@ -133,7 +137,9 @@ class GameMemory:
         try:
             mv = Move.get((Move.game_id == gid) & (Move.move_hash == move_hash))
             meta = json.loads(mv.meta_json)
-            return deserialize_array(mv.move_bytes, meta["dtype"], json.dumps(meta["shape"]))
+            return deserialize_array(
+                mv.move_bytes, meta["dtype"], json.dumps(meta["shape"])
+            )
         except Exception:
             return None
 
@@ -159,7 +165,9 @@ class GameMemory:
         move_hash = int(hash_array(move_arr))
         # Store unique board position
         try:
-            Position.get((Position.game_id == gid) & (Position.board_hash == board_hash))
+            Position.get(
+                (Position.game_id == gid) & (Position.board_hash == board_hash)
+            )
         except DoesNotExist:
             b_bytes, dtype, dtype2, shape_str = serialize_array(board_arr)
             meta = {"dtype": dtype, "dtype2": dtype2, "shape": json.loads(shape_str)}
@@ -256,7 +264,9 @@ class GameMemory:
             if not rows:
                 continue
             for row in rows:
-                total = row.win_count + row.tie_count + row.neutral_count + row.loss_count
+                total = (
+                    row.win_count + row.tie_count + row.neutral_count + row.loss_count
+                )
                 if total == 0:
                     continue
                 pW = row.win_count / total
@@ -282,7 +292,9 @@ class GameMemory:
         try:
             mv = Move.get((Move.game_id == gid) & (Move.move_hash == best_move_hash))
             meta = json.loads(mv.meta_json)
-            move_arr = deserialize_array(mv.move_bytes, meta["dtype"], json.dumps(meta["shape"]))
+            move_arr = deserialize_array(
+                mv.move_bytes, meta["dtype"], json.dumps(meta["shape"])
+            )
             move_coords = list(map(int, np.array(move_arr).ravel()))
         except Exception:
             move_coords = None
@@ -309,9 +321,13 @@ class GameMemory:
         utility = pW + pT + pN - pL
         return pW, pT, pN, pL, certainty, utility, total
 
-    def _evaluate_move_row(self, gid: str, board_arr: np.ndarray, row, snapshot_player: int):
+    def _evaluate_move_row(
+        self, gid: str, board_arr: np.ndarray, row, snapshot_player: int
+    ):
         """Evaluate a single PlayStats row and return an evaluation dict."""
-        pW, pT, pN, pL, certainty, utility, total = self._compute_row_stats(row, snapshot_player)
+        pW, pT, pN, pL, certainty, utility, total = self._compute_row_stats(
+            row, snapshot_player
+        )
 
         # Try to build next board from the move
         next_board = None
@@ -335,10 +351,21 @@ class GameMemory:
                 .where((PlayStats.game_id == gid) & (PlayStats.board_hash == next_hash))
                 .distinct()
             )
-            opps_with_data = [int(r.snapshot_player) for r in opps_query if int(r.snapshot_player) != snapshot_player]
+            opps_with_data = [
+                int(r.snapshot_player)
+                for r in opps_query
+                if int(r.snapshot_player) != snapshot_player
+            ]
             if opps_with_data:
-                (opp_pW, opp_pT, opp_pN, opp_pL, opp_util_for_them, opp_cert, opp_move) = \
-                    self._best_opponent_reply(gid, next_norm, opps_with_data)
+                (
+                    opp_pW,
+                    opp_pT,
+                    opp_pN,
+                    opp_pL,
+                    opp_util_for_them,
+                    opp_cert,
+                    opp_move,
+                ) = self._best_opponent_reply(gid, next_norm, opps_with_data)
                 if opp_util_for_them is not None:
                     opp_util = -opp_util_for_them  # convert to our perspective
 
@@ -398,7 +425,9 @@ class GameMemory:
     # -------------------------
     # Public API: best and worst
     # -------------------------
-    def _get_move_rows_for_player(self, gid: str, board_hash: int, snapshot_player: int):
+    def _get_move_rows_for_player(
+        self, gid: str, board_hash: int, snapshot_player: int
+    ):
         return list(
             PlayStats.select().where(
                 (PlayStats.game_id == gid)
@@ -407,7 +436,13 @@ class GameMemory:
             )
         )
 
-    def _common_select_move(self, game_id: str, game_state: GameState, pick_best: bool = True, debug_move: bool = False):
+    def _common_select_move(
+        self,
+        game_id: str,
+        game_state: GameState,
+        pick_best: bool = True,
+        debug_move: bool = False,
+    ):
         """
         Shared logic to select best/worst move. pick_best=True -> best, False -> worst.
         """
@@ -420,8 +455,12 @@ class GameMemory:
         if not rows:
             return None
 
-        evaluations = [self._evaluate_move_row(gid, board_arr, r, snapshot_player) for r in rows]
-        chosen_move_hash, sorted_evals = self._select_from_evaluations(evaluations, pick_best=pick_best)
+        evaluations = [
+            self._evaluate_move_row(gid, board_arr, r, snapshot_player) for r in rows
+        ]
+        chosen_move_hash, sorted_evals = self._select_from_evaluations(
+            evaluations, pick_best=pick_best
+        )
         if chosen_move_hash is None:
             return None
 
@@ -434,7 +473,12 @@ class GameMemory:
                     debug_rows.append(
                         {
                             "move_hash": ev["move_hash"],
-                            "move_array": (np.array(mv_array).tolist() if mv_array is not None and not isinstance(mv_array, list) else mv_array),
+                            "move_array": (
+                                np.array(mv_array).tolist()
+                                if mv_array is not None
+                                and not isinstance(mv_array, list)
+                                else mv_array
+                            ),
                             "certainty": float(ev["certainty"]),
                             "utility": float(ev["utility"]),
                             "adjusted_utility": float(ev["adjusted_utility"]),
@@ -446,18 +490,52 @@ class GameMemory:
                             "opponent_data_exists": bool(ev["opponent_data_exists"]),
                             "adjusted": bool(ev["adjusted"]),
                             "opponent_best_move": ev["opponent_best_move"],
-                            "opponent_pW": (float(ev["opponent_pW"]) if ev.get("opponent_pW") is not None else None),
-                            "opponent_pT": (float(ev["opponent_pT"]) if ev.get("opponent_pT") is not None else None),
-                            "opponent_pN": (float(ev["opponent_pN"]) if ev.get("opponent_pN") is not None else None),
-                            "opponent_pL": (float(ev["opponent_pL"]) if ev.get("opponent_pL") is not None else None),
-                            "opponent_best_util_for_them": (float(ev["opponent_util_for_them"]) if ev.get("opponent_util_for_them") is not None else None),
-                            "opponent_best_util_for_me": (float(ev["opponent_util_for_me"]) if ev.get("opponent_util_for_me") is not None else None),
-                            "opponent_best_cert": (float(ev["opponent_cert"]) if ev.get("opponent_cert") is not None else None),
+                            "opponent_pW": (
+                                float(ev["opponent_pW"])
+                                if ev.get("opponent_pW") is not None
+                                else None
+                            ),
+                            "opponent_pT": (
+                                float(ev["opponent_pT"])
+                                if ev.get("opponent_pT") is not None
+                                else None
+                            ),
+                            "opponent_pN": (
+                                float(ev["opponent_pN"])
+                                if ev.get("opponent_pN") is not None
+                                else None
+                            ),
+                            "opponent_pL": (
+                                float(ev["opponent_pL"])
+                                if ev.get("opponent_pL") is not None
+                                else None
+                            ),
+                            "opponent_best_util_for_them": (
+                                float(ev["opponent_util_for_them"])
+                                if ev.get("opponent_util_for_them") is not None
+                                else None
+                            ),
+                            "opponent_best_util_for_me": (
+                                float(ev["opponent_util_for_me"])
+                                if ev.get("opponent_util_for_me") is not None
+                                else None
+                            ),
+                            "opponent_best_cert": (
+                                float(ev["opponent_cert"])
+                                if ev.get("opponent_cert") is not None
+                                else None
+                            ),
                             "dangerous": bool(ev["dangerous"]),
                             "is_selected": ev["move_hash"] == chosen_move_hash,
-                            "is_best": pick_best and (ev["move_hash"] == chosen_move_hash),
-                            "is_worst": (not pick_best) and (ev["move_hash"] == chosen_move_hash),
-                            "sort_key": (ev["adjusted_utility"], ev["total"], ev["certainty"]),
+                            "is_best": pick_best
+                            and (ev["move_hash"] == chosen_move_hash),
+                            "is_worst": (not pick_best)
+                            and (ev["move_hash"] == chosen_move_hash),
+                            "sort_key": (
+                                ev["adjusted_utility"],
+                                ev["total"],
+                                ev["certainty"],
+                            ),
                         }
                     )
                 except Exception:
@@ -469,8 +547,12 @@ class GameMemory:
 
     def get_best_move(self, game_id: str, game_state: GameState, debug_move=False):
         """Public wrapper to get the best move (highest adjusted utility)."""
-        return self._common_select_move(game_id, game_state, pick_best=True, debug_move=debug_move)
+        return self._common_select_move(
+            game_id, game_state, pick_best=True, debug_move=debug_move
+        )
 
     def get_worst_move(self, game_id: str, game_state: GameState, debug_move=False):
         """Public wrapper to get the worst move (lowest adjusted utility, preferring reliably-bad moves)."""
-        return self._common_select_move(game_id, game_state, pick_best=False, debug_move=debug_move)
+        return self._common_select_move(
+            game_id, game_state, pick_best=False, debug_move=debug_move
+        )

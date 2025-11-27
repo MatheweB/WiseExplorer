@@ -208,7 +208,9 @@ def render_debug(
     output.append(f"{DIM}{'─' * sep_length}{RESET}")
 
     # sort rows
-    sorted_rows = sorted(debug_rows, key=lambda d: d.get("sort_key", (0, 0, 0)), reverse=True)
+    sorted_rows = sorted(
+        debug_rows, key=lambda d: d.get("sort_key", (0, 0, 0)), reverse=True
+    )
 
     # DATA ROWS
     for d in sorted_rows:
