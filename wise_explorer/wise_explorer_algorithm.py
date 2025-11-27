@@ -39,25 +39,29 @@ def _set_move(
     """
     if is_prune_stage:
         # Bad‑path: keep losers, shuffle winners
-        if not agent.change:  # agent won
-            agent.core_move = random.choice(game.valid_moves())
-        else:
-            agent.core_move = random.choice(game.valid_moves()) 
-            # new_move = omnicron.get_worst_move(game.game_id(), game.get_state().clone())
-            # if new_move is not None:
-            #     agent.core_move = new_move
-            # else:
-            #     agent.core_move = random.choice(game.valid_moves()) 
-    else:
-        # Good‑path: explore winners, exploit losers
-        if not agent.change:  # agent won
-            agent.core_move = random.choice(game.valid_moves())
-        else:  # agent lost
-            new_move = omnicron.get_best_move(game.game_id(), game.get_state().clone(), debug_move=False)
+        if agent.change:  # Agent lost, keep and explore the bad move!
+            new_move = omnicron.get_worst_move(
+                game.game_id(), game.get_state().clone(), debug_move=False
+            )
             if new_move is not None:
                 agent.core_move = new_move
             else:
                 agent.core_move = random.choice(game.valid_moves())
+        else:  # Agent won, explore something else potentially bad
+            agent.core_move = random.choice(game.valid_moves())
+
+    else:
+        # Good‑path: explore winners, exploit losers
+        if agent.change:  # Agent lost, keep and explore the bad move!
+            new_move = omnicron.get_best_move(
+                game.game_id(), game.get_state().clone(), debug_move=False
+            )
+            if new_move is not None:
+                agent.core_move = new_move
+            else:
+                agent.core_move = random.choice(game.valid_moves())
+        else:  # Agent lost, explore something else potentially good
+            agent.core_move = random.choice(game.valid_moves())
 
 
 def update_agent(

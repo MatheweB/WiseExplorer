@@ -12,6 +12,7 @@ from utils.global_variables import (
     SELECTED_GAME,
     GAMES,
     INITIAL_STATES,
+    NUM_AGENTS,
 )
 
 from typing import Dict, List
@@ -57,11 +58,8 @@ def main():
     num_players = game.num_players()
     players = list(range(1, num_players + 1))
 
-    # number of agents PER player (tune this!)
-    AGENTS_PER_PLAYER = 40
-
     # build a multi-agent swarm
-    players_map = create_agent_swarm(players, AGENTS_PER_PLAYER)
+    players_map = create_agent_swarm(players, NUM_AGENTS)
 
     # memory manager
     omnicron = GameMemory()
