@@ -18,7 +18,7 @@ INITIAL_STATES = {"tic_tac_toe": tic_tac_toe_init_state}
 # -----------------------------------------------
 
 EPOCHS = 10
-NUM_AGENTS = 20
+NUM_AGENTS = 10
 SIMULATIONS = EPOCHS * NUM_AGENTS
 TURN_DEPTH = 20
 SELECTED_GAME = "tic_tac_toe"

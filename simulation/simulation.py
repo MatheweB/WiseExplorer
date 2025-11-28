@@ -304,6 +304,7 @@ def start_simulations(
         prune_count = simulations // 2
         optimize_count = simulations - prune_count
         
+        # We can comment out both _run_simulation_batch to go to "model mode", only memory no learning
         _run_simulation_batch(
             players_map, game, turn_depth, prune_count, omnicron, True, player_ids
         )
