@@ -33,6 +33,7 @@ db = SqliteDatabase(None, pragmas={
 # -----------------------------------------------------------
 # DATA STRUCTURES
 # -----------------------------------------------------------
+
 @dataclass
 class StatBlock:
     """Helper to organize raw DB stats."""
@@ -50,22 +51,39 @@ class StatBlock:
 
     @property
     def certainty(self) -> float:
+        """Pure certainty metric - how concentrated is the distribution?"""
         if self.total == 0: return 0.0
-        # return max(self.wins, self.ties, self.neutral, self.losses) / self.total
-        pW = self.probs[0]
-        return pW
-
+        pW, pT, pN, pL = self.probs
+        return pW**2 + pT**2 + pN**2 + pL**2
+        
     @property
     def utility(self) -> float:
-        if self.total == 0: return 0.5 # natural midpoint
-        # return (self.wins + self.ties + self.neutral - self.losses) / self.total
+        """Expected value with 2x loss aversion"""
+        if self.total == 0: return 0.5  # natural midpoint
         pW = self.probs[0]
         pL = self.probs[3]
-        return ((1-pL) + pW)/2  # Prioritize anything that isn't a los, and bump it up with a win! Normalize with 2
-                                # If pL = 0, pW = 1, we get 1 -> Perfect move
-                                # If pL = 0.5, pW = 0.5, we get 0.5 -> Balanced/uncertain
-                                # If pL = pW = 0, we get 0.5 baseline -> All ties/neutral
-                                # If pL = 1, pW = 0, we get 0 -> Worst possible move
+        
+        return ((1-pL) + pW)/2   # Reward non-loss baseline + bonus for wins (divide by 2 = normalized [0,1])
+    
+    @property
+    def score(self) -> float:
+        """Directional certainty score - combines utility and certainty"""
+        if self.total == 0: return 0.5  # neutral
+        
+        U = self.utility
+        C = self.certainty
+        
+        # Score = (2*U - 1) * C
+        # Range: [-1, 1] where:
+        #   +1 = Confident good outcome
+        #   -1 = Confident bad outcome
+        #    0 = Uncertain OR neutral
+        raw_score = (2 * U - 1) * C
+        
+        # Normalize to [0, 1] for easier comparison
+        score_norm = (raw_score + 1) / 2
+        
+        return score_norm
 
     @classmethod
     def from_row(cls, row, snapshot_player: int, acting_player: int):
@@ -133,7 +151,7 @@ class GameMemory:
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(game_id, board_hash, move_hash, snapshot_player, acting_player) 
                 DO UPDATE SET win_count=win_count+excluded.win_count, tie_count=tie_count+excluded.tie_count, 
-                              neutral_count=neutral_count+excluded.neutral_count, loss_count=loss_count+excluded.loss_count
+                                neutral_count=neutral_count+excluded.neutral_count, loss_count=loss_count+excluded.loss_count
             """,
             'get_moves': "SELECT move_hash, acting_player, win_count, tie_count, neutral_count, loss_count FROM play_stats WHERE game_id=? AND board_hash=? AND snapshot_player=?",
             'get_move_bytes': "SELECT move_bytes, meta_json FROM moves WHERE game_id=? AND move_hash=?",
@@ -205,8 +223,9 @@ class GameMemory:
         # Lookahead variables
         opp_util = None
         opp_cert = None
+        opp_score = None
         opp_move_coords = None
-        opp_probs = (None, None, None, None) # pW, pT, pN, pL for opponent
+        opp_probs = (None, None, None, None)  # pW, pT, pN, pL for opponent
 
         # Calculate Transition
         move_hash = row_dict['move_hash']
@@ -231,35 +250,42 @@ class GameMemory:
             opp_res = self._get_best_opponent_stats(gid, next_hash, snapshot_player)
             if opp_res:
                 opp_stats, opp_m_hash = opp_res
-                opp_util = -opp_stats.utility # Flip utility
+                # Store opponent's metrics from their perspective
+                opp_util = opp_stats.utility
                 opp_cert = opp_stats.certainty
+                opp_score = opp_stats.score
                 opp_probs = opp_stats.probs
                 
                 # Decode opponent move for "Opp Reply" visualization
                 opp_move_tup = self._decode_move(gid, opp_m_hash)
                 opp_move_coords = list(opp_move_tup) if opp_move_tup else None
 
-        adjusted_utility = stats.utility + (opp_util if opp_util is not None else 0)
-        dangerous = (opp_util is not None and opp_util <= -0.9 and opp_cert >= 0.8)
+        # Adjusted score: my score minus opponent's score (their good move hurts me)
+        adjusted_score = stats.score - (opp_score if opp_score is not None else 0)
+        
+        # Dangerous if opponent has high score and high certainty
+        dangerous = (opp_score is not None and opp_score >= 0.8 and opp_cert >= 0.7)
 
         # Full Dictionary expected by debug_viz
         return {
             "move_hash": move_hash,
             "utility": stats.utility,
-            "adjusted_utility": adjusted_utility,
             "certainty": stats.certainty,
+            "score": stats.score,
+            "adjusted_score": adjusted_score,
             "total": stats.total,
             "pW": pW, "pT": pT, "pN": pN, "pL": pL,
-            # Opponent Data
-            "opponent_data_exists": opp_util is not None,
-            "adjusted": opp_util is not None, # Triggers "Eye" icon
+            # Opponent Data (from their perspective)
+            "opponent_data_exists": opp_score is not None,
+            "adjusted": opp_score is not None,  # Triggers "Eye" icon
             "opponent_best_move": opp_move_coords,
             "opponent_pW": opp_probs[0],
             "opponent_pT": opp_probs[1],
             "opponent_pN": opp_probs[2],
             "opponent_pL": opp_probs[3],
-            "opponent_util_for_me": opp_util,
+            "opponent_util": opp_util,
             "opponent_cert": opp_cert,
+            "opponent_score": opp_score,
             "dangerous": dangerous
         }
 
@@ -310,11 +336,11 @@ class GameMemory:
 
         if not evals: return None
 
-        # Sort key logic
-        key = lambda x: (x['adjusted_utility'], x['total'], x['certainty'])
+        # Sort key logic - now using score instead of utility
+        key = lambda x: (x['adjusted_score'], x['certainty'])
         if not pick_best:
-            # For worst: prefer LOW adjusted utility, but HIGH total/certainty (reliable failure)
-            key = lambda x: (-x['adjusted_utility'], x['total'], x['certainty'])
+            # For worst: prefer LOW adjusted score, with certainty as tiebreaker
+            key = lambda x: (-x['adjusted_score'], x['certainty'])
             
         evals.sort(key=key, reverse=True)
         chosen = evals[0]
@@ -335,12 +361,8 @@ class GameMemory:
                 **e,
                 "move_array": list(tup) if tup else None,
                 "is_selected": e['move_hash'] == chosen_hash,
-                "is_best": pick_best and (e['move_hash'] == chosen_hash),  # Triggers Best Badge
-                "is_worst": (not pick_best) and (e['move_hash'] == chosen_hash), # Triggers Worst Badge
-                # Opponent metrics mapping for display
-                "opponent_best_util_for_them": (-e['opponent_util_for_me']) if e['opponent_util_for_me'] is not None else None,
-                "opponent_best_util_for_me": e['opponent_util_for_me'],
-                "opponent_best_cert": e['opponent_cert'],
+                "is_best": pick_best and (e['move_hash'] == chosen_hash),
+                "is_worst": (not pick_best) and (e['move_hash'] == chosen_hash),
             }
             debug_rows.append(row_data)
         render_debug(board, debug_rows)

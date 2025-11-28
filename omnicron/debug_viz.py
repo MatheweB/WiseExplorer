@@ -23,7 +23,6 @@ GRAY_FG = "\033[38;5;244m"
 BEST_BG = "\033[48;5;21m"  # Blue background for best move
 BEST_FG = "\033[38;5;255m"
 
-# NEW — worst move coloring
 WORST_BG = "\033[48;5;52m"  # dark maroon
 WORST_FG = "\033[38;5;255m"
 
@@ -99,8 +98,8 @@ def render_debug(
     board: np.ndarray,
     debug_rows: List[Dict[str, Any]],
     *,
-    primary_metric: str = "certainty",
-    secondary_metric: str = "utility",
+    primary_metric: str = "score",
+    secondary_metric: str = "certainty",
     show_bars: bool = True,
     cell_width: int = 14,
     return_str: bool = False,
@@ -120,7 +119,7 @@ def render_debug(
     secondary_mat = np.full((N, N), np.nan)
     is_best_mat = np.zeros((N, N), dtype=bool)
     is_danger_mat = np.zeros((N, N), dtype=bool)
-    is_worst_mat = np.zeros((N, N), dtype=bool)  # NEW
+    is_worst_mat = np.zeros((N, N), dtype=bool)
 
     for d in debug_rows:
         try:
@@ -135,18 +134,18 @@ def render_debug(
         secondary_mat[r, c] = float(d.get(secondary_metric, np.nan))
         is_best_mat[r, c] = bool(d.get("is_best", False))
         is_danger_mat[r, c] = bool(d.get("dangerous", False))
-        is_worst_mat[r, c] = bool(d.get("is_worst", False))  # NEW
+        is_worst_mat[r, c] = bool(d.get("is_worst", False))
 
     output = []
     output.append("")
     output.append(
-        f"{BOLD}╔═══════════════════════════════════════════════════════════════════╗{RESET}"
+        f"{BOLD}╔═══════════════════════════════════════════════════════════════════════════════════════════════════════╗{RESET}"
     )
     output.append(
-        f"{BOLD}║                      MOVE ANALYSIS SUMMARY                        ║{RESET}"
+        f"{BOLD}║                                        MOVE ANALYSIS SUMMARY                                          ║{RESET}"
     )
     output.append(
-        f"{BOLD}╚═══════════════════════════════════════════════════════════════════╝{RESET}"
+        f"{BOLD}╚═══════════════════════════════════════════════════════════════════════════════════════════════════════╝{RESET}"
     )
     output.append("")
 
@@ -156,11 +155,11 @@ def render_debug(
         "│",
         f"{'Our Stats':^{W_STAT*4+3}}",
         "│",
-        f"{'Our Metrics':^{W_METRIC*3+W_TOTAL+3}}",
+        f"{'Our Metrics':^{W_METRIC*4+W_TOTAL+4}}",
         "│",
         f"{'Opp Reply':^{W_OPP_MOVE}}",
         f"{'Opp Stats':^{W_OPP_STAT*4+3}}",
-        f"{'Opp Metrics':^{W_OPP_METRIC*2+1}}",
+        f"{'Opp Metrics':^{W_OPP_METRIC*3+2}}",
         "│",
         "Notes",
     ]
@@ -176,6 +175,7 @@ def render_debug(
         "│",
         f"{'Cert':<{W_METRIC}}",
         f"{'Util':<{W_METRIC}}",
+        f"{'Score':<{W_METRIC}}",
         f"{'Adj':<{W_METRIC}}",
         f"{'N':<{W_TOTAL}}",
         "│",
@@ -186,6 +186,7 @@ def render_debug(
         f"{'pL':<{W_OPP_STAT}}",
         f"{'Util':<{W_OPP_METRIC}}",
         f"{'Cert':<{W_OPP_METRIC}}",
+        f"{'Score':<{W_OPP_METRIC}}",
         "│",
     ]
     output.append(" ".join(subheader_parts))
@@ -196,11 +197,11 @@ def render_debug(
             1,
             W_STAT * 4 + 3,
             1,
-            W_METRIC * 3 + W_TOTAL + 3,
+            W_METRIC * 4 + W_TOTAL + 4,
             1,
             W_OPP_MOVE,
             W_OPP_STAT * 4 + 3,
-            W_OPP_METRIC * 2 + 1,
+            W_OPP_METRIC * 3 + 2,
             1,
             20,
         ]
@@ -209,7 +210,7 @@ def render_debug(
 
     # sort rows
     sorted_rows = sorted(
-        debug_rows, key=lambda d: d.get("sort_key", (0, 0, 0)), reverse=True
+        debug_rows, key=lambda d: d.get("adjusted_score", 0), reverse=True
     )
 
     # DATA ROWS
@@ -224,7 +225,8 @@ def render_debug(
 
         cert = d.get("certainty", 0.0)
         util = d.get("utility", 0.0)
-        adj = d.get("adjusted_utility", 0.0)
+        score = d.get("score", 0.0)
+        adj = d.get("adjusted_score", 0.0)
         total = d.get("total", 0)
 
         opp_move = d.get("opponent_best_move")
@@ -234,8 +236,9 @@ def render_debug(
         opp_pT = d.get("opponent_pT")
         opp_pN = d.get("opponent_pN")
         opp_pL = d.get("opponent_pL")
-        opp_util = d.get("opponent_best_util_for_them")
-        opp_cert = d.get("opponent_best_cert")
+        opp_util = d.get("opponent_util")
+        opp_cert = d.get("opponent_cert")
+        opp_score = d.get("opponent_score")
 
         is_best = d.get("is_best", False)
         is_adjusted = d.get("adjusted", False)
@@ -265,7 +268,8 @@ def render_debug(
             "│",
             f"{cert:.3f}",
             f"{util:+.2f}",
-            f"{adj:+.2f}",
+            f"{score:.3f}",
+            f"{adj:.3f}",
             f"{total:{W_TOTAL}d}",
             "│",
             f"{opp_move_str:>{W_OPP_MOVE}}",
@@ -275,6 +279,7 @@ def render_debug(
             f"{_format_optional(opp_pL, '.3f'):>{W_OPP_STAT}}",
             f"{_format_optional(opp_util, '+.2f'):>{W_OPP_METRIC}}",
             f"{_format_optional(opp_cert, '.3f'):>{W_OPP_METRIC}}",
+            f"{_format_optional(opp_score, '.3f'):>{W_OPP_METRIC}}",
             "│",
             " ".join(notes),
         ]
@@ -285,6 +290,7 @@ def render_debug(
     output.append(
         f"{DIM}Legend: ★=Best Move, ☠=Worst Move, 🔥=Dangerous, ↓=Risk-Adjusted, 👁=Opponent Data{RESET}"
     )
+    output.append(f"{DIM}Metrics: Cert=Certainty [0,1], Util=Utility [0,1], Score=Combined [0,1], Adj=Adjusted Score{RESET}")
     output.append("")
 
     # ========================================
@@ -339,7 +345,6 @@ def render_debug(
             else:
                 cell_bot = " " * cell_width
 
-            # === NEW: worst move frame ===
             if best and cell_width >= 3:
                 cell_top = "▌" + cell_top[1:-1] + "▐"
                 cell_mid = "▌" + cell_mid[1:-1] + "▐"
