@@ -194,7 +194,7 @@ def _store_with_permutations(
     for pid, stack in stacks.items():
         outcome = results[pid]
         for move_arr, snapshot_state, acting_player in stack:
-            omnicron.write(game_id, snapshot_state, acting_player, outcome, move_arr)
+            omnicron.record_outcome(game_id, snapshot_state, move_arr, acting_player, outcome)
     
     # if num_players <= 1:
     #     return  # No permutations for 1-player
@@ -327,7 +327,7 @@ def start_simulations(
 
             # Select and execute best move
             current_state = game.get_state().clone()
-            best_move = omnicron.get_best_move(game.game_id(), current_state, debug_move=True)
+            best_move = omnicron.get_best_move(game.game_id(), current_state, debug=True)
 
             print(best_move)
             

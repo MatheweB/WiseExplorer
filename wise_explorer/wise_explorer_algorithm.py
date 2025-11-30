@@ -41,7 +41,7 @@ def _set_move(
         # Bad‑path: keep losers, shuffle winners
         if agent.change:  # Agent lost, keep and explore the bad move!
             new_move = omnicron.get_worst_move(
-                game.game_id(), game.get_state().clone(), debug_move=False
+                game.game_id(), game.get_state().clone(), debug=False
             )
             if new_move is not None:
                 agent.core_move = new_move
@@ -54,7 +54,7 @@ def _set_move(
         # Good‑path: explore winners, exploit losers
         if agent.change:  # Agent lost, keep and explore the bad move!
             new_move = omnicron.get_best_move(
-                game.game_id(), game.get_state().clone(), debug_move=False
+                game.game_id(), game.get_state().clone(), debug=False
             )
             if new_move is not None:
                 agent.core_move = new_move
