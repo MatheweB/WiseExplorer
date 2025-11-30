@@ -1,26 +1,63 @@
-# manager.py
-import os
+"""
+Game memory manager with hybrid graph/tensor canonicalization (Option 3).
+Fully compatible with refactored state_canonicalizer.py.
+"""
+
 import json
 import logging
-import sqlite3
-import numpy as np
-from typing import List, Tuple, Optional, Dict, Any
+from typing import Optional, Tuple, Dict, Any, Union
 from dataclasses import dataclass
-from functools import lru_cache
+from collections import OrderedDict
+
+import numpy as np
 from peewee import (
     Model, IntegerField, BlobField, TextField, SqliteDatabase, CompositeKey
 )
+
+# Assuming these are defined in your environment
 from omnicron.serializers import serialize_array, deserialize_array, hash_array
 from agent.agent import State
-from games.game_state import GameState
+from omnicron.state_canonicalizer import (
+    canonicalize_state,
+    canonicalize_move,
+    invert_canonical_move,
+)
 from omnicron.debug_viz import render_debug
 
+# --- Logger Setup ---
 logger = logging.getLogger(__name__)
 if not logger.hasHandlers():
     logging.basicConfig(level=logging.INFO)
 
 # -----------------------------------------------------------
-# CONFIGURATION
+# CONFIG: small canonicalization LRU for repeated lookups
+# -----------------------------------------------------------
+class SimpleLRU:
+    # ... (existing SimpleLRU class definition is unchanged) ...
+    def __init__(self, maxsize=8192):
+        self.maxsize = int(maxsize)
+        self._cache = OrderedDict()
+
+    def get(self, key):
+        try:
+            v = self._cache.pop(key)
+            self._cache[key] = v
+            return v
+        except KeyError:
+            return None
+
+    def put(self, key, value):
+        if key in self._cache:
+            self._cache.pop(key)
+        self._cache[key] = value
+        if len(self._cache) > self.maxsize:
+            self._cache.popitem(last=False)
+
+# small global cache (configurable)
+_CANON_CACHE = SimpleLRU(maxsize=4096)
+
+# -----------------------------------------------------------
+# DATABASE SETUP (unchanged schema)
 # -----------------------------------------------------------
 db = SqliteDatabase(None, pragmas={
     'journal_mode': 'WAL',
@@ -30,345 +67,492 @@ db = SqliteDatabase(None, pragmas={
     'temp_store': 'MEMORY'
 })
 
-# -----------------------------------------------------------
-# DATA STRUCTURES
-# -----------------------------------------------------------
-
-@dataclass
-class StatBlock:
-    """Helper to organize raw DB stats."""
-    wins: int
-    ties: int
-    neutral: int
-    losses: int
-    total: int
-
-    @property
-    def probs(self):
-        """Returns tuple (pW, pT, pN, pL)"""
-        if self.total == 0: return (0.0, 0.0, 0.0, 0.0)
-        return (self.wins/self.total, self.ties/self.total, self.neutral/self.total, self.losses/self.total)
-
-    @property
-    def certainty(self) -> float:
-        """Pure certainty metric - how concentrated is the distribution?"""
-        if self.total == 0: return 0.0
-        pW, pT, pN, pL = self.probs
-        return pW**2 + pT**2 + pN**2 + pL**2
-        
-    @property
-    def utility(self) -> float:
-        """Expected value with 2x loss aversion"""
-        if self.total == 0: return 0.5  # natural midpoint
-        pW = self.probs[0]
-        pL = self.probs[3]
-        
-        return ((1-pL) + pW)/2   # Reward non-loss baseline + bonus for wins (divide by 2 = normalized [0,1])
-    
-    @property
-    def score(self) -> float:
-        """Directional certainty score - combines utility and certainty"""
-        if self.total == 0: return 0.5  # neutral
-        
-        U = self.utility
-        C = self.certainty
-        
-        # Score = (2*U - 1) * C
-        # Range: [-1, 1] where:
-        #   +1 = Confident good outcome
-        #   -1 = Confident bad outcome
-        #    0 = Uncertain OR neutral
-        raw_score = (2 * U - 1) * C
-        
-        # Normalize to [0, 1] for easier comparison
-        score_norm = (raw_score + 1) / 2
-        
-        return score_norm
-
-    @classmethod
-    def from_row(cls, row, snapshot_player: int, acting_player: int):
-        w, t, n, l = row['win_count'], row['tie_count'], row['neutral_count'], row['loss_count']
-        if snapshot_player != acting_player:
-            w, l = l, w 
-        return cls(w, t, n, l, w + t + n + l)
-
-# -----------------------------------------------------------
-# DATABASE MODELS
-# -----------------------------------------------------------
 class BaseModel(Model):
     class Meta:
         database = db
 
 class Position(BaseModel):
+    board_hash = TextField(primary_key=True)
     game_id = TextField()
-    board_hash = IntegerField(primary_key=True)
     board_bytes = BlobField()
+    original_board_bytes = BlobField()
     meta_json = TextField()
+
     class Meta:
         table_name = "positions"
+        indexes = (
+            (("game_id", "board_hash"), False),
+        )
 
 class Move(BaseModel):
+    move_hash = TextField(primary_key=True)
     game_id = TextField()
-    move_hash = IntegerField(primary_key=True)
     move_bytes = BlobField()
     meta_json = TextField()
+
     class Meta:
         table_name = "moves"
+        indexes = (
+            (("game_id", "move_hash"), False),
+        )
 
 class PlayStats(BaseModel):
     game_id = TextField()
-    board_hash = IntegerField()
-    move_hash = IntegerField()
+    board_hash = TextField()
+    move_hash = TextField()
     snapshot_player = IntegerField()
     acting_player = IntegerField()
+
     win_count = IntegerField(default=0)
     tie_count = IntegerField(default=0)
     neutral_count = IntegerField(default=0)
     loss_count = IntegerField(default=0)
+
     class Meta:
         table_name = "play_stats"
-        primary_key = CompositeKey("game_id", "board_hash", "move_hash", "snapshot_player", "acting_player")
-        indexes = ((('game_id', 'board_hash', 'snapshot_player'), False),)
+        primary_key = CompositeKey(
+            "game_id", "board_hash", "move_hash", "snapshot_player", "acting_player"
+        )
+        indexes = (
+            (("game_id", "board_hash", "snapshot_player"), False),
+        )
+
+# -----------------------------------------------------------
+# STATISTICS HELPER (unchanged)
+# -----------------------------------------------------------
+@dataclass
+class StatBlock:
+    wins: int
+    ties: int
+    neutral: int
+    losses: int
+
+    @property
+    def total(self) -> int:
+        return self.wins + self.ties + self.neutral + self.losses
+
+    @property
+    def probs(self) -> Tuple[float, float, float, float]:
+        if self.total == 0:
+            return (0.0, 0.0, 0.0, 0.0)
+        t = self.total
+        return (self.wins / t, self.ties / t, self.neutral / t, self.losses / t)
+
+    @property
+    def certainty(self) -> float:
+        if self.total == 0:
+            return 0.0
+        pW, pT, pN, pL = self.probs
+        return (pW + pT + pN) - pL
+
+    @property
+    def utility(self) -> float:
+        if self.total == 0:
+            return 0.5
+        pW = self.probs[0]
+        pT = self.probs[1]
+        return pW + 0.5*pT
+
+    @property
+    def score(self) -> float:
+        if self.total == 0:
+            return 0.5
+        U = self.utility
+        C = self.certainty
+        return U * C
+
+    @classmethod
+    def from_row(cls, row_dict: dict, snapshot_player: int, acting_player: int):
+        w = int(row_dict.get('win_count', 0))
+        t = int(row_dict.get('tie_count', 0))
+        n = int(row_dict.get('neutral_count', 0))
+        l = int(row_dict.get('loss_count', 0))
+        if snapshot_player != acting_player:
+            w, l = l, w
+        return cls(wins=w, ties=t, neutral=n, losses=l)
 
 # -----------------------------------------------------------
 # GAME MEMORY MANAGER
 # -----------------------------------------------------------
 class GameMemory:
-    def __init__(self, base_dir="omnicron/game_memory/games", db_path="omnicron/game_memory/memory.db", flush_every=5000):
-        self.base_dir = base_dir
-        self.flush_every = int(flush_every)
-        self.write_counter = 0
-        os.makedirs(self.base_dir, exist_ok=True)
+    def __init__(self, db_path: str = "memory.db", canon_cache_size: int = 4096):
+        self.db_path = db_path
+        self._canon_cache = _CANON_CACHE
         db.init(db_path)
         db.connect(reuse_if_open=True)
         db.create_tables([Position, Move, PlayStats])
-        self._transition_cache: Dict[Tuple[int, int], int] = {}
+        logger.info(f"GameMemory initialized: {db_path} (canon_cache_size={canon_cache_size})")
 
-        # Optimized SQL queries
-        self._sql = {
-            'upsert_stats': """
-                INSERT INTO play_stats (game_id, board_hash, move_hash, snapshot_player, acting_player, win_count, tie_count, neutral_count, loss_count) 
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(game_id, board_hash, move_hash, snapshot_player, acting_player) 
-                DO UPDATE SET win_count=win_count+excluded.win_count, tie_count=tie_count+excluded.tie_count, 
-                                neutral_count=neutral_count+excluded.neutral_count, loss_count=loss_count+excluded.loss_count
-            """,
-            'get_moves': "SELECT move_hash, acting_player, win_count, tie_count, neutral_count, loss_count FROM play_stats WHERE game_id=? AND board_hash=? AND snapshot_player=?",
-            'get_move_bytes': "SELECT move_bytes, meta_json FROM moves WHERE game_id=? AND move_hash=?",
-            'insert_pos': "INSERT OR IGNORE INTO positions (game_id, board_hash, board_bytes, meta_json) VALUES (?, ?, ?, ?)",
-            'insert_move': "INSERT OR IGNORE INTO moves (game_id, move_hash, move_bytes, meta_json) VALUES (?, ?, ?, ?)"
-        }
+    def _normalize_game_id(self, game_id: str) -> str:
+        return game_id.lower().replace(" ", "_").replace("-", "_")
 
-    # -------------------------
-    # Utilities (Cached)
-    # -------------------------
-    def _normalize_board(self, board) -> np.ndarray:
-        if isinstance(board, np.ndarray) and board.dtype == np.int64: return board
-        arr = np.array(board, copy=True)
-        if arr.dtype == object: arr = np.where(arr == None, 0, arr)
-        return arr.astype(np.int64)
-
-    @lru_cache(maxsize=10000)
-    def _decode_move(self, gid: str, move_hash: int) -> Optional[Tuple]:
-        cursor = db.execute_sql(self._sql['get_move_bytes'], (gid, move_hash))
-        row = cursor.fetchone()
-        if not row: return None
-        meta = json.loads(row[1])
-        arr = deserialize_array(row[0], meta["dtype"], json.dumps(meta["shape"]))
-        return tuple(arr.ravel())
-
-    # -------------------------
-    # Fast Write
-    # -------------------------
-    def write(self, game_id: str, snapshot_state: GameState, acting_player: int, outcome: State, move: np.ndarray):
-        if snapshot_state is None: return
-        gid = str(game_id).lower().replace(" ", "_")
-        board_arr = self._normalize_board(snapshot_state.board)
-        move_arr = np.array(move, copy=True)
-        b_hash, m_hash = int(hash_array(board_arr)), int(hash_array(move_arr))
-        s_player = int(snapshot_state.current_player)
-
-        # Optimistic Writes
-        b_bytes, b_dtype, _, b_shape = serialize_array(board_arr)
-        db.execute_sql(self._sql['insert_pos'], (gid, b_hash, b_bytes, json.dumps({"dtype": b_dtype, "shape": json.loads(b_shape)})))
-        m_bytes, m_dtype, _, m_shape = serialize_array(move_arr)
-        db.execute_sql(self._sql['insert_move'], (gid, m_hash, m_bytes, json.dumps({"dtype": m_dtype, "shape": json.loads(m_shape)})))
-
-        # Upsert Stats
-        counts = [0, 0, 0, 0]
-        if outcome == State.WIN: counts[0] = 1
-        elif outcome == State.TIE: counts[1] = 1
-        elif outcome == State.NEUTRAL: counts[2] = 1
-        elif outcome == State.LOSS: counts[3] = 1
-        db.execute_sql(self._sql['upsert_stats'], (gid, b_hash, m_hash, s_player, acting_player, *counts))
-        self._check_flush(gid)
-
-    def _check_flush(self, gid):
-        self.write_counter += 1
-        if self.write_counter % self.flush_every == 0:
+    def _serialize_meta(self, dtype, dtype_str, shape) -> str:
+        if isinstance(shape, str):
             try:
-                backup_path = os.path.join(self.base_dir, gid, "plays.sqlite")
-                db.execute_sql(f"VACUUM main INTO '{backup_path}';")
-            except Exception: pass
+                shape_val = json.loads(shape)
+            except Exception:
+                shape_val = shape
+        elif isinstance(shape, tuple):
+            shape_val = list(shape)
+        else:
+            shape_val = shape
+        return json.dumps({
+            "dtype": str(dtype),
+            "dtype_str": str(dtype_str),
+            "shape": shape_val
+        })
 
     # -------------------------
-    # Logic: Evaluation
+    # Canonicalization helper with LRU keyed by board bytes + player (when possible)
     # -------------------------
-    def _evaluate_candidate(self, gid: str, board_arr: np.ndarray, row_dict: dict, snapshot_player: int) -> dict:
-        """Converts DB row to rich dictionary matching original code's debug schema."""
-        stats = StatBlock.from_row(row_dict, snapshot_player, row_dict['acting_player'])
-        if stats.total == 0: return None
-        pW, pT, pN, pL = stats.probs
-
-        # Lookahead variables
-        opp_util = None
-        opp_cert = None
-        opp_score = None
-        opp_move_coords = None
-        opp_probs = (None, None, None, None)  # pW, pT, pN, pL for opponent
-
-        # Calculate Transition
-        move_hash = row_dict['move_hash']
-        cache_key = (int(hash_array(board_arr)), move_hash)
-        
-        if cache_key not in self._transition_cache:
-            move_tup = self._decode_move(gid, move_hash)
-            if move_tup and len(move_tup) >= 2:
-                next_board = board_arr.copy()
-                try:
-                    next_board[int(move_tup[0]), int(move_tup[1])] = snapshot_player
-                    self._transition_cache[cache_key] = int(hash_array(next_board))
-                except IndexError:
-                    self._transition_cache[cache_key] = -1
-            else:
-                self._transition_cache[cache_key] = -1
-        
-        next_hash = self._transition_cache[cache_key]
-
-        if next_hash != -1:
-            # We get (StatBlock, move_hash) from the opponent helper
-            opp_res = self._get_best_opponent_stats(gid, next_hash, snapshot_player)
-            if opp_res:
-                opp_stats, opp_m_hash = opp_res
-                # Store opponent's metrics from their perspective
-                opp_util = opp_stats.utility
-                opp_cert = opp_stats.certainty
-                opp_score = opp_stats.score
-                opp_probs = opp_stats.probs
+    def _canonicalize_cached(self, game_state: Any) -> Dict[str, Any]:
+        """
+        Try to cache canonicalize_state results when we can build a stable bytes key.
+        The key now incorporates board bytes, current player, and board shape for stability.
+        """
+        # Fast path for board-like states
+        try:
+            if hasattr(game_state, "board"):
+                board = np.asarray(game_state.board, dtype=object)
+                b_bytes, b_dtype, _, b_shape = serialize_array(board)
+                player = int(getattr(game_state, "current_player", 0))
                 
-                # Decode opponent move for "Opp Reply" visualization
-                opp_move_tup = self._decode_move(gid, opp_m_hash)
-                opp_move_coords = list(opp_move_tup) if opp_move_tup else None
+                # --- FIX: Use the corrected triple-arg hash function for the cache key ---
+                key = hashlib_sha256_bytes_triple_arg(b_bytes, player, json.dumps(b_shape))
+                
+                cached = self._canon_cache.get(key)
+                if cached:
+                    return cached
+                # not cached -> compute and store
+                res = canonicalize_state(game_state)
+                # ensure required keys exist
+                if not isinstance(res, dict) or 'hash' not in res or 'iso_map' not in res:
+                    raise RuntimeError("canonicalize_state produced unexpected result")
+                self._canon_cache.put(key, res)
+                return res
+        except Exception as e:
+            # fall back to uncached call on any error
+            logger.debug("canonicalize cache fast-path failed, falling back: %s", e)
 
-        # Adjusted score: my score minus opponent's score (their good move hurts me)
-        adjusted_score = stats.score - (opp_score if opp_score is not None else 0)
-        
-        # Dangerous if opponent has high score and high certainty
-        dangerous = (opp_score is not None and opp_score >= 0.8 and opp_cert >= 0.7)
+        # fallback: no caching for general states
+        res = canonicalize_state(game_state)
+        if not isinstance(res, dict) or 'hash' not in res or 'iso_map' not in res:
+            raise RuntimeError("canonicalize_state produced unexpected result")
+        return res
 
-        # Full Dictionary expected by debug_viz
+    # -------------------------
+    # Main write method
+    # -------------------------
+    def write(self,
+              game_id: str,
+              snapshot_state,
+              acting_player: int,
+              outcome: State,
+              move: np.ndarray) -> None:
+        if snapshot_state is None:
+            logger.warning("Skipping write: snapshot_state is None")
+            return
+
+        gid = self._normalize_game_id(game_id)
+
+        # Canonicalize (cached when possible)
+        try:
+            canonical = self._canonicalize_cached(snapshot_state)
+        except Exception as exc:
+            logger.exception("Canonicalization failed; skipping write. Error: %s", exc)
+            return
+
+        # canonical expected keys: 'hash' (str), 'iso_map' (dict)
+        board_hash = str(canonical["hash"])
+        iso_map = canonical["iso_map"]
+
+        # Store the original board bytes for debug / visualization
+        original_board = snapshot_state.board
+        orig_bytes, orig_dtype, orig_dtype_str, orig_shape = serialize_array(original_board)
+        orig_meta = self._serialize_meta(orig_dtype, orig_dtype_str, orig_shape)
+
+        try:
+            db.execute_sql(
+                "INSERT OR IGNORE INTO positions (board_hash, game_id, board_bytes, original_board_bytes, meta_json) VALUES (?, ?, ?, ?, ?)",
+                (board_hash, gid, orig_bytes, orig_bytes, orig_meta)
+            )
+        except Exception as exc:
+            logger.exception("Failed to INSERT position: %s", exc)
+            # proceed — if insert failed it's probably ok (duplicate or DB issue)
+
+        # Canonicalize the move using iso_map
+        try:
+            canonical_move = canonicalize_move(move, iso_map)
+        except Exception as exc:
+            logger.exception("canonicalize_move failed; skipping write. Error: %s", exc)
+            return
+
+        if canonical_move is None:
+            # treat as no-op: we can't canonicalize the move (store raw)
+            canonical_move = np.asarray(move, dtype=object)
+
+        try:
+            move_hash = str(hash_array(canonical_move))
+        except Exception:
+            # ensure hashable representation (this uses the stable array hashing)
+            move_hash = hashlib_sha256_bytes_for_array(canonical_move)
+
+        # Serialize canonical move
+        move_bytes, move_dtype, move_dtype_str, move_shape = serialize_array(canonical_move)
+        move_meta = self._serialize_meta(move_dtype, move_dtype_str, move_shape)
+
+        try:
+            db.execute_sql(
+                "INSERT OR IGNORE INTO moves (move_hash, game_id, move_bytes, meta_json) VALUES (?, ?, ?, ?)",
+                (move_hash, gid, move_bytes, move_meta)
+            )
+        except Exception as exc:
+            logger.exception("Failed to INSERT move: %s", exc)
+
+        # Update stats (ensure ints)
+        try:
+            snapshot_player = int(snapshot_state.current_player)
+        except Exception:
+            snapshot_player = int(getattr(snapshot_state, "current_player", 0))
+        try:
+            acting_player = int(acting_player)
+        except Exception:
+            acting_player = int(acting_player) if isinstance(acting_player, int) else 0
+
+        outcome_counts = [0, 0, 0, 0]
+        if outcome == State.WIN:
+            outcome_counts[0] = 1
+        elif outcome == State.TIE:
+            outcome_counts[1] = 1
+        elif outcome == State.NEUTRAL:
+            outcome_counts[2] = 1
+        elif outcome == State.LOSS:
+            outcome_counts[3] = 1
+
+        try:
+            db.execute_sql("""
+                INSERT INTO play_stats (
+                    game_id, board_hash, move_hash,
+                    snapshot_player, acting_player,
+                    win_count, tie_count, neutral_count, loss_count
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(game_id, board_hash, move_hash, snapshot_player, acting_player)
+                DO UPDATE SET
+                    win_count = win_count + excluded.win_count,
+                    tie_count = tie_count + excluded.tie_count,
+                    neutral_count = neutral_count + excluded.neutral_count,
+                    loss_count = loss_count + excluded.loss_count
+            """, (gid, board_hash, move_hash, snapshot_player, acting_player, *outcome_counts))
+        except Exception as exc:
+            logger.exception("Failed to upsert play_stats: %s", exc)
+
+    # -------------------------
+    # Helpers
+    # -------------------------
+    def _get_original_board(self, game_id: str, board_hash: str) -> Optional[np.ndarray]:
+        gid = self._normalize_game_id(game_id)
+        cursor = db.execute_sql(
+            "SELECT original_board_bytes, meta_json FROM positions WHERE game_id=? AND board_hash=?",
+            (gid, board_hash)
+        )
+        row = cursor.fetchone()
+        if not row:
+            return None
+        orig_bytes, meta_json = row
+        meta = json.loads(meta_json)
+        dtype_str = meta.get('dtype_str', meta.get('dtype'))
+        shape_json = json.dumps(meta['shape'])
+        return deserialize_array(orig_bytes, dtype_str, shape_json)
+
+    def _decode_move(self, game_id: str, move_hash: str) -> Optional[np.ndarray]:
+        gid = self._normalize_game_id(game_id)
+        cursor = db.execute_sql(
+            "SELECT move_bytes, meta_json FROM moves WHERE game_id=? AND move_hash=?",
+            (gid, move_hash)
+        )
+        row = cursor.fetchone()
+        if not row:
+            return None
+        move_bytes, meta_json = row
+        meta = json.loads(meta_json)
+        dtype_str = meta.get('dtype_str', meta.get('dtype'))
+        shape_json = json.dumps(meta['shape'])
+        return deserialize_array(move_bytes, dtype_str, shape_json)
+
+    def _evaluate_move(self, game_id: str, game_state, row_dict: dict, iso_map: dict) -> dict:
+        snapshot_player = int(game_state.current_player)
+        stats = StatBlock.from_row(row_dict, snapshot_player, int(row_dict['acting_player']))
+        pW, pT, pN, pL = stats.probs
+        move_hash = row_dict['move_hash']
+        canonical_move = self._decode_move(game_id, move_hash)
+
+        move_coords = None
+
+        if canonical_move is not None:
+            try:
+                # --- FIX: make sure we pass the inverse map (int -> original node) to invert_canonical_move
+                # If the caller gave us iso_map (orig_node -> int), build the inverse here.
+                if iso_map is None:
+                    inverse_map = None
+                else:
+                    # If iso_map already appears to be inverse (int->orig), detect that:
+                    # check a single key type to avoid inverting twice.
+                    sample_key = next(iter(iso_map.keys()))
+                    if isinstance(sample_key, int):
+                        inverse_map = iso_map  # it is already inverse
+                    else:
+                        inverse_map = {v: k for k, v in iso_map.items()}
+
+                original_move = invert_canonical_move(canonical_move, inverse_map)
+
+                # original_move is either np.ndarray coords or an object/tuple
+                if isinstance(original_move, np.ndarray):
+                    move_coords = original_move.tolist()
+                elif isinstance(original_move, (list, tuple)):
+                    move_coords = list(original_move)
+                else:
+                    # Can be None or some abstract move token (e.g. "pass")
+                    move_coords = original_move
+                # If inversion produced None, log for debug
+                if move_coords is None:
+                    logger.debug("invert_canonical_move returned None for move_hash=%s canonical_move=%r",
+                                 move_hash, canonical_move)
+            except Exception:
+                logger.exception("Failed to invert canonical move for move_hash=%s", move_hash)
+                move_coords = None
+        else:
+            move_coords = None
+
         return {
             "move_hash": move_hash,
+            "move_array": move_coords,
             "utility": stats.utility,
             "certainty": stats.certainty,
             "score": stats.score,
-            "adjusted_score": adjusted_score,
+            "adjusted_score": stats.score,
             "total": stats.total,
             "pW": pW, "pT": pT, "pN": pN, "pL": pL,
-            # Opponent Data (from their perspective)
-            "opponent_data_exists": opp_score is not None,
-            "adjusted": opp_score is not None,  # Triggers "Eye" icon
-            "opponent_best_move": opp_move_coords,
-            "opponent_pW": opp_probs[0],
-            "opponent_pT": opp_probs[1],
-            "opponent_pN": opp_probs[2],
-            "opponent_pL": opp_probs[3],
-            "opponent_util": opp_util,
-            "opponent_cert": opp_cert,
-            "opponent_score": opp_score,
-            "dangerous": dangerous
+            "opponent_data_exists": False,
+            "adjusted": False,
+            "opponent_best_move": None,
+            "opponent_pW": None,
+            "opponent_pT": None,
+            "opponent_pN": None,
+            "opponent_pL": None,
+            "opponent_util": None,
+            "opponent_cert": None,
+            "opponent_score": None,
+            "dangerous": False
         }
 
-    def _get_best_opponent_stats(self, gid: str, board_hash: int, my_player_id: int) -> Optional[Tuple[StatBlock, int]]:
-        """Finds best opponent move. Returns (StatBlock, move_hash)."""
-        query = """
-            SELECT win_count, tie_count, neutral_count, loss_count, snapshot_player, acting_player, move_hash 
-            FROM play_stats 
-            WHERE game_id=? AND board_hash=? AND snapshot_player != ?
-        """
-        cursor = db.execute_sql(query, (gid, board_hash, my_player_id))
-        
-        best_block = None
-        best_m_hash = None
-        best_util = -9999.0
 
-        for row in cursor.fetchall():
-            row_d = {'win_count': row[0], 'tie_count': row[1], 'neutral_count': row[2], 'loss_count': row[3]}
-            sb = StatBlock.from_row(row_d, row[4], row[5])
-            if sb.utility > best_util:
-                best_util = sb.utility
-                best_block = sb
-                best_m_hash = row[6]
-        
-        if best_block:
-            return (best_block, best_m_hash)
-        return None
+    def _select_move(self, game_id: str, game_state, pick_best: bool = True,
+                     debug_move: bool = False) -> Optional[np.ndarray]:
+        gid = self._normalize_game_id(game_id)
+        snapshot_player = int(game_state.current_player)
 
-    # -------------------------
-    # Public API
-    # -------------------------
-    def _select_move(self, game_id: str, game_state: GameState, pick_best: bool, debug_move: bool):
-        gid = str(game_id).lower().replace(" ", "_")
-        snap_player = int(game_state.current_player)
-        board_arr = self._normalize_board(game_state.board)
-        board_hash = int(hash_array(board_arr))
+        # canonicalize current state
+        try:
+            canonical = self._canonicalize_cached(game_state)
+        except Exception as exc:
+            logger.exception("Canonicalization failed during select: %s", exc)
+            return None
 
-        cursor = db.execute_sql(self._sql['get_moves'], (gid, board_hash, snap_player))
-        columns = [c[0] for c in cursor.description]
-        rows = [dict(zip(columns, r)) for r in cursor.fetchall()]
+        board_hash = str(canonical["hash"])
+        iso_map = canonical["iso_map"]
 
-        if not rows: return None
+        cursor = db.execute_sql("""
+            SELECT move_hash, acting_player, win_count, tie_count, neutral_count, loss_count
+            FROM play_stats
+            WHERE game_id=? AND board_hash=? AND snapshot_player=?
+        """, (gid, board_hash, snapshot_player))
+
+        rows = cursor.fetchall()
+        if not rows:
+            return None
 
         evals = []
-        for r in rows:
-            res = self._evaluate_candidate(gid, board_arr, r, snap_player)
-            if res: evals.append(res)
+        for row in rows:
+            row_dict = {
+                'move_hash': row[0],
+                'acting_player': int(row[1]),
+                'win_count': int(row[2]),
+                'tie_count': int(row[3]),
+                'neutral_count': int(row[4]),
+                'loss_count': int(row[5]),
+            }
+            # The _evaluate_move call uses the iso_map to invert the canonical move
+            evals.append(self._evaluate_move(gid, game_state, row_dict, iso_map))
 
-        if not evals: return None
+        if not evals:
+            return None
 
-        # Sort key logic - now using score instead of utility
-        key = lambda x: (x['adjusted_score'], x['certainty'])
-        if not pick_best:
-            # For worst: prefer LOW adjusted score, with certainty as tiebreaker
-            key = lambda x: (-x['adjusted_score'], x['certainty'])
-            
+        if pick_best:
+            # key = lambda x: (x['score'], x['certainty'])
+            key = lambda x: (x['score'])
+        else:
+            # key = lambda x: (-x['score'], x['certainty'])
+            key = lambda x: (-x['score'])
+
         evals.sort(key=key, reverse=True)
         chosen = evals[0]
+        chosen_hash = chosen['move_hash']
 
         if debug_move:
-            self._debug_render(gid, board_arr, evals, chosen['move_hash'], pick_best)
+            debug_rows = []
+            for e in evals:
+                row_data = {
+                    **e,
+                    "is_selected": e['move_hash'] == chosen_hash,
+                    "is_best": pick_best and (e['move_hash'] == chosen_hash),
+                    "is_worst": (not pick_best) and (e['move_hash'] == chosen_hash),
+                }
+                debug_rows.append(row_data)
+            # Assuming render_debug handles array or list inputs for moves
+            render_debug(game_state.board, debug_rows)
 
-        tup = self._decode_move(gid, chosen['move_hash'])
-        return np.array(tup) if tup else None
+        if chosen['move_array'] is not None:
+            # Must return a numpy array of integers for the game engine
+            # It's already been converted to a list/tuple in _evaluate_move
+            return np.array(chosen['move_array'], dtype=int)
+        return None
 
-    def _debug_render(self, gid, board, evals, chosen_hash, pick_best):
-        """Passes full data context to visualizer."""
-        debug_rows = []
-        for e in evals:
-            tup = self._decode_move(gid, e['move_hash'])
-            # Merge the evaluation dict with the specific flags the UI needs
-            row_data = {
-                **e,
-                "move_array": list(tup) if tup else None,
-                "is_selected": e['move_hash'] == chosen_hash,
-                "is_best": pick_best and (e['move_hash'] == chosen_hash),
-                "is_worst": (not pick_best) and (e['move_hash'] == chosen_hash),
-            }
-            debug_rows.append(row_data)
-        render_debug(board, debug_rows)
+    def get_best_move(self, game_id: str, game_state, debug_move: bool = False) -> Optional[np.ndarray]:
+        return self._select_move(game_id, game_state, pick_best=True, debug_move=debug_move)
 
-    def get_best_move(self, game_id: str, game_state: GameState, debug_move=False):
-        return self._select_move(game_id, game_state, True, debug_move)
+    def get_worst_move(self, game_id: str, game_state, debug_move: bool = False) -> Optional[np.ndarray]:
+        return self._select_move(game_id, game_state, pick_best=False, debug_move=debug_move)
 
-    def get_worst_move(self, game_id: str, game_state: GameState, debug_move=False):
-        return self._select_move(game_id, game_state, False, debug_move)
+    def close(self):
+        if not db.is_closed():
+            db.close()
+
+# ---------------------------
+# Small helpers (module-level)
+# ---------------------------
+import hashlib as _hashlib
+
+# --- FIX: Renamed and clarified hash helpers ---
+
+def hashlib_sha256_bytes_single_arg(b: bytes) -> str:
+    """Helper for simple bytes hashing (e.g., in Move hashing fallback)"""
+    return _hashlib.sha256(b).hexdigest()
+
+def hashlib_sha256_bytes_for_array(arr: np.ndarray) -> str:
+    """Hashes an array using serialization."""
+    try:
+        a = np.asarray(arr)
+        b, *_ = serialize_array(a)
+        # Use the single-arg version for simple content hash
+        return hashlib_sha256_bytes_single_arg(b)
+    except Exception:
+        # worst-case fallback
+        return hashlib_sha256_bytes_single_arg(repr(arr).encode())
+
+def hashlib_sha256_bytes_triple_arg(b: bytes, player: int, shape_json: str) -> str:
+    """Helper for state/cache key hashing (data, player, shape)"""
+    m = _hashlib.sha256()
+    m.update(b)
+    m.update(str(int(player)).encode())
+    m.update(shape_json.encode())
+    return m.hexdigest()

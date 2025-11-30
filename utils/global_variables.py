@@ -13,12 +13,12 @@ tic_tac_toe_init_board = np.full((TicTacToe().SIZE, TicTacToe().SIZE), None)
 #     [None, None, None]
 # ])
 
-tic_tac_toe_init_state = GameState(tic_tac_toe_init_board, current_player=2)
+tic_tac_toe_init_state = GameState(tic_tac_toe_init_board, current_player=1)
 INITIAL_STATES = {"tic_tac_toe": tic_tac_toe_init_state}
 # -----------------------------------------------
 
-EPOCHS = 10
-NUM_AGENTS = 10
+EPOCHS = 100
+NUM_AGENTS = 100
 SIMULATIONS = EPOCHS * NUM_AGENTS
 TURN_DEPTH = 20
 SELECTED_GAME = "tic_tac_toe"

@@ -76,7 +76,7 @@ def update_agent(
     Parameters
     ----------
     agent : Agent
-        The gent in the current game state.
+        The agent in the current game state.
     game : GameBase
         The game instance; needed for generating random valid moves.
     is_prune_stage : bool, optional
