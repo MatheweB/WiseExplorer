@@ -299,27 +299,49 @@ def start_simulations(
     # Cache player IDs (computed once)
     player_ids = sorted(players_map.keys())
     
+    playSelf = True
+    trainMode = True
+    realPlayer = False
     while not game.is_over():
         # Two-phase simulation
         prune_count = simulations // 2
         optimize_count = simulations - prune_count
         
         # We can comment out both _run_simulation_batch to go to "model mode", only memory no learning
-        _run_simulation_batch(
-            players_map, game, turn_depth, prune_count, omnicron, True, player_ids
-        )
-        _run_simulation_batch(
-            players_map, game, turn_depth, optimize_count, omnicron, False, player_ids
-        )
-        
-        # Select and execute best move
-        current_state = game.get_state().clone()
-        best_move = omnicron.get_best_move(game.game_id(), current_state, debug_move=True)
-        
-        if best_move is None:
-            valid_moves = game.valid_moves()
-            if not valid_moves:
-                break
-            best_move = random.choice(valid_moves)
-        
-        game.apply_move(best_move)
+        # _run_simulation_batch(
+        #     players_map, game, turn_depth, prune_count, omnicron, True, player_ids
+        # )
+        # _run_simulation_batch(
+        #     players_map, game, turn_depth, optimize_count, omnicron, False, player_ids
+        # )
+
+        if not realPlayer:
+            # We can comment out both _run_simulation_batch to go to "model mode", only memory no learning
+            if trainMode:
+                _run_simulation_batch(
+                    players_map, game, turn_depth, prune_count, omnicron, True, player_ids
+                )
+                _run_simulation_batch(
+                    players_map, game, turn_depth, optimize_count, omnicron, False, player_ids
+                )
+
+            # Select and execute best move
+            current_state = game.get_state().clone()
+            best_move = omnicron.get_best_move(game.game_id(), current_state, debug_move=True)
+
+            print(best_move)
+            
+            if best_move is None:
+                valid_moves = game.valid_moves()
+                if len(valid_moves) > 0:
+                    break
+                best_move = random.choice(valid_moves)
+            
+            game.apply_move(best_move)
+            if not playSelf:
+                realPlayer = True
+        else:
+            row = int(input("row: "))
+            col = int(input("col: "))
+            game.apply_move(np.array([row, col]))
+            realPlayer = False
