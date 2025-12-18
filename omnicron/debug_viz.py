@@ -1,14 +1,10 @@
 """
 Terminal debug visualizer for game move statistics.
-
-Displays:
-1. Move Analysis Summary - table of all candidate moves with stats
-2. Heatmap Visualizer - visual board representation with move quality
+Updated to support string-based piece names (e.g., 'Q1', 'P2') for MiniChess.
 """
 
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Tuple
 import numpy as np
-
 
 # ===========================================================
 # ANSI COLOR CODES
@@ -16,55 +12,33 @@ import numpy as np
 RESET = "\033[0m"
 BOLD = "\033[1m"
 DIM = "\033[2m"
-
 WHITE_FG = "\033[38;5;255m"
 GRAY_FG = "\033[38;5;244m"
-
-BEST_BG = "\033[48;5;21m"  # Blue background for best move
+BEST_BG = "\033[48;5;21m" 
 BEST_FG = "\033[38;5;255m"
-
-WORST_BG = "\033[48;5;52m"  # dark maroon
-WORST_FG = "\033[38;5;255m"
-
 
 # ===========================================================
 # LAYOUT CONFIGURATION
 # ===========================================================
-W_MOVE = 8
-W_STAT = 5
-W_METRIC = 6
-W_TOTAL = 5
-W_OPP_MOVE = 8
-W_OPP_STAT = 5
-W_OPP_METRIC = 6
+W_MOVE = 12
+W_STAT = 6
+W_METRIC = 8
+W_TOTAL = 6
 
-
-# ===========================================================
-# UTILITY FUNCTIONS
-# ===========================================================
 def _bg_color_for_value(val: float) -> str:
-    """Return ANSI background color for a value in [0, 1]."""
     if val is None or (isinstance(val, float) and np.isnan(val)):
-        return "\033[48;5;236m"  # Dark gray for missing data
-
+        return "\033[48;5;236m"
     v = float(max(0.0, min(1.0, val)))
-
-    # Gradient dark → yellow → red
-    if v < 0.5:
-        ratio = v / 0.5
+    if v < 0.33:
+        ratio = v / 0.33
         idx = int(22 + ratio * (220 - 22))
+    elif v < 0.67:
+        ratio = (v - 0.33) / 0.34
+        idx = int(220 + ratio * (208 - 220))
     else:
-        ratio = (v - 0.5) / 0.5
-        idx = int(220 + ratio * (196 - 220))
-
+        ratio = (v - 0.67) / 0.33
+        idx = int(208 + ratio * (196 - 208))
     return f"\033[48;5;{idx}m"
-
-
-def _fg_for_value(val: float) -> str:
-    if val is None or (isinstance(val, float) and np.isnan(val)):
-        return GRAY_FG
-    return WHITE_FG
-
 
 def _bar_string(value: float, width: int) -> str:
     if value is None or (isinstance(value, float) and np.isnan(value)):
@@ -73,27 +47,29 @@ def _bar_string(value: float, width: int) -> str:
     filled = int(round(v * width))
     return "█" * filled + " " * (width - filled)
 
-
-def _format_optional(val: float, fmt: str = "0.2f") -> str:
-    if val is None:
-        return "--"
-    return f"{val:{fmt}}"
-
-
-def _player_marker(player_value) -> str:
+def _player_marker(piece_val) -> str:
+    """
+    Improved marker logic:
+    - Supports MiniChess strings: 'K1', 'Q2', etc.
+    - Supports numeric players: 1, -1, 0.
+    """
+    if piece_val is None or piece_val == 0:
+        return "·"
+    
+    # If it's a string (like 'Q1' or 'P2'), return it as is
+    if isinstance(piece_val, str):
+        return piece_val
+        
+    # Handle numeric fallbacks
     try:
-        if int(player_value) == 1:
-            return "X"
-        elif int(player_value) == -1 or int(player_value) == 2:
-            return "O"
-        return "·"
-    except Exception:
-        return "·"
+        val = int(piece_val)
+        if val == 1: return "X"
+        if val == 2 or val == -1: return "O"
+    except (ValueError, TypeError):
+        pass
+        
+    return str(piece_val)
 
-
-# ===========================================================
-# MAIN RENDERER
-# ===========================================================
 def render_debug(
     board: np.ndarray,
     debug_rows: List[Dict[str, Any]],
@@ -104,295 +80,106 @@ def render_debug(
     cell_width: int = 14,
     return_str: bool = False,
 ) -> str:
-    """
-    Render debug visualization for move analysis.
-    """
-
     board_arr = np.array(board)
-    if board_arr.ndim != 2 or board_arr.shape[0] != board_arr.shape[1]:
-        raise ValueError("board must be a square 2D array")
+    
+    # Auto-reshape 1D to square if needed
+    if board_arr.ndim == 1:
+        side = int(np.sqrt(board_arr.size))
+        board_arr = board_arr.reshape((side, side)) if side*side == board_arr.size else board_arr.reshape((1, -1))
+    
+    ROWS, COLS = board_arr.shape
 
-    N = board_arr.shape[0]
-
-    # heatmap matrices
-    primary_mat = np.full((N, N), np.nan)
-    secondary_mat = np.full((N, N), np.nan)
-    is_best_mat = np.zeros((N, N), dtype=bool)
-    is_danger_mat = np.zeros((N, N), dtype=bool)
-    is_worst_mat = np.zeros((N, N), dtype=bool)
+    # Prepare data matrices
+    primary_mat = np.full((ROWS, COLS), np.nan)
+    secondary_mat = np.full((ROWS, COLS), np.nan)
+    is_selected_mat = np.zeros((ROWS, COLS), dtype=bool)
 
     for d in debug_rows:
-        try:
-            r, c = int(d["move_array"][0]), int(d["move_array"][1])
-        except Exception:
-            continue
+        mv = d.get("move_array")
+        if mv is None: continue
+        
+        # In Chess [from_r, from_c, to_r, to_c], 'move_array' usually refers to 'to' coords 
+        # or the signature location. Here we assume index 2,3 for destination if it's length 4.
+        arr_mv = np.atleast_1d(mv)
+        if len(arr_mv) == 4:
+            r, c = int(arr_mv[2]), int(arr_mv[3])
+        elif len(arr_mv) == 2:
+            r, c = int(arr_mv[0]), int(arr_mv[1])
+        else:
+            idx = int(arr_mv[0])
+            r, c = divmod(idx, COLS)
 
-        if not (0 <= r < N and 0 <= c < N):
-            continue
+        if 0 <= r < ROWS and 0 <= c < COLS:
+            primary_mat[r, c] = float(d.get(primary_metric, np.nan))
+            secondary_mat[r, c] = float(d.get(secondary_metric, np.nan))
+            is_selected_mat[r, c] = bool(d.get("is_selected", False))
 
-        primary_mat[r, c] = float(d.get(primary_metric, np.nan))
-        secondary_mat[r, c] = float(d.get(secondary_metric, np.nan))
-        is_best_mat[r, c] = bool(d.get("is_best", False))
-        is_danger_mat[r, c] = bool(d.get("dangerous", False))
-        is_worst_mat[r, c] = bool(d.get("is_worst", False))
+    output = ["", f"{BOLD}╔" + "═"*78 + "╗", f"║{'MOVE ANALYSIS SUMMARY':^78}║", f"╚" + "═"*78 + "╝", ""]
+    
+    # Table Header
+    header = f"{'Move':^{W_MOVE}} │ {'Rates (W/T/N/L)':^{W_STAT*4+3}} │ {'Metrics':^{W_METRIC*3+W_TOTAL+2}}"
+    output.append(header)
+    output.append(f"{DIM}{'─' * len(header)}{RESET}")
 
-    output = []
-    output.append("")
-    output.append(
-        f"{BOLD}╔═══════════════════════════════════════════════════════════════════════════════════════════════════════╗{RESET}"
-    )
-    output.append(
-        f"{BOLD}║                                        MOVE ANALYSIS SUMMARY                                          ║{RESET}"
-    )
-    output.append(
-        f"{BOLD}╚═══════════════════════════════════════════════════════════════════════════════════════════════════════╝{RESET}"
-    )
-    output.append("")
-
-    # HEADER
-    header_parts = [
-        f"{'Move':^{W_MOVE}}",
-        "│",
-        f"{'Our Stats':^{W_STAT*4+3}}",
-        "│",
-        f"{'Our Metrics':^{W_METRIC*4+W_TOTAL+4}}",
-        "│",
-        f"{'Opp Reply':^{W_OPP_MOVE}}",
-        f"{'Opp Stats':^{W_OPP_STAT*4+3}}",
-        f"{'Opp Metrics':^{W_OPP_METRIC*3+2}}",
-        "│",
-        "Notes",
-    ]
-    output.append(" ".join(header_parts))
-
-    subheader_parts = [
-        f"{' ':^{W_MOVE}}",
-        "│",
-        f"{'pW':<{W_STAT}}",
-        f"{'pT':<{W_STAT}}",
-        f"{'pN':<{W_STAT}}",
-        f"{'pL':<{W_STAT}}",
-        "│",
-        f"{'Cert':<{W_METRIC}}",
-        f"{'Util':<{W_METRIC}}",
-        f"{'Score':<{W_METRIC}}",
-        f"{'Adj':<{W_METRIC}}",
-        f"{'N':<{W_TOTAL}}",
-        "│",
-        f"{'Move':<{W_OPP_MOVE}}",
-        f"{'pW':<{W_OPP_STAT}}",
-        f"{'pT':<{W_OPP_STAT}}",
-        f"{'pN':<{W_OPP_STAT}}",
-        f"{'pL':<{W_OPP_STAT}}",
-        f"{'Util':<{W_OPP_METRIC}}",
-        f"{'Cert':<{W_OPP_METRIC}}",
-        f"{'Score':<{W_OPP_METRIC}}",
-        "│",
-    ]
-    output.append(" ".join(subheader_parts))
-
-    sep_length = sum(
-        [
-            W_MOVE,
-            1,
-            W_STAT * 4 + 3,
-            1,
-            W_METRIC * 4 + W_TOTAL + 4,
-            1,
-            W_OPP_MOVE,
-            W_OPP_STAT * 4 + 3,
-            W_OPP_METRIC * 3 + 2,
-            1,
-            20,
-        ]
-    )
-    output.append(f"{DIM}{'─' * sep_length}{RESET}")
-
-    # sort rows
-    sorted_rows = sorted(
-        debug_rows, key=lambda d: d.get("adjusted_score", 0), reverse=True
-    )
-
-    # DATA ROWS
+    # Table Data
+    sorted_rows = sorted(debug_rows, key=lambda x: x.get("score", 0), reverse=True)
     for d in sorted_rows:
         mv = d.get("move_array")
-        mv_str = f"[{mv[0]},{mv[1]}]" if mv else "[]"
+        mv_str = f"[{','.join(map(str, mv))}]" if hasattr(mv, '__iter__') else str(mv)
+        row_str = (f"{mv_str:>{W_MOVE}} │ "
+                   f"{d.get('pW',0):.2f} {d.get('pT',0):.2f} {d.get('pN',0):.2f} {d.get('pL',0):.2f} │ "
+                   f"C:{d.get('certainty',0):.2f} U:{d.get('utility',0):+.2f} S:{d.get('score',0):.2f} "
+                   f"({d.get('total',0)})")
+        if d.get("is_selected"): row_str += f" {BOLD}→ SELECTED{RESET}"
+        output.append(row_str)
 
-        pW = d.get("pW", 0.0)
-        pT = d.get("pT", 0.0)
-        pN = d.get("pN", 0.0)
-        pL = d.get("pL", 0.0)
-
-        cert = d.get("certainty", 0.0)
-        util = d.get("utility", 0.0)
-        score = d.get("score", 0.0)
-        adj = d.get("adjusted_score", 0.0)
-        total = d.get("total", 0)
-
-        opp_move = d.get("opponent_best_move")
-        opp_move_str = f"[{opp_move[0]},{opp_move[1]}]" if opp_move else "--"
-
-        opp_pW = d.get("opponent_pW")
-        opp_pT = d.get("opponent_pT")
-        opp_pN = d.get("opponent_pN")
-        opp_pL = d.get("opponent_pL")
-        opp_util = d.get("opponent_util")
-        opp_cert = d.get("opponent_cert")
-        opp_score = d.get("opponent_score")
-
-        is_best = d.get("is_best", False)
-        is_adjusted = d.get("adjusted", False)
-        is_danger = d.get("dangerous", False)
-        is_worst = d.get("is_worst", False)
-        has_opp_data = d.get("opponent_data_exists", False)
-
-        notes = []
-        if is_best:
-            notes.append("★ BEST")
-        if is_worst:
-            notes.append("☠ WORST")
-        if is_danger:
-            notes.append("🔥")
-        if is_adjusted:
-            notes.append("↓")
-        if has_opp_data:
-            notes.append("👁")
-
-        row_parts = [
-            f"{mv_str:>{W_MOVE}}",
-            "│",
-            f"{pW:.3f}",
-            f"{pT:.3f}",
-            f"{pN:.3f}",
-            f"{pL:.3f}",
-            "│",
-            f"{cert:.3f}",
-            f"{util:+.2f}",
-            f"{score:.3f}",
-            f"{adj:.3f}",
-            f"{total:{W_TOTAL}d}",
-            "│",
-            f"{opp_move_str:>{W_OPP_MOVE}}",
-            f"{_format_optional(opp_pW, '.3f'):>{W_OPP_STAT}}",
-            f"{_format_optional(opp_pT, '.3f'):>{W_OPP_STAT}}",
-            f"{_format_optional(opp_pN, '.3f'):>{W_OPP_STAT}}",
-            f"{_format_optional(opp_pL, '.3f'):>{W_OPP_STAT}}",
-            f"{_format_optional(opp_util, '+.2f'):>{W_OPP_METRIC}}",
-            f"{_format_optional(opp_cert, '.3f'):>{W_OPP_METRIC}}",
-            f"{_format_optional(opp_score, '.3f'):>{W_OPP_METRIC}}",
-            "│",
-            " ".join(notes),
-        ]
-
-        output.append(" ".join(row_parts))
-
-    output.append("")
-    output.append(
-        f"{DIM}Legend: ★=Best Move, ☠=Worst Move, 🔥=Dangerous, ↓=Risk-Adjusted, 👁=Opponent Data{RESET}"
-    )
-    output.append(f"{DIM}Metrics: Cert=Certainty [0,1], Util=Utility [0,1], Score=Combined [0,1], Adj=Adjusted Score{RESET}")
-    output.append("")
-
-    # ========================================
-    # HEATMAP
-    # ========================================
-    output.append(
-        f"{BOLD}╔═══════════════════════════════════════════════════════════════════╗{RESET}"
-    )
-    output.append(
-        f"{BOLD}║                       HEATMAP VISUALIZER                          ║{RESET}"
-    )
-    output.append(
-        f"{BOLD}╚═══════════════════════════════════════════════════════════════════╝{RESET}"
-    )
-    output.append("")
+    # Heatmap
+    output.append("\n" + f"{BOLD}╔" + "═"*78 + "╗")
+    output.append(f"║{'HEATMAP VISUALIZER (Destination Squares)':^78}║")
+    output.append(f"╚" + "═"*78 + "╝\n")
 
     TL, TM, TR = "┌", "┬", "┐"
     ML, MM, MR = "├", "┼", "┤"
     BL, BM, BR = "└", "┴", "┘"
     H, V = "─", "│"
 
-    def make_separator(left, mid, right):
-        seg = H * cell_width
-        return left + mid.join([seg] * N) + right
+    def make_sep(l, m, r):
+        return l + m.join([H * cell_width] * COLS) + r
 
-    output.append(make_separator(TL, TM, TR))
+    output.append(make_sep(TL, TM, TR))
+    bar_w = max(1, cell_width - 4)
 
-    bar_width = max(1, cell_width - 4)
-
-    for r in range(N):
-        top_cells = []
-        mid_cells = []
-        bot_cells = []
-
-        for c in range(N):
-            primary_val = primary_mat[r, c]
-            secondary_val = secondary_mat[r, c]
-            best = bool(is_best_mat[r, c])
-            worst = bool(is_worst_mat[r, c])
-            danger = bool(is_danger_mat[r, c])
-
+    for r in range(ROWS):
+        lines = [[], [], []]
+        for c in range(COLS):
+            p_val = primary_mat[r, c]
+            s_val = secondary_mat[r, c]
+            sel = is_selected_mat[r, c]
+            
             marker = _player_marker(board_arr[r, c])
+            p_s = f"{p_val:.2f}" if not np.isnan(p_val) else "--"
+            s_s = f"{s_val:.2f}" if not np.isnan(s_val) else "--"
+            
+            # Formatting text to fit cell_width
+            t_txt = f" {marker} ".center(cell_width)
+            m_txt = f"{p_s} {s_s}".center(cell_width)
+            b_txt = (" " + _bar_string(p_val, bar_w) + " ").ljust(cell_width) if show_bars else " "*cell_width
 
-            cell_top = f" {marker} ".center(cell_width)
-            p_str = f"{primary_val:.2f}" if not np.isnan(primary_val) else "--"
-            s_str = f"{secondary_val:.2f}" if not np.isnan(secondary_val) else "--"
-            cell_mid = f"{p_str} {s_str}".center(cell_width)
+            if sel:
+                t_txt, m_txt, b_txt = "▌"+t_txt[1:-1]+"▐", "▌"+m_txt[1:-1]+"▐", "▌"+b_txt[1:-1]+"▐"
 
-            if show_bars and not np.isnan(primary_val):
-                bar = _bar_string(float(primary_val), bar_width)
-                cell_bot = (" " + bar + " ").ljust(cell_width)
-            else:
-                cell_bot = " " * cell_width
+            bg = BEST_BG if sel else _bg_color_for_value(p_val)
+            fg = BEST_FG if sel else WHITE_FG
+            
+            for i, txt in enumerate([t_txt, m_txt, b_txt]):
+                lines[i].append(f"{bg}{fg}{txt}{RESET}")
 
-            if best and cell_width >= 3:
-                cell_top = "▌" + cell_top[1:-1] + "▐"
-                cell_mid = "▌" + cell_mid[1:-1] + "▐"
-                cell_bot = "▌" + cell_bot[1:-1] + "▐"
-            elif worst and cell_width >= 3:
-                cell_top = "░" + cell_top[1:-1] + "░"
-                cell_mid = "░" + cell_mid[1:-1] + "░"
-                cell_bot = "░" + cell_bot[1:-1] + "░"
+        for line in lines:
+            output.append(V + V.join(line) + V)
+        
+        if r < ROWS - 1: output.append(make_sep(ML, MM, MR))
+        else: output.append(make_sep(BL, BM, BR))
 
-            top_cells.append(cell_top)
-            mid_cells.append(cell_mid)
-            bot_cells.append(cell_bot)
-
-        # Apply colors
-        def colorize_row(cells):
-            colored = []
-            for c_idx, cell_text in enumerate(cells):
-                primary_val = primary_mat[r, c_idx]
-
-                if is_danger_mat[r, c_idx]:
-                    bg = "\033[48;5;196m"
-                    fg = WHITE_FG
-                elif is_best_mat[r, c_idx]:
-                    bg, fg = BEST_BG, BEST_FG
-                elif is_worst_mat[r, c_idx]:
-                    bg, fg = WORST_BG, WORST_FG
-                else:
-                    bg = _bg_color_for_value(primary_val)
-                    fg = _fg_for_value(primary_val)
-
-                colored.append(f"{bg}{fg}{cell_text}{RESET}")
-            return V + V.join(colored) + V
-
-        output.append(colorize_row(top_cells))
-        output.append(colorize_row(mid_cells))
-        output.append(colorize_row(bot_cells))
-
-        if r < N - 1:
-            output.append(make_separator(ML, MM, MR))
-        else:
-            output.append(make_separator(BL, BM, BR))
-
-    output.append("")
-
-    rendered = "\n".join(output)
-
-    if return_str:
-        return rendered
-
-    print(rendered)
-    return rendered
+    final_str = "\n".join(output)
+    if not return_str: print(final_str)
+    return final_str
