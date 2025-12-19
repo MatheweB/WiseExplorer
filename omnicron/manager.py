@@ -116,12 +116,12 @@ class MoveStatistics:
     @property
     def utility(self) -> float:
         """
-        Empirical value Q(s,a).
-        Neutral outcomes increase uncertainty but do not contribute to value.
+        We only account for conclusive/terminal outcomes in our calculations
         """
         effective = self.total - self.neutral
         if effective <= 0:
             return 0.0
+
         return (self.wins + 0.5 * self.ties - self.losses) / effective
 
     # -------------------------
@@ -129,10 +129,15 @@ class MoveStatistics:
     # -------------------------
     @property
     def puct(self) -> float:
-        if self.total == 0 or self.parent_total == 0:
+        """
+        UCT-style score, only accounting for terminal outcomes
+        """
+        effective = self.total - self.neutral
+        parent_effective = self.parent_total - self.parent_neutral
+        if effective <= 0 or parent_effective <= 0:
             return float("inf")
 
-        exploration = np.sqrt(np.log(self.parent_total) / self.total)
+        exploration = np.sqrt(np.log(parent_effective) / effective)
         return self.utility + exploration
 
     @property
