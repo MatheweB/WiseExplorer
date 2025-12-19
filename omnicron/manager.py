@@ -19,10 +19,9 @@ Key idea:
 
 from __future__ import annotations
 
-import json
 import hashlib
 import logging
-from typing import Protocol, Any, List, Optional, Iterable
+from typing import Any, List, Optional, Dict
 from dataclasses import dataclass
 from collections import OrderedDict
 from pathlib import Path
@@ -37,7 +36,6 @@ from peewee import (
     CompositeKey,
 )
 
-from omnicron.serializers import serialize_array
 from agent.agent import State
 from omnicron.state_canonicalizer import canonicalize_board, CanonicalResult
 from omnicron.debug_viz import render_debug
@@ -58,15 +56,40 @@ if not logger.hasHandlers():
 # ---------------------------------------------------------------------------
 @dataclass(frozen=True)
 class MoveStatistics:
+    # Edge statistics (s, a)
     wins: int
     ties: int
     neutral: int
     losses: int
 
+    # Parent node statistics (s, player_to_move)
+    parent_wins: int
+    parent_ties: int
+    parent_neutral: int
+    parent_losses: int
+
+    # -------------------------
+    # Edge totals
+    # -------------------------
     @property
     def total(self) -> int:
         return self.wins + self.ties + self.neutral + self.losses
 
+    # -------------------------
+    # Parent totals
+    # -------------------------
+    @property
+    def parent_total(self) -> int:
+        return (
+            self.parent_wins
+            + self.parent_ties
+            + self.parent_neutral
+            + self.parent_losses
+        )
+
+    # -------------------------
+    # Rates
+    # -------------------------
     @property
     def win_rate(self) -> float:
         return self.wins / self.total if self.total else 0.0
@@ -83,45 +106,64 @@ class MoveStatistics:
     def loss_rate(self) -> float:
         return self.losses / self.total if self.total else 0.0
 
+    # -------------------------
+    # Utility / value
+    # -------------------------
     @property
     def certainty(self) -> float:
-        N = self.total
-        K = 4
-        return N / (N + K) if N else 0.0
+        return self.win_rate
 
     @property
     def utility(self) -> float:
-        return 2 * self.win_rate + 1 * self.tie_rate - 2 * self.loss_rate
+        """
+        Empirical value Q(s,a).
+        Neutral outcomes increase uncertainty but do not contribute to value.
+        """
+        effective = self.total - self.neutral
+        if effective <= 0:
+            return 0.0
+        return (self.wins + 0.5 * self.ties - self.losses) / effective
+
+    # -------------------------
+    # Exploration-aware score (UCT)
+    # -------------------------
+    @property
+    def puct(self) -> float:
+        if self.total == 0 or self.parent_total == 0:
+            return float("inf")
+
+        exploration = np.sqrt(np.log(self.parent_total) / self.total)
+        return self.utility + exploration
 
     @property
     def score(self) -> float:
-        return float(self.certainty * self.utility)
+        return self.puct
 
 
 @dataclass(frozen=True)
 class TransitionEvaluation:
-    move: Any  # concrete move (derived at selection time)
-    next_state: GameState  # concrete next state (after applying move)
-    to_hash: str  # canonical hash for next state
+    move: Any
+    next_state: GameState
+    to_hash: str
     stats: MoveStatistics
 
 
 # ---------------------------------------------------------------------------
-# LRU Cache (canonicalization)
+# LRU Cache
 # ---------------------------------------------------------------------------
 class LRUCache:
     def __init__(self, maxsize: int = 4096):
         self.maxsize = maxsize
-        self._cache: OrderedDict[str, CanonicalResult] = OrderedDict()
+        self._cache: OrderedDict[Any, CanonicalResult] = OrderedDict()
 
-    def get(self, key: str) -> Optional[CanonicalResult]:
+    def get(self, key: Any) -> Optional[CanonicalResult]:
         if key not in self._cache:
             return None
         val = self._cache.pop(key)
         self._cache[key] = val
         return val
 
-    def put(self, key: str, value: CanonicalResult) -> None:
+    def put(self, key: Any, value: CanonicalResult) -> None:
         if key in self._cache:
             self._cache.pop(key)
         self._cache[key] = value
@@ -133,9 +175,9 @@ class LRUCache:
 
 
 # ---------------------------------------------------------------------------
-# Database models (OPTIMIZED - removed redundant acting_player/player_id)
+# Database
 # ---------------------------------------------------------------------------
-db = SqliteDatabase(None)
+db = SqliteDatabase(None, pragmas={"journal_mode": "wal", "cache_size": -1024 * 64})
 
 
 class BaseModel(Model):
@@ -144,8 +186,6 @@ class BaseModel(Model):
 
 
 class Position(BaseModel):
-    """Stores BOARD configuration only (no current_player)."""
-
     game_id = TextField()
     position_hash = TextField()
     board_bytes = BlobField()
@@ -157,16 +197,9 @@ class Position(BaseModel):
 
 
 class TransitionRow(BaseModel):
-    """
-    Stores canonical mapping for a transition.
-
-    OPTIMIZED: No acting_player field - it's implicit from from_hash.
-    In any alternating-turn game, the board state determines whose turn it is.
-    """
-
     game_id = TextField()
     transition_hash = TextField()
-    from_hash = TextField()
+    from_hash = TextField(index=True)
     to_hash = TextField()
 
     class Meta:
@@ -175,14 +208,6 @@ class TransitionRow(BaseModel):
 
 
 class PlayStats(BaseModel):
-    """
-    Stores aggregated statistics per (game_id, transition_hash).
-
-    OPTIMIZED: No player_id field - the acting player is implicit.
-    The outcome (WIN/LOSS/TIE) is always from the perspective of
-    whoever made the move (the acting player at from_hash).
-    """
-
     game_id = TextField()
     transition_hash = TextField()
 
@@ -196,23 +221,33 @@ class PlayStats(BaseModel):
         primary_key = CompositeKey("game_id", "transition_hash")
 
 
+class ParentNode(BaseModel):
+    game_id = TextField()
+    position_hash = TextField()
+    player_to_move = IntegerField()
+
+    win_count = IntegerField(default=0)
+    tie_count = IntegerField(default=0)
+    neutral_count = IntegerField(default=0)
+    loss_count = IntegerField(default=0)
+
+    class Meta:
+        table_name = "parent_nodes"
+        primary_key = CompositeKey(
+            "game_id",
+            "position_hash",
+            "player_to_move",
+        )
+
+
 # ---------------------------------------------------------------------------
 # Utilities
 # ---------------------------------------------------------------------------
 def _transition_hash(from_hash: str, to_hash: str) -> str:
-    """
-    Compute transition hash from (from_board → to_board).
-
-    OPTIMIZED: No acting_player - it's derivable from the board state.
-    """
-    h = hashlib.sha256()
-    h.update(from_hash.encode("utf-8"))
-    h.update(to_hash.encode("utf-8"))
-    return h.hexdigest()
+    return hashlib.sha256(f"{from_hash}{to_hash}".encode("utf-8")).hexdigest()
 
 
 def _diff_states(before_board: np.ndarray, after_board: np.ndarray):
-    """Return list of (coord_tuple, before_val, after_val) where values differ."""
     diffs = []
     for idx in np.ndindex(before_board.shape):
         if before_board[idx] != after_board[idx]:
@@ -231,106 +266,107 @@ class GameMemory:
 
         self._cache = LRUCache(maxsize=cache_size)
 
-        # Initialize DB
         db.init(str(db_path))
         db.connect(reuse_if_open=True)
-        db.create_tables([Position, TransitionRow, PlayStats])
+        db.create_tables(
+            [
+                Position,
+                TransitionRow,
+                PlayStats,
+                ParentNode,
+            ]
+        )
 
         logger.info(f"GameMemory initialized: {db_path}")
 
-    # -------------------------
-    # Record a transition/outcome (SIMPLIFIED)
-    # -------------------------
+    # ---------------------------------------------------------------------
+    # Record outcome
+    # ---------------------------------------------------------------------
     def record_outcome(
         self,
         game: GameBase,
         move: Any,
-        acting_player: int,  # Still passed for context, but not stored in hash
+        acting_player: int,
         outcome: State,
     ) -> bool:
-        """
-        Record that from `game.get_state()` applying `move` (by cloning & applying)
-        resulted in an outcome (WIN/TIE/NEUTRAL/LOSS) for `acting_player`.
-
-        OPTIMIZED:
-        - Canonicalizes BOARD ONLY (no current_player in hash)
-        - Transition hash is just (from_hash → to_hash)
-        - acting_player is implicit (whoever's turn at from_hash)
-        """
         try:
             game_id = game.game_id()
             before_state = game.get_state()
+            player_to_move = before_state.current_player
 
-            # Canonicalize BOARD ONLY
             canon_before = self._get_canonical_board_cached(before_state.board)
 
-            # Create a copy of the game and apply move
             game_next = game.deep_clone()
             game_next.apply_move(move)
             after_state = game_next.get_state()
-
-            # Canonicalize BOARD ONLY
             canon_after = self._get_canonical_board_cached(after_state.board)
 
-            # OPTIMIZED: No acting_player in transition hash
             t_hash = _transition_hash(canon_before.hash, canon_after.hash)
 
-            # Persist positions (board only)
-            before_bytes, *_ = serialize_array(before_state.board)
-            Position.get_or_create(
-                game_id=game_id,
-                position_hash=canon_before.hash,
-                defaults={
-                    "board_bytes": before_bytes,
-                    "meta_json": json.dumps({"shape": list(before_state.board.shape)}),
-                },
-            )
+            with db.atomic():
+                Position.get_or_create(
+                    game_id=game_id,
+                    position_hash=canon_before.hash,
+                    defaults={
+                        "board_bytes": before_state.board.tobytes(),
+                        "meta_json": "{}",
+                    },
+                )
 
-            after_bytes, *_ = serialize_array(after_state.board)
-            Position.get_or_create(
-                game_id=game_id,
-                position_hash=canon_after.hash,
-                defaults={
-                    "board_bytes": after_bytes,
-                    "meta_json": json.dumps({"shape": list(after_state.board.shape)}),
-                },
-            )
+                Position.get_or_create(
+                    game_id=game_id,
+                    position_hash=canon_after.hash,
+                    defaults={
+                        "board_bytes": after_state.board.tobytes(),
+                        "meta_json": "{}",
+                    },
+                )
 
-            # OPTIMIZED: No acting_player in transition row
-            TransitionRow.get_or_create(
-                game_id=game_id,
-                transition_hash=t_hash,
-                defaults={
-                    "from_hash": canon_before.hash,
-                    "to_hash": canon_after.hash,
-                },
-            )
+                TransitionRow.get_or_create(
+                    game_id=game_id,
+                    transition_hash=t_hash,
+                    defaults={
+                        "from_hash": canon_before.hash,
+                        "to_hash": canon_after.hash,
+                    },
+                )
 
-            # OPTIMIZED: No player_id in stats
-            stats_row, _ = PlayStats.get_or_create(
-                game_id=game_id,
-                transition_hash=t_hash,
-            )
+                edge, _ = PlayStats.get_or_create(
+                    game_id=game_id,
+                    transition_hash=t_hash,
+                )
 
-            if outcome == State.WIN:
-                stats_row.win_count += 1
-            elif outcome == State.TIE:
-                stats_row.tie_count += 1
-            elif outcome == State.NEUTRAL:
-                stats_row.neutral_count += 1
-            elif outcome == State.LOSS:
-                stats_row.loss_count += 1
+                parent, _ = ParentNode.get_or_create(
+                    game_id=game_id,
+                    position_hash=canon_before.hash,
+                    player_to_move=player_to_move,
+                )
 
-            stats_row.save()
+                if outcome == State.WIN:
+                    edge.win_count += 1
+                    parent.win_count += 1
+                elif outcome == State.TIE:
+                    edge.tie_count += 1
+                    parent.tie_count += 1
+                elif outcome == State.NEUTRAL:
+                    edge.neutral_count += 1
+                    parent.neutral_count += 1
+                elif outcome == State.LOSS:
+                    edge.loss_count += 1
+                    parent.loss_count += 1
+
+                edge.save()
+                parent.save()
+
             return True
 
-        except Exception as e:
-            logger.exception("Failed to record outcome: %s", e)
+        except Exception:
+            logger.exception("Failed to record outcome")
             return False
 
-    # -------------------------
-    # Selection helpers
-    # -------------------------
+    # ---------------------------------------------------------------------
+    # Selection
+    # ---------------------------------------------------------------------
     def get_best_move(self, game: GameBase, debug: bool = False) -> Optional[Any]:
         return self._select_move(game, best=True, debug=debug)
 
@@ -338,46 +374,38 @@ class GameMemory:
         return self._select_move(game, best=False, debug=debug)
 
     def _select_move(self, game: GameBase, best: bool, debug: bool) -> Optional[Any]:
-        """
-        For the given game, enumerate game.valid_moves(), simulate each move,
-        canonicalize the resulting next-state, and look up play stats for the
-        corresponding transition_hash. Choose by score.
-
-        OPTIMIZED: No player filtering needed - transitions are universal.
-        """
         game_id = game.game_id()
         state = game.get_state()
-
-        # Canonicalize BOARD ONLY
+        player_to_move = state.current_player
         canon_from = self._get_canonical_board_cached(state.board)
 
-        # Find all transitions FROM this board
-        transitions_from = list(
-            TransitionRow.select().where(
+        parent = ParentNode.get_or_none(
+            game_id=game_id,
+            position_hash=canon_from.hash,
+            player_to_move=player_to_move,
+        )
+
+        pw = parent.win_count if parent else 0
+        pt = parent.tie_count if parent else 0
+        pn = parent.neutral_count if parent else 0
+        pl = parent.loss_count if parent else 0
+
+        query = (
+            TransitionRow.select(TransitionRow, PlayStats)
+            .join(
+                PlayStats,
+                on=(TransitionRow.transition_hash == PlayStats.transition_hash),
+            )
+            .where(
                 (TransitionRow.game_id == game_id)
                 & (TransitionRow.from_hash == canon_from.hash)
             )
         )
 
-        if not transitions_from:
-            return None
+        stats_by_to_hash: Dict[str, PlayStats] = {
+            row.to_hash: row.playstats for row in query
+        }
 
-        transition_hashes = {t.transition_hash for t in transitions_from}
-
-        # Load PlayStats for these transitions (single query)
-        stats_rows = list(
-            PlayStats.select().where(
-                (PlayStats.game_id == game_id)
-                & (PlayStats.transition_hash.in_(transition_hashes))
-            )
-        )
-
-        if not stats_rows:
-            return None
-
-        stats_by_hash = {r.transition_hash: r for r in stats_rows}
-
-        # Iterate valid moves, simulate, compute transition_hash, collect evaluations
         evaluations: List[TransitionEvaluation] = []
 
         for move in game.valid_moves():
@@ -385,26 +413,24 @@ class GameMemory:
             try:
                 game_next.apply_move(move)
             except Exception:
-                # Illegal move or engine error: skip
                 continue
 
             next_state = game_next.get_state()
-
-            # Canonicalize BOARD ONLY
             canon_next = self._get_canonical_board_cached(next_state.board)
 
-            # OPTIMIZED: No acting_player in transition hash
-            t_hash = _transition_hash(canon_from.hash, canon_next.hash)
-
-            stat_row = stats_by_hash.get(t_hash)
-            if not stat_row:
+            edge = stats_by_to_hash.get(canon_next.hash)
+            if not edge:
                 continue
 
             stats = MoveStatistics(
-                wins=int(stat_row.win_count),
-                ties=int(stat_row.tie_count),
-                neutral=int(stat_row.neutral_count),
-                losses=int(stat_row.loss_count),
+                wins=edge.win_count,
+                ties=edge.tie_count,
+                neutral=edge.neutral_count,
+                losses=edge.loss_count,
+                parent_wins=pw,
+                parent_ties=pt,
+                parent_neutral=pn,
+                parent_losses=pl,
             )
 
             evaluations.append(
@@ -419,11 +445,9 @@ class GameMemory:
         if not evaluations:
             return None
 
-        # Sort by score
         evaluations.sort(key=lambda e: e.stats.score, reverse=best)
         chosen = evaluations[0]
 
-        # Debug visualization (diffs)
         if debug:
             debug_rows = []
             chosen_hash = chosen.to_hash
@@ -448,17 +472,11 @@ class GameMemory:
 
         return chosen.move
 
-    # -------------------------
-    # Canonicalization cache wrapper
-    # -------------------------
+    # ---------------------------------------------------------------------
+    # Canonicalization cache
+    # ---------------------------------------------------------------------
     def _get_canonical_board_cached(self, board: np.ndarray) -> CanonicalResult:
-        """
-        Canonicalize BOARD ONLY (no current_player).
-        Creates cache key from board bytes only.
-        """
-        board_bytes, *_ = serialize_array(board)
-        key = hashlib.sha256(board_bytes).hexdigest()
-
+        key = board.tobytes()
         cached = self._cache.get(key)
         if cached:
             return cached
@@ -467,9 +485,9 @@ class GameMemory:
         self._cache.put(key, canonical)
         return canonical
 
-    # -------------------------
+    # ---------------------------------------------------------------------
     # Lifecycle
-    # -------------------------
+    # ---------------------------------------------------------------------
     def close(self) -> None:
         self._cache.clear()
         if not db.is_closed():
