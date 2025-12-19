@@ -40,9 +40,7 @@ def _set_move(
     if is_prune_stage:
         # Bad‑path: keep losers, shuffle winners
         if agent.change:  # Agent lost, keep and explore the bad move!
-            new_move = omnicron.get_worst_move(
-                game.game_id(), game.get_state().clone(), debug=False
-            )
+            new_move = omnicron.get_worst_move(game, debug=False)
             if new_move is not None:
                 agent.core_move = new_move
             else:
@@ -53,9 +51,7 @@ def _set_move(
     else:
         # Good‑path: explore winners, exploit losers
         if agent.change:  # Agent lost, keep and explore the bad move!
-            new_move = omnicron.get_best_move(
-                game.game_id(), game.get_state().clone(), debug=False
-            )
+            new_move = omnicron.get_best_move(game, debug=False)
             if new_move is not None:
                 agent.core_move = new_move
             else:

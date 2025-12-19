@@ -1,5 +1,5 @@
 """
-game_rules.py  —  Optimized version
+game_rules.py
 
 High-performance NumPy utilities for board games.
 Designed for fast rollouts, large board sizes,
@@ -80,7 +80,7 @@ def get_diagonals(board: np.ndarray) -> List[np.ndarray]:
 
     board.diagonal() is a *view* in most cases, so we explicitly copy it.
     """
-    major = board.diagonal().copy()       # top-left → bottom-right
+    major = board.diagonal().copy()  # top-left → bottom-right
     minor = np.fliplr(board).diagonal().copy()  # top-right → bottom-left
     return [major, minor]
 

@@ -16,6 +16,16 @@ class TicTacToe(GameBase):
     """
     Fully implemented TicTacToe game.
     Designed for multi-agent simulations.
+
+    ARCHITECTURE NOTE:
+    -----------------
+    This class exposes MOVES via valid_moves() and apply_move().
+    Transitions are DERIVED externally by:
+        1. Calling deep_clone()
+        2. Calling apply_move() on the clone
+        3. Extracting the new state via get_state()
+
+    Do NOT add valid_transitions() here - it violates the architecture.
     """
 
     SIZE = 3  # 3x3 board
@@ -51,7 +61,18 @@ class TicTacToe(GameBase):
         return self.state.current_player
 
     def valid_moves(self) -> np.ndarray:
-        """Return all empty (row, col) positions."""
+        """
+        Return all legal MOVES from the current state.
+
+        Returns array of (row, col) positions.
+
+        To derive transitions from these moves:
+            for move in game.valid_moves():
+                clone = game.deep_clone()
+                clone.apply_move(move)
+                next_state = clone.get_state()
+                # Now you have the transition: current_state → next_state
+        """
         board = self.state.board
         empty_positions = [
             (r, c)
@@ -65,7 +86,12 @@ class TicTacToe(GameBase):
     # Core move logic
     # --------------------------------------------------------------
     def apply_move(self, move: np.ndarray) -> None:
-        """Apply a move for the current player and update state."""
+        """
+        Apply a move for the current player and update state.
+
+        This is the game engine's responsibility.
+        Memory systems call this via deep_clone() to derive transitions.
+        """
 
         if len(move) != 2:
             raise ValueError(f"Invalid move format: {move}")
