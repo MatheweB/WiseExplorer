@@ -1,9 +1,22 @@
 """
-Terminal debug visualizer for game move statistics.
-Updated to support string-based piece names (e.g., 'Q1', 'P2') for MiniChess.
+Terminal debug visualizer for game TRANSITION statistics.
+
+ARCHITECTURE NOTE:
+-----------------
+This visualizer is TRANSITION-FIRST:
+  - Primary input: transition diffs (list of (coord, before, after))
+  - Legacy fallback: move_array (deprecated, for backward compatibility)
+
+Transitions represent STATE → STATE changes.
+Moves are a game-engine detail used to derive transitions.
+
+Supports:
+- Transition-based diffs (PREFERRED)
+- Legacy move_array (fallback, deprecated)
+- String-based pieces (MiniChess, etc.)
 """
 
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any
 import numpy as np
 
 # ===========================================================
@@ -14,7 +27,7 @@ BOLD = "\033[1m"
 DIM = "\033[2m"
 WHITE_FG = "\033[38;5;255m"
 GRAY_FG = "\033[38;5;244m"
-BEST_BG = "\033[48;5;21m" 
+BEST_BG = "\033[48;5;21m"
 BEST_FG = "\033[38;5;255m"
 
 # ===========================================================
@@ -24,6 +37,7 @@ W_MOVE = 12
 W_STAT = 6
 W_METRIC = 8
 W_TOTAL = 6
+
 
 def _bg_color_for_value(val: float) -> str:
     if val is None or (isinstance(val, float) and np.isnan(val)):
@@ -40,6 +54,7 @@ def _bg_color_for_value(val: float) -> str:
         idx = int(208 + ratio * (196 - 208))
     return f"\033[48;5;{idx}m"
 
+
 def _bar_string(value: float, width: int) -> str:
     if value is None or (isinstance(value, float) and np.isnan(value)):
         return " " * width
@@ -47,28 +62,126 @@ def _bar_string(value: float, width: int) -> str:
     filled = int(round(v * width))
     return "█" * filled + " " * (width - filled)
 
+
 def _player_marker(piece_val) -> str:
-    """
-    Improved marker logic:
-    - Supports MiniChess strings: 'K1', 'Q2', etc.
-    - Supports numeric players: 1, -1, 0.
-    """
     if piece_val is None or piece_val == 0:
         return "·"
-    
-    # If it's a string (like 'Q1' or 'P2'), return it as is
+
     if isinstance(piece_val, str):
         return piece_val
-        
-    # Handle numeric fallbacks
+
     try:
         val = int(piece_val)
-        if val == 1: return "X"
-        if val == 2 or val == -1: return "O"
+        if val == 1:
+            return "X"
+        if val == 2 or val == -1:
+            return "O"
     except (ValueError, TypeError):
         pass
-        
+
     return str(piece_val)
+
+
+def _format_move(move) -> str:
+    """
+    Format a move for display.
+
+    Supports:
+    - NumPy arrays: [r, c] or [from_r, from_c, to_r, to_c]
+    - Tuples/Lists: (r, c)
+    - Integers: flat index
+    - Strings: pass through
+    - None: "?"
+
+    Examples:
+        [1, 2] → "(1,2)"
+        [0, 1, 2, 3] → "(0,1)→(2,3)"
+        42 → "#42"
+    """
+    if move is None:
+        return "?"
+
+    # Convert NumPy array to list
+    if isinstance(move, np.ndarray):
+        move = move.tolist()
+
+    # List or tuple
+    if isinstance(move, (list, tuple)):
+        if len(move) == 2:
+            return f"({move[0]},{move[1]})"  # Single position: (1,2)
+        elif len(move) == 4:
+            return f"({move[0]},{move[1]})→({move[2]},{move[3]})"  # From→To
+        elif len(move) == 1:
+            return f"#{move[0]}"  # Single value in array
+        else:
+            # Fallback for unusual lengths
+            return str(move)
+
+    # Integer (flat index)
+    if isinstance(move, (int, np.integer)):
+        return f"#{int(move)}"
+
+    # String or other
+    return str(move)
+
+
+# ===========================================================
+# Destination extraction from TRANSITION DIFF (primary method)
+# ===========================================================
+
+
+def _dest_from_diff(diff, cols: int):
+    """
+    Extract destination square from transition diff.
+
+    Args:
+        diff: List[(idx, before, after)] where idx is (row, col)
+
+    Returns:
+        (row, col) of destination square, or None
+
+    The destination is defined as the square where 'after' is non-empty.
+    For multi-square moves (e.g., chess castling), this returns the first
+    destination found, which is sufficient for visualization purposes.
+    """
+    for idx, before, after in diff:
+        if after is not None and after != 0:
+            r, c = idx
+            return r, c
+    return None
+
+
+# ===========================================================
+# LEGACY: destination extraction from move_array (deprecated)
+# ===========================================================
+
+
+def _dest_from_move_array(move_array, cols: int):
+    """
+    DEPRECATED: Extract destination from legacy move_array format.
+
+    This function exists only for backward compatibility.
+    New code should pass transition diffs instead.
+
+    Supported move_array formats:
+      - [from_r, from_c, to_r, to_c]  → returns (to_r, to_c)
+      - [to_r, to_c]                  → returns (to_r, to_c)
+      - [flat_index]                  → returns divmod(flat_index, cols)
+    """
+    mv = np.atleast_1d(move_array)
+    if len(mv) == 4:
+        return int(mv[2]), int(mv[3])
+    elif len(mv) == 2:
+        return int(mv[0]), int(mv[1])
+    elif len(mv) == 1:
+        return divmod(int(mv[0]), cols)
+    return None
+
+
+# ===========================================================
+# Main render function
+# ===========================================================
+
 
 def render_debug(
     board: np.ndarray,
@@ -80,63 +193,118 @@ def render_debug(
     cell_width: int = 14,
     return_str: bool = False,
 ) -> str:
+    """
+    Render transition statistics as a terminal heatmap.
+
+    Args:
+        board: Current game board (np.ndarray)
+        debug_rows: List of transition statistics, where each dict contains:
+          - diff: List[(idx, before, after)]  [PREFERRED]
+          - move_array: np.ndarray            [DEPRECATED FALLBACK]
+          - score, utility, certainty, etc.   [statistics]
+          - is_selected: bool                 [highlight flag]
+
+        primary_metric: Metric to use for heatmap colors (default: "score")
+        secondary_metric: Second metric to display (default: "certainty")
+        show_bars: Whether to show visual bars in cells
+        cell_width: Width of each cell in characters
+        return_str: If True, return string instead of printing
+
+    Returns:
+        Formatted string (always), and prints unless return_str=True
+
+    ARCHITECTURE NOTE:
+    -----------------
+    This function is TRANSITION-FIRST. Each debug_row represents:
+      STATE_A → STATE_B
+
+    The diff shows what changed between states.
+    The move_array is a legacy fallback and should not be used in new code.
+    """
     board_arr = np.array(board)
-    
-    # Auto-reshape 1D to square if needed
+
     if board_arr.ndim == 1:
         side = int(np.sqrt(board_arr.size))
-        board_arr = board_arr.reshape((side, side)) if side*side == board_arr.size else board_arr.reshape((1, -1))
-    
+        board_arr = (
+            board_arr.reshape((side, side))
+            if side * side == board_arr.size
+            else board_arr.reshape((1, -1))
+        )
+
     ROWS, COLS = board_arr.shape
 
-    # Prepare data matrices
     primary_mat = np.full((ROWS, COLS), np.nan)
     secondary_mat = np.full((ROWS, COLS), np.nan)
     is_selected_mat = np.zeros((ROWS, COLS), dtype=bool)
 
+    # =======================================================
+    # Populate matrices (TRANSITION-FIRST)
+    # =======================================================
+
     for d in debug_rows:
-        mv = d.get("move_array")
-        if mv is None: continue
-        
-        # In Chess [from_r, from_c, to_r, to_c], 'move_array' usually refers to 'to' coords 
-        # or the signature location. Here we assume index 2,3 for destination if it's length 4.
-        arr_mv = np.atleast_1d(mv)
-        if len(arr_mv) == 4:
-            r, c = int(arr_mv[2]), int(arr_mv[3])
-        elif len(arr_mv) == 2:
-            r, c = int(arr_mv[0]), int(arr_mv[1])
-        else:
-            idx = int(arr_mv[0])
-            r, c = divmod(idx, COLS)
+        r = c = None
+
+        # PRIMARY: transition diff
+        if "diff" in d and d["diff"]:
+            dest = _dest_from_diff(d["diff"], COLS)
+            if dest:
+                r, c = dest
+
+        # FALLBACK: legacy move_array (deprecated)
+        elif "move_array" in d:
+            dest = _dest_from_move_array(d["move_array"], COLS)
+            if dest:
+                r, c = dest
+
+        if r is None or c is None:
+            continue
 
         if 0 <= r < ROWS and 0 <= c < COLS:
             primary_mat[r, c] = float(d.get(primary_metric, np.nan))
             secondary_mat[r, c] = float(d.get(secondary_metric, np.nan))
             is_selected_mat[r, c] = bool(d.get("is_selected", False))
 
-    output = ["", f"{BOLD}╔" + "═"*78 + "╗", f"║{'MOVE ANALYSIS SUMMARY':^78}║", f"╚" + "═"*78 + "╝", ""]
-    
-    # Table Header
-    header = f"{'Move':^{W_MOVE}} │ {'Rates (W/T/N/L)':^{W_STAT*4+3}} │ {'Metrics':^{W_METRIC*3+W_TOTAL+2}}"
+    # =======================================================
+    # Output assembly
+    # =======================================================
+
+    output = [
+        "",
+        f"{BOLD}╔" + "═" * 78 + "╗",
+        f"║{'TRANSITION ANALYSIS SUMMARY':^78}║",
+        f"╚" + "═" * 78 + "╝",
+        "",
+    ]
+
+    header = f"{'Transition':^{W_MOVE}} │ {'Rates (W/T/N/L)':^{W_STAT*4+3}} │ {'Metrics':^{W_METRIC*3+W_TOTAL+2}}"
     output.append(header)
     output.append(f"{DIM}{'─' * len(header)}{RESET}")
 
-    # Table Data
     sorted_rows = sorted(debug_rows, key=lambda x: x.get("score", 0), reverse=True)
+
     for d in sorted_rows:
-        mv = d.get("move_array")
-        mv_str = f"[{','.join(map(str, mv))}]" if hasattr(mv, '__iter__') else str(mv)
-        row_str = (f"{mv_str:>{W_MOVE}} │ "
-                   f"{d.get('pW',0):.2f} {d.get('pT',0):.2f} {d.get('pN',0):.2f} {d.get('pL',0):.2f} │ "
-                   f"C:{d.get('certainty',0):.2f} U:{d.get('utility',0):+.2f} S:{d.get('score',0):.2f} "
-                   f"({d.get('total',0)})")
-        if d.get("is_selected"): row_str += f" {BOLD}→ SELECTED{RESET}"
+        # Format the move (or use delta symbol if no move available)
+        label = _format_move(d.get("move", None)) if "move" in d else "Δ"
+
+        row_str = (
+            f"{label:>{W_MOVE}} │ "
+            f"{d.get('pW',0):.2f} {d.get('pT',0):.2f} {d.get('pN',0):.2f} {d.get('pL',0):.2f} │ "
+            f"C:{d.get('certainty',0):.2f} "
+            f"U:{d.get('utility',0):+.2f} "
+            f"S:{d.get('score',0):.2f} "
+            f"({d.get('total',0)})"
+        )
+        if d.get("is_selected"):
+            row_str += f" {BOLD}→ SELECTED{RESET}"
         output.append(row_str)
 
+    # =======================================================
     # Heatmap
-    output.append("\n" + f"{BOLD}╔" + "═"*78 + "╗")
+    # =======================================================
+
+    output.append("\n" + f"{BOLD}╔" + "═" * 78 + "╗")
     output.append(f"║{'HEATMAP VISUALIZER (Destination Squares)':^78}║")
-    output.append(f"╚" + "═"*78 + "╝\n")
+    output.append(f"╚" + "═" * 78 + "╝\n")
 
     TL, TM, TR = "┌", "┬", "┐"
     ML, MM, MR = "├", "┼", "┤"
@@ -155,31 +323,41 @@ def render_debug(
             p_val = primary_mat[r, c]
             s_val = secondary_mat[r, c]
             sel = is_selected_mat[r, c]
-            
+
             marker = _player_marker(board_arr[r, c])
             p_s = f"{p_val:.2f}" if not np.isnan(p_val) else "--"
             s_s = f"{s_val:.2f}" if not np.isnan(s_val) else "--"
-            
-            # Formatting text to fit cell_width
+
             t_txt = f" {marker} ".center(cell_width)
             m_txt = f"{p_s} {s_s}".center(cell_width)
-            b_txt = (" " + _bar_string(p_val, bar_w) + " ").ljust(cell_width) if show_bars else " "*cell_width
+            b_txt = (
+                (" " + _bar_string(p_val, bar_w) + " ").ljust(cell_width)
+                if show_bars
+                else " " * cell_width
+            )
 
             if sel:
-                t_txt, m_txt, b_txt = "▌"+t_txt[1:-1]+"▐", "▌"+m_txt[1:-1]+"▐", "▌"+b_txt[1:-1]+"▐"
+                t_txt, m_txt, b_txt = (
+                    "▌" + t_txt[1:-1] + "▐",
+                    "▌" + m_txt[1:-1] + "▐",
+                    "▌" + b_txt[1:-1] + "▐",
+                )
 
             bg = BEST_BG if sel else _bg_color_for_value(p_val)
             fg = BEST_FG if sel else WHITE_FG
-            
+
             for i, txt in enumerate([t_txt, m_txt, b_txt]):
                 lines[i].append(f"{bg}{fg}{txt}{RESET}")
 
         for line in lines:
             output.append(V + V.join(line) + V)
-        
-        if r < ROWS - 1: output.append(make_sep(ML, MM, MR))
-        else: output.append(make_sep(BL, BM, BR))
+
+        if r < ROWS - 1:
+            output.append(make_sep(ML, MM, MR))
+        else:
+            output.append(make_sep(BL, BM, BR))
 
     final_str = "\n".join(output)
-    if not return_str: print(final_str)
+    if not return_str:
+        print(final_str)
     return final_str

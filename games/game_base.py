@@ -1,112 +1,110 @@
 # game_base.py
 from abc import ABC, abstractmethod
-
-# Libraries
 from numpy.typing import NDArray
 
-# Classes
 from agent.agent import State
 from games.game_state import GameState
 
 
 class GameBase(ABC):
     """
-    Abstract base class for all board games in the system.
-    Every game must implement these methods.
-    Agents use only these methods — never the underlying implementation.
+    Abstract base class for all board games.
+
+    IMPORTANT ARCHITECTURE NOTE:
+    -----------------------------
+    • Games expose MOVES, not transitions.
+    • Transitions are DERIVED by simulating moves.
+    • Omnicron memory canonicalizes STATE → STATE transitions internally.
+
+    Do NOT add valid_transitions() here.
     """
 
     # ----------------------------------------------------------
-    # Core required methods
+    # Identity / structure
     # ----------------------------------------------------------
     @abstractmethod
     def game_id(self) -> str:
-        """
-        Returns the id of the game we're playing (e.g. tic_tac_toe)
-        """
+        """Return a stable identifier (e.g. 'tic_tac_toe')."""
         pass
 
     @abstractmethod
     def num_players(self) -> int:
-        """
-        Return the number of players in this game.
-        """
+        """Return number of players in the game."""
         pass
 
+    # ----------------------------------------------------------
+    # Cloning
+    # ----------------------------------------------------------
     @abstractmethod
     def clone(self) -> "GameBase":
-        """
-        Return a deep copy of the entire game (GameBase + GameState).
-        """
+        """Shallow copy (rarely used)."""
         pass
 
     @abstractmethod
     def deep_clone(self) -> "GameBase":
         """
-        Return a shallow copy of the entire game (GameBase + GameState).
-        Used heavily in agent lookahead/simulation.
+        Deep copy of game + state.
+        Used heavily for simulation and transition derivation.
         """
         pass
 
+    # ----------------------------------------------------------
+    # State access
+    # ----------------------------------------------------------
     @abstractmethod
-    def get_state(self) -> "GameState":
-        """
-        Return the current state of the game.
-        """
+    def get_state(self) -> GameState:
+        """Return the current game state."""
         pass
 
     @abstractmethod
     def set_state(self, game_state: GameState) -> None:
-        """
-        Sets the current state of the game.
-        """
+        """Replace the current game state."""
         pass
 
     @abstractmethod
     def current_player(self) -> int:
-        """
-        Return ID of the player to act: typically 0 or 1.
-        """
+        """Return ID of player to act."""
         pass
 
+    # ----------------------------------------------------------
+    # Move interface (PRIMARY)
+    # ----------------------------------------------------------
     @abstractmethod
     def valid_moves(self) -> NDArray:
         """
-        Return a list of all legal actions for the current state.
-        Example output: [(row, col), (row, col), ...]
+        Return all legal moves from the current state.
+        Example (TicTacToe): [(row, col), ...]
         """
         pass
 
     @abstractmethod
     def apply_move(self, move: NDArray) -> None:
         """
-        Apply a move to the current game state.
+        Apply a move to the game.
         Mutates internal state.
         """
         pass
 
+    # ----------------------------------------------------------
+    # Termination / payoff
+    # ----------------------------------------------------------
     @abstractmethod
     def is_over(self) -> bool:
-        """
-        Return True if game has ended (win, loss, or draw).
-        """
+        """Return True if the game has ended."""
         pass
 
     @abstractmethod
     def get_result(self, agent_id: int) -> State:
         """
         Return payoff for the agent:
-            win
-            tie
-            neutral
-            loss
+            WIN / TIE / NEUTRAL / LOSS
         """
         pass
 
+    # ----------------------------------------------------------
+    # Debug / UI
+    # ----------------------------------------------------------
     @abstractmethod
     def state_string(self) -> str:
-        """
-        Returns a visually appealing string of the current state of the game
-        """
+        """Pretty string representation of the state."""
         pass
-
