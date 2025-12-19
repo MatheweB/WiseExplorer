@@ -116,7 +116,7 @@ class MoveStatistics:
     @property
     def utility(self) -> float:
         """
-        We only account for conclusive/terminal outcomes in our calculations
+        Expected terminal value, conditioned on resolution.
         """
         effective = self.total - self.neutral
         if effective <= 0:
@@ -125,24 +125,18 @@ class MoveStatistics:
         return (self.wins + 0.5 * self.ties - self.losses) / effective
 
     # -------------------------
-    # Exploration-aware score (UCT)
+    # Bayesian exploitation
     # -------------------------
     @property
-    def puct(self) -> float:
-        """
-        UCT-style score, only accounting for terminal outcomes
-        """
-        effective = self.total - self.neutral
-        parent_effective = self.parent_total - self.parent_neutral
-        if effective <= 0 or parent_effective <= 0:
-            return float("inf")
-
-        exploration = np.sqrt(np.log(parent_effective) / effective)
-        return self.utility + exploration
+    def bayes_exploit(self) -> float:
+        # Can also try Beta(0.5, 0.5) Jeffreys prior - less biased than Beta(1,1) for extreme rates
+        alpha = 1.0 + self.wins + 0.5 * self.ties
+        beta = 1.0 + self.losses + 0.5 * self.ties
+        return alpha / (alpha + beta)
 
     @property
     def score(self) -> float:
-        return self.puct
+        return self.bayes_exploit
 
 
 @dataclass(frozen=True)
