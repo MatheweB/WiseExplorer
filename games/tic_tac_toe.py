@@ -1,7 +1,7 @@
 # tic_tac_toe.py
 from copy import copy, deepcopy
-import numpy as np
 from typing import List
+import numpy as np
 
 # Functions
 from games.game_rules import get_rows, get_cols, get_diagonals, board_full

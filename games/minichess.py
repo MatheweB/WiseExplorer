@@ -1,10 +1,10 @@
 # mini_chess.py
 from copy import copy, deepcopy
+from typing import List, Tuple
 import numpy as np
-from typing import List, Tuple, Optional
 
 # Functions
-from games.game_rules import in_bounds, board_full
+from games.game_rules import in_bounds
 
 # Classes
 from games.game_base import GameBase
@@ -250,7 +250,7 @@ class MiniChess(GameBase):
     def _king_exists(self, player: int) -> bool:
         """Check if the specified player's King is on the board."""
         king = f"K{player}"
-        return np.any(self.state.board == king)
+        return bool(np.any(self.state.board == king))
 
     def _get_piece_moves(
         self, r: int, c: int, piece: str

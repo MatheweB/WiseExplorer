@@ -1,21 +1,22 @@
 """
 State canonicalization with graph-based symmetry handling.
 
-FIXED VERSION v3 - CERTIFICATE-BASED APPROACH:
-- Uses pynauty.certificate() which is GUARANTEED identical for isomorphic graphs
+Graph-certificate approach:
+- Uses pynauty.certificate() which is guaranteed identical for isomorphic graphs
 - No need to interpret canon_label semantics
 - Much simpler and more reliable
 
-The key insight: pynauty.certificate() returns a canonical byte representation
+pynauty.certificate() returns a canonical byte representation
 of the graph structure. Isomorphic graphs get identical certificates.
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+from typing import List, Optional, Tuple
+
 import hashlib
 import numpy as np
-from dataclasses import dataclass
-from typing import Any, List, Optional, Tuple
 
 import pynauty  # type: ignore
 
@@ -60,7 +61,7 @@ def _canonicalize_impl(
 ) -> CanonicalResult:
     """Internal implementation for canonicalization."""
     shape = board.shape
-    graph, n, coord_list = _board_to_graph(board, include_player)
+    graph, n, _coord_list = _board_to_graph(board, include_player)
 
     # Get certificate - guaranteed identical for isomorphic graphs
     cert = pynauty.certificate(graph)
@@ -115,7 +116,7 @@ def _get_position_type(coord: Tuple[int, ...], shape: Tuple[int, ...]) -> Tuple:
 # ============================================================================
 
 
-def _board_to_graph(board: np.ndarray, player: Optional[int]):
+def _board_to_graph(board: np.ndarray, _player: Optional[int]):
     """
     Convert a game board into a colored graph for canonical labeling.
 
