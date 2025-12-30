@@ -2,9 +2,9 @@
 A class representing an agent in a simulation with various attributes and behaviors.
 """
 
-import numpy as np
 from dataclasses import dataclass, field
 from enum import Enum, auto
+import numpy as np
 
 
 class State(Enum):

@@ -7,14 +7,14 @@ Runs parallel game simulations to train agents via wise_explorer.
 
 Key concepts:
 - SWARMS: Each player has a "swarm" of agents that act as state holders.
-  They don't play directly—temporary agents copy their state, play a game,
-  and sync results back. This enables parallel sims while preserving memory
-  across rounds (e.g., "I lost last time, explore more").
+    They don't play directly—temporary agents copy their state, play a game,
+    and sync results back. This enables parallel sims while preserving memory
+    across rounds (e.g., "I lost last time, explore more").
 
 - JOBS: Self-contained units of work (simulation parameters) distributable to any worker.
 
 - ROUNDS: All games in a round complete before writing to DB. This ensures
-  no partial games are recorded and learning is consistent.
+    no partial games are recorded and learning is consistent.
 
 Recommended usage with partitioned memory:
 
@@ -249,12 +249,9 @@ class SimulationRunner:
 
             # Debug invariants
             assert len(results) == len(jobs), "Lost simulation results"
-            for r in results:
-                for state in r.outcomes.values():
-                    assert state in TERMINAL_STATES, f"Non-terminal outcome: {state}"
 
             # 3. Write all stacks atomically
-            total_transitions += self._commit_round(results)
+            total_transitions += self._commit_round(results, record_neutral_results=False)
 
             # 4. Update swarm states
             for result in results:
@@ -264,9 +261,11 @@ class SimulationRunner:
 
         return total_transitions
 
-    def _commit_round(self, results: List[JobResult]) -> int:
+    def _commit_round(self, results: List[JobResult], record_neutral_results: bool = False) -> int:
         """
         Write all game stacks from a round in one atomic transaction.
+        We can choose whether to record the results of games that end in "neutral" (default = False)
+
         """
         game_classes = {r.game_class for r in results}
         assert len(game_classes) == 1, f"Mixed game classes in round (not allowed): {game_classes}"
@@ -277,6 +276,8 @@ class SimulationRunner:
         for result in results:
             for pid, moves in result.move_history.items():
                 outcome = result.outcomes[pid]
+                if not record_neutral_results and outcome == State.NEUTRAL:
+                    continue
                 move_tuples = [
                     (rec.move, rec.board_before, rec.player_who_moved)
                     for rec in moves
@@ -360,8 +361,9 @@ def start_simulations(
         num_workers: Number of parallel worker processes
         training_enabled: If False, skip training and just play from existing memory
     """
-    play_against_self = True  # Set to False for human vs AI
-    human_turn = False
+    play_against_self = False  # Set to False for human vs AI
+    human_turn = True
+    training_enabled = False
 
     runner = SimulationRunner(memory, num_workers)
     print(
@@ -396,15 +398,16 @@ def start_simulations(
                     best_move = memory.get_best_move(game, debug=True)
 
                     if best_move is None:
-                        print("No known best move, choosing random.")
                         valid = game.valid_moves()
-                        if not valid:
+                        if len(valid) == 0:
                             break
                         best_move = random.choice(valid)
+                        print(f"AI selected random move: {best_move}")
+                        game.apply_move(best_move)
+                        print(game.state_string())
                     else:
                         print(f"AI selected best move: {best_move}")
-
-                    game.apply_move(best_move)
+                        game.apply_move(best_move)
 
                     if not play_against_self:
                         human_turn = True

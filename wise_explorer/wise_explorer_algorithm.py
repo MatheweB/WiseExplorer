@@ -15,7 +15,7 @@ from omnicron.manager import GameMemory
 
 
 def _set_move(
-    agent: Agent, game: GameBase, omnicron: GameMemory, is_prune_stage: bool
+    agent: Agent, game: GameBase, memory: GameMemory, is_prune_stage: bool
 ) -> None:
     """
     Update ``agent.core_move`` according to the current search stage.
@@ -26,64 +26,49 @@ def _set_move(
         The agent whose move is being updated.
     is_prune_stage:
         * ``True`` - we are in the *pruning* (bad-path) phase:
-        keep the losing agent on its current move and give a
-        random move to the winning one.
+        We bias towards picking the known worst move. 
+        If the worst move has a high score, we have a higher probability of choosing random over it.
+        If the worst move has a low score, we have a higher probability of choosing it over random.
+        If there is no worst move, we choose random.
+
         * ``False`` - we are in the *exploration* (good-path) phase:
-        try a random move if the agent won, otherwise keep the best
-        move found so far.
+        We bias towards picking the best know move. 
+        If the best move has a high score, we have a higher probability of choosing it over random.
+        If the best move has a low score, we have a higher probability of choosing random over it.
+        If there is no best move, we choose random.
 
     Notes
     -----
     The helper works for both normal agents and “anti-agents”; it
     simply calls the agent's public API.
     """
-
-    def pick_move(game, memory, is_prune):
-        valid = game.valid_moves()
-        
-        if is_prune:
-            result = memory.get_worst_move_with_score(game)
-            if result is None:
-                return random.choice(valid)
+    valid = game.valid_moves()
+    
+    if is_prune_stage:
+        result = memory.get_worst_move_with_score(game)
+        if result is not None:
             move, score = result
             exploit_prob = (score + 1) / 2
+            # We expect worst move to be low, so picking is more likely
             if random.random() > exploit_prob:
-                return move
+                agent.core_move = move
             else:
-                return random.choice(valid)
+                agent.core_move = random.choice(valid)
         else:
-            result = memory.get_best_move_with_score(game)
-            if result is None:
-                return random.choice(valid)
+            agent.core_move = random.choice(valid)
+
+    else:
+        result = memory.get_best_move_with_score(game)
+        if result is not None:
             move, score = result
             exploit_prob = (score + 1) / 2
+            # We expect best move to be high, so picking is more likely
             if random.random() < exploit_prob:
-                return move
+                agent.core_move = move
             else:
-                return random.choice(valid)
-
-
-    agent.core_move = pick_move(game, omnicron, is_prune_stage)
-    # if is_prune_stage:
-        # # Bad‑path: keep losers, shuffle winners
-        # if agent.change:  # Agent lost, keep and explore the bad move!
-        #     new_move = omnicron.get_worst_move(game, debug=False)
-        #     if new_move is not None:
-        #         agent.core_move = new_move
-        #     else:
-        #         agent.core_move = random.choice(game.valid_moves())
-        # else:  # Agent won, explore something else potentially bad
-        #     agent.core_move = random.choice(game.valid_moves())
-    # else:
-        # # Good‑path: explore winners, exploit losers
-        # if agent.change:  # Agent lost, keep and explore the bad move!
-        #     new_move = omnicron.get_best_move(game, debug=False)
-        #     if new_move is not None:
-        #         agent.core_move = new_move
-        #     else:
-        #         agent.core_move = random.choice(game.valid_moves())
-        # else:  # Agent won, explore something else potentially good
-        #     agent.core_move = random.choice(game.valid_moves())
+                agent.core_move = random.choice(valid)
+        else:
+            agent.core_move = random.choice(valid)
 
 
 def update_agent(
