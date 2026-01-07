@@ -1,5 +1,5 @@
 # tic_tac_toe.py
-from copy import copy, deepcopy
+from copy import copy
 from typing import List
 import numpy as np
 
@@ -49,7 +49,9 @@ class TicTacToe(GameBase):
         return copy(self)
 
     def deep_clone(self) -> "TicTacToe":
-        return deepcopy(self)
+        clone = copy(self)
+        clone.state = self.state.copy()
+        return clone
 
     def get_state(self) -> GameState:
         return self.state
@@ -74,13 +76,8 @@ class TicTacToe(GameBase):
                 # Now you have the transition: current_state → next_state
         """
         board = self.state.board
-        empty_positions = [
-            (r, c)
-            for r in range(self.SIZE)
-            for c in range(self.SIZE)
-            if board[r, c] is None
-        ]
-        return np.array(empty_positions)
+        mask = np.array([[x is None for x in row] for row in board])
+        return np.argwhere(mask)
 
     # --------------------------------------------------------------
     # Core move logic

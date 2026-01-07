@@ -1,5 +1,5 @@
 # mini_chess.py
-from copy import copy, deepcopy
+from copy import copy
 from typing import List, Tuple
 import numpy as np
 
@@ -81,7 +81,9 @@ class MiniChess(GameBase):
         return copy(self)
 
     def deep_clone(self) -> "MiniChess":
-        return deepcopy(self)
+        clone = copy(self)
+        clone.state = self.state.copy()
+        return clone
 
     def get_state(self) -> GameState:
         return self.state

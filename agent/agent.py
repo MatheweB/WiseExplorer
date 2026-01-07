@@ -16,8 +16,12 @@ class State(Enum):
 
 @dataclass
 class Agent:
-    _core_move: np.ndarray = field(default_factory=lambda: np.array([]))  # The initial move that an agent will make in a simulation (based on the initial board state before simulating)
-    _move: np.ndarray = field(default_factory=lambda: np.array([]))  # The move that the agent is going to make on a given turn in the simulation.
+    _core_move: np.ndarray = field(
+        default_factory=lambda: np.array([])
+    )  # The initial move that an agent will make in a simulation (based on the initial board state before simulating)
+    _move: np.ndarray = field(
+        default_factory=lambda: np.array([])
+    )  # The move that the agent is going to make on a given turn in the simulation.
     _change: bool = (
         False  # A boolean indicating whether the agent should change its coreMove in the next simulation.
     )
