@@ -1,4 +1,5 @@
 # main.py
+from typing import Dict, List
 from agent.agent import Agent
 from games.game_base import GameBase, GameState
 from simulation.simulation import start_simulations
@@ -10,8 +11,8 @@ from utils.global_variables import (
     GAMES,
     INITIAL_STATES,
     NUM_AGENTS,
+    DEFAULT_WORKER_COUNT
 )
-from typing import Dict, List
 
 
 # ------------------------------------------------------
@@ -64,6 +65,10 @@ def main():
         turn_depth=TURN_DEPTH,
         simulations=SIMULATIONS,
         memory=memory,
+        num_workers=DEFAULT_WORKER_COUNT,
+        training_enabled=True,
+        human_players=[],
+        debug_move_statistics=True
     )
 
 

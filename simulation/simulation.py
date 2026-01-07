@@ -31,8 +31,8 @@ from __future__ import annotations
 
 import logging
 import multiprocessing as mp
-from multiprocessing.pool import Pool
 import random
+from multiprocessing.pool import Pool
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 
@@ -47,19 +47,21 @@ from wise_explorer import wise_explorer_algorithm
 logger = logging.getLogger(__name__)
 
 DEFAULT_WORKER_COUNT = max(1, mp.cpu_count() - 1)
-TERMINAL_STATES = frozenset({State.WIN, State.LOSS, State.TIE})
+LOSING_OUTCOMES = frozenset({State.LOSS, State.TIE})
 
 
 # ---------------------------------------------------------------------------
-# Data Structures (Picklable)
+# Data Structures
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class MoveRecord:
-    """Lightweight struct to hold move data for storage."""
+    """A single move with its context."""
+
     move: np.ndarray
     board_before: np.ndarray
-    player_who_moved: int
+    player: int
 
 
 @dataclass(frozen=True)
@@ -68,106 +70,92 @@ class GameJob:
     A completely self-contained job description.
     Can be pickled and sent to any worker.
     """
+
     game: GameBase
     player_map: Dict[int, int]  # player_id -> swarm_index
-    exploration_settings: Dict[int, bool]  # player_id -> should explore?
+    exploration: Dict[int, bool]  # player_id -> should_explore
     max_turns: int
-    is_prune_phase: bool
+    is_prune: bool
 
 
 @dataclass
 class JobResult:
     """The result payload returned by a worker."""
-    move_history: Dict[int, List[MoveRecord]]
-    outcomes: Dict[int, State]
-    player_map: Dict[int, int]  # Returned to map results back to swarms
+
+    moves: Dict[int, List[MoveRecord]]  # player_id -> move history
+    outcomes: Dict[int, State]  # player_id -> final state
+    player_map: Dict[int, int]  # Echo back for swarm sync
     game_class: type
 
 
 # ---------------------------------------------------------------------------
-# Worker Process Logic
+# Worker Process
 # ---------------------------------------------------------------------------
 
 _worker_memory: Optional[GameMemory] = None
 
 
 def _worker_init(db_path: str) -> None:
-    """Initializes the persistent DB connection for the worker process."""
-    global _worker_memory
+    """Initialize DB connection for this worker process."""
+    # global is required for multiprocessing
+    global _worker_memory  # pylint: disable=[W0603]
     _worker_memory = GameMemory(db_path, read_only=True)
-    # Note: read-only WAL connections don't create write locks,
-    # so no explicit cleanup needed
 
 
-def play_simulation_job(job: GameJob) -> JobResult:
+def run_game(job: GameJob) -> JobResult:
     """
-    Executes a single game simulation.
+    Execute a single game simulation.
     This is the distributable unit of work.
     """
     if _worker_memory is None:
-        raise RuntimeError("Worker not initialized with DB connection.")
+        raise RuntimeError("Worker not initialized")
 
     game = job.game
-    player_ids = sorted(job.player_map.keys())
+    players = sorted(job.player_map.keys())
 
-    # Setup local agents for this simulation
-    agents: Dict[int, Agent] = {}
-    for pid in player_ids:
-        agent = Agent()
-        agent.player_id = pid
-        agent.change = job.exploration_settings.get(pid, False)
-        agents[pid] = agent
+    # Create local agents
+    agents = {pid: _make_agent(pid, job.exploration.get(pid, False)) for pid in players}
 
-    move_history: Dict[int, List[MoveRecord]] = {pid: [] for pid in player_ids}
+    # Play the game
+    moves: Dict[int, List[MoveRecord]] = {pid: [] for pid in players}
 
-    # Run game loop
     for _ in range(job.max_turns):
         if game.is_over():
             break
 
-        current_pid = game.current_player()
-        agent = agents[current_pid]
+        pid = game.current_player()
+        agent = agents[pid]
 
-        # Decision making via wise_explorer
-        wise_explorer_algorithm.update_agent(
-            agent, game, _worker_memory, job.is_prune_phase
-        )
+        # Get move from wise_explorer
+        wise_explorer_algorithm.update_agent(agent, game, _worker_memory, job.is_prune)
 
-        # Snapshot state BEFORE move
-        board_snapshot = game.get_state().board.copy()
+        # Record and apply
+        board_before = game.get_state().board.copy()
         move = np.array(agent.core_move, copy=True)
 
-        # Apply move
         game.apply_move(move)
-        agent.move = move
-
-        # Log move
-        move_history[current_pid].append(
-            MoveRecord(
-                move=move,
-                board_before=board_snapshot,
-                player_who_moved=current_pid,
-            )
-        )
-
-        # Correct terminal detection
-        if game.is_over():
-            break
-
-    # Finalize outcomes
-    outcomes = {pid: game.get_result(pid) for pid in player_ids}
+        moves[pid].append(MoveRecord(move, board_before, pid))
 
     return JobResult(
-        move_history=move_history,
-        outcomes=outcomes,
+        moves=moves,
+        outcomes={pid: game.get_result(pid) for pid in players},
         player_map=job.player_map,
         game_class=type(game),
     )
 
 
+def _make_agent(player_id: int, should_explore: bool) -> Agent:
+    """Create an agent configured for simulation."""
+    agent = Agent()
+    agent.player_id = player_id
+    agent.change = should_explore
+    return agent
+
+
 # ---------------------------------------------------------------------------
-# Simulation Orchestrator (Main Process)
+# Simulation Runner
 # ---------------------------------------------------------------------------
+
 
 class SimulationRunner:
     """Manages the pool of workers and the job pipeline."""
@@ -179,14 +167,14 @@ class SimulationRunner:
         self._round_id = 0
 
     def __enter__(self):
-        self._start_pool()
+        self._ensure_pool()
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
+    def __exit__(self, *_):
         self.shutdown()
 
-    def _start_pool(self) -> Pool:
-        """Lazy init - returns the pool, creating if needed."""
+    def _ensure_pool(self) -> Pool:
+        """Lazy pool initialization."""
         if self._pool is None:
             self._pool = mp.Pool(
                 processes=self.num_workers,
@@ -213,8 +201,8 @@ class SimulationRunner:
     def run_batch(
         self,
         swarms: Dict[int, List[Agent]],
-        base_game: GameBase,
-        total_sims: int,
+        game: GameBase,
+        num_sims: int,
         is_prune: bool,
         max_turns: int,
     ) -> int:
@@ -224,78 +212,36 @@ class SimulationRunner:
         All games in a round complete before any writes occur.
         Returns the total number of move transitions recorded.
         """
-        if total_sims <= 0 or not swarms:
+        if num_sims <= 0 or not swarms:
             return 0
 
         swarm_size = min(len(s) for s in swarms.values())
         if swarm_size == 0:
             return 0
 
-        pool = self._start_pool()
-        sims_remaining = total_sims
+        pool = self._ensure_pool()
+        remaining = num_sims
         total_transitions = 0
 
-        while sims_remaining > 0:
+        while remaining > 0:
             self._round_id += 1
-            round_size = min(swarm_size, sims_remaining)
+            batch_size = min(swarm_size, remaining)
 
-            # 1. Create jobs with random pairings
-            jobs = self._create_jobs(
-                swarms, base_game, round_size, is_prune, max_turns
-            )
+            # 1. Create and run jobs
+            jobs = self._make_jobs(swarms, game, batch_size, is_prune, max_turns)
+            results = pool.map(run_game, jobs)
 
-            # 2. Execute all games in parallel
-            results = pool.map(play_simulation_job, jobs)
+            # 2. Commit results atomically
+            total_transitions += self._commit(results, skip_neutral=True)
 
-            # Debug invariants
-            assert len(results) == len(jobs), "Lost simulation results"
+            # 3. Update swarm exploration flags
+            self._sync_swarms(swarms, results)
 
-            # 3. Write all stacks atomically
-            total_transitions += self._commit_round(results, record_neutral_results=False)
-
-            # 4. Update swarm states
-            for result in results:
-                self._sync_swarm_state(swarms, result)
-
-            sims_remaining -= round_size
+            remaining -= batch_size
 
         return total_transitions
 
-    def _commit_round(self, results: List[JobResult], record_neutral_results: bool = False) -> int:
-        """
-        Write all game stacks from a round in one atomic transaction.
-        We can choose whether to record the results of games that end in "neutral" (default = False)
-
-        """
-        game_classes = {r.game_class for r in results}
-        assert len(game_classes) == 1, f"Mixed game classes in round (not allowed): {game_classes}"
-        game_class = game_classes.pop()
-
-        all_stacks = []
-
-        for result in results:
-            for pid, moves in result.move_history.items():
-                outcome = result.outcomes[pid]
-                if not record_neutral_results and outcome == State.NEUTRAL:
-                    continue
-                move_tuples = [
-                    (rec.move, rec.board_before, rec.player_who_moved)
-                    for rec in moves
-                ]
-                all_stacks.append((move_tuples, outcome))
-
-        if not all_stacks:
-            return 0
-
-        logger.debug(
-            "Committing round %d with %d stacks",
-            self._round_id,
-            len(all_stacks),
-        )
-
-        return self.memory.record_round(game_class, all_stacks)
-
-    def _create_jobs(
+    def _make_jobs(
         self,
         swarms: Dict[int, List[Agent]],
         game: GameBase,
@@ -303,42 +249,73 @@ class SimulationRunner:
         is_prune: bool,
         max_turns: int,
     ) -> List[GameJob]:
-        """Generates a list of randomized match-ups."""
-        jobs = []
-        player_ids = sorted(swarms.keys())
+        """Generate randomized match-ups."""
+        players = sorted(swarms.keys())
 
-        shuffled_indices = {
-            pid: random.sample(range(len(swarms[pid])), count)
-            for pid in player_ids
+        # Shuffle indices for random pairings
+        indices = {
+            pid: random.sample(range(len(swarms[pid])), count) for pid in players
         }
 
-        for i in range(count):
-            p_map = {pid: shuffled_indices[pid][i] for pid in player_ids}
-            exp_settings = {
-                pid: swarms[pid][idx].change for pid, idx in p_map.items()
-            }
-
-            jobs.append(
-                GameJob(
-                    game=game.deep_clone(),
-                    player_map=p_map,
-                    exploration_settings=exp_settings,
-                    max_turns=max_turns,
-                    is_prune_phase=is_prune,
-                )
+        return [
+            GameJob(
+                game=game.deep_clone(),
+                player_map={pid: indices[pid][i] for pid in players},
+                exploration={
+                    pid: swarms[pid][indices[pid][i]].change for pid in players
+                },
+                max_turns=max_turns,
+                is_prune=is_prune,
             )
-        return jobs
+            for i in range(count)
+        ]
 
-    def _sync_swarm_state(self, swarms: Dict[int, List[Agent]], result: JobResult):
-        """Updates agent exploration flags based on results."""
-        for pid, swarm_idx in result.player_map.items():
-            outcome = result.outcomes[pid]
-            swarms[pid][swarm_idx].change = outcome in {State.LOSS, State.TIE}
+    def _commit(self, results: List[JobResult], skip_neutral: bool = True) -> int:
+        """
+        Write all game stacks from a round in one atomic transaction.
+
+        Args:
+            results: Job results from workers
+            skip_neutral: If True, don't record games that ended in NEUTRAL
+        """
+        if not results:
+            return 0
+
+        game_class = results[0].game_class
+
+        # Build stacks: List[(moves, outcome)]
+        stacks = []
+        for result in results:
+            for pid, move_list in result.moves.items():
+                outcome = result.outcomes[pid]
+                if skip_neutral and outcome == State.NEUTRAL:
+                    continue
+
+                stacks.append(
+                    (
+                        [(m.move, m.board_before, m.player) for m in move_list],
+                        outcome,
+                    )
+                )
+
+        if not stacks:
+            return 0
+
+        logger.debug("Committing round %d: %d stacks", self._round_id, len(stacks))
+        return self.memory.record_round(game_class, stacks)
+
+    def _sync_swarms(self, swarms: Dict[int, List[Agent]], results: List[JobResult]):
+        """Update agent exploration flags based on outcomes."""
+        for result in results:
+            for pid, swarm_idx in result.player_map.items():
+                lost = result.outcomes[pid] in LOSING_OUTCOMES
+                swarms[pid][swarm_idx].change = lost
 
 
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+
 
 def start_simulations(
     agent_swarms: Dict[int, List[Agent]],
@@ -348,6 +325,8 @@ def start_simulations(
     memory: GameMemory,
     num_workers: int = DEFAULT_WORKER_COUNT,
     training_enabled: bool = True,
+    human_players: Optional[List[int]] = None,
+    debug_move_statistics: bool = True,
 ) -> None:
     """
     Main entry point. Orchestrates the Training (Prune/Optimize) and Play cycle.
@@ -360,75 +339,109 @@ def start_simulations(
         memory: Database for storing/retrieving learned moves
         num_workers: Number of parallel worker processes
         training_enabled: If False, skip training and just play from existing memory
+        human_players: List of player IDs controlled by human input (e.g., [1] or [1, 2])
     """
-    play_against_self = False  # Set to False for human vs AI
-    human_turn = True
-    training_enabled = False
-
+    human_set = set(human_players) if human_players else set()
     runner = SimulationRunner(memory, num_workers)
+
     print(
-        f"Starting engine with {num_workers} workers. "
-        f"Training: {'ON' if training_enabled else 'OFF'}"
+        f"Starting engine with {num_workers} workers. Training: {'ON' if training_enabled else 'OFF'}"
     )
+    print(game.state_string())
 
     try:
         with runner:
             while not game.is_over():
-                # --- AI Training Step ---
-                if not human_turn and training_enabled:
-                    count_prune = simulations // 2
-                    runner.run_batch(
-                        agent_swarms,
-                        game,
-                        count_prune,
-                        is_prune=True,
-                        max_turns=turn_depth,
-                    )
+                current = game.current_player()
+                is_human = current in human_set
 
-                    runner.run_batch(
-                        agent_swarms,
-                        game,
-                        simulations - count_prune,
-                        is_prune=False,
-                        max_turns=turn_depth,
-                    )
-
-                # --- Move Selection ---
-                if not human_turn:
-                    best_move = memory.get_best_move(game, debug=True)
-
-                    if best_move is None:
-                        valid = game.valid_moves()
-                        if len(valid) == 0:
-                            break
-                        best_move = random.choice(valid)
-                        print(f"AI selected random move: {best_move}")
-                        game.apply_move(best_move)
-                        print(game.state_string())
-                    else:
-                        print(f"AI selected best move: {best_move}")
-                        game.apply_move(best_move)
-
-                    if not play_against_self:
-                        human_turn = True
+                # Get and apply move
+                if is_human:
+                    move = _human_turn(game)
+                    print(f"\nYou played: {_format_move(move)}")
                 else:
-                    print(f"Current Player {game.current_player()} (Human)")
-                    try:
-                        row = int(input("row: "))
-                        col = int(input("col: "))
-                        game.apply_move(np.array([row, col]))
-                        human_turn = False
-                    except ValueError:
-                        print("Invalid input, try again.")
-                        continue
+                    if training_enabled:
+                        _train(runner, agent_swarms, game, simulations, turn_depth)
+                    move = _ai_turn(game, memory, debug_move_statistics)
+                    if move is None:
+                        break
+                    print(f"\nAI (Player {current}) played: {_format_move(move)}")
 
-                print(f"Game State Updated. Next Player: {game.current_player()}")
+                print(game.state_string())
+
+            _print_result()
 
     except KeyboardInterrupt:
-        print("\nInterrupted - shutting down workers...")
+        print("\nInterrupted - shutting down...")
         runner.shutdown(force=True)
     except Exception:
         logger.exception("Fatal error in simulation loop")
         raise
     finally:
         memory.close()
+
+
+def _train(
+    runner: SimulationRunner,
+    swarms: Dict[int, List[Agent]],
+    game: GameBase,
+    simulations: int,
+    turn_depth: int,
+):
+    """Run training simulations (prune + optimize phases)."""
+    prune_count = simulations // 2
+    runner.run_batch(swarms, game, prune_count, is_prune=True, max_turns=turn_depth)
+    runner.run_batch(
+        swarms, game, simulations - prune_count, is_prune=False, max_turns=turn_depth
+    )
+
+
+def _ai_turn(
+    game: GameBase, memory: GameMemory, debug_move_statistics: bool
+) -> Optional[np.ndarray]:
+    """AI selects and applies move. Returns the move made, or None if no valid moves."""
+    move = memory.get_best_move(game, debug=debug_move_statistics)
+
+    if move is None:
+        valid = game.valid_moves()
+        if len(valid) == 0:
+            return None
+        move = random.choice(valid)
+
+    game.apply_move(move)
+    return move
+
+
+def _format_move(move: np.ndarray) -> str:
+    """Format move for display."""
+    return ",".join(map(str, move))
+
+
+def _human_turn(game: GameBase) -> np.ndarray:
+    """Get and apply human move. Returns the move made."""
+    valid = game.valid_moves()
+    if len(valid) > 0:
+        example = valid[0]
+        print(f"\nYour turn (Player {game.current_player()})")
+        print(
+            f"Format: {len(example)} values comma-separated (e.g., {','.join(map(str, example))})"
+        )
+
+    while True:
+        try:
+            raw = input("Move: ").strip()
+            values = [int(x.strip()) for x in raw.split(",")]
+            move = np.array(values)
+            game.apply_move(move)
+            return move
+        except ValueError as e:
+            print(f"Invalid input: {e}")
+        except Exception as e:
+            print(f"Illegal move: {e}")
+
+
+def _print_result():
+    """Print game over banner."""
+    print("\n" + "=" * 40)
+    print("GAME OVER")
+    print("=" * 40)

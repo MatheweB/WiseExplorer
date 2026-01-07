@@ -261,6 +261,7 @@ def render_debug(
                 "rates": rates_str,
                 "metrics": metrics_str,
                 "is_selected": d.get("is_selected", False),
+                "is_equivalent": d.get("is_equivalent", False),  # Add this line
                 "score": d.get("score", float("-inf")),
             }
         )
@@ -318,6 +319,8 @@ def render_debug(
 
         if r["is_selected"]:
             row_str = f"{BOLD}{row_str} ◀ SELECTED{RESET}"
+        elif r.get("is_equivalent"):
+            row_str = f"{row_str} (≡ canonical)"  # Equivalent destination state
 
         output.append(row_str)
 

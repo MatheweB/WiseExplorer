@@ -10,8 +10,8 @@ NumPy views (for dtypes=object boards).
 """
 
 from __future__ import annotations
-import numpy as np
 from typing import List
+import numpy as np
 
 
 # ---------------------------------------------------------------------
