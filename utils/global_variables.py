@@ -21,7 +21,7 @@ INITIAL_STATES = {
     "tic_tac_toe": tic_tac_toe_init_state,
     "minichess": minichess_init_state,
 }
-EPOCHS = 40
+EPOCHS = 20
 NUM_AGENTS = DEFAULT_WORKER_COUNT
 SIMULATIONS = EPOCHS * NUM_AGENTS
 TURN_DEPTH = 40

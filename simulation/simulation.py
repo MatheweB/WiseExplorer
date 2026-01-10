@@ -8,20 +8,23 @@ Runs parallel game simulations to train agents via wise_explorer.
 Key concepts:
 - SWARMS: Each player has a "swarm" of agents that act as state holders.
     They don't play directly—temporary agents copy their state, play a game,
-    and sync results back. This enables parallel sims while preserving memory
-    across rounds (e.g., "I lost last time, explore more").
+    and sync results back.
 
 - JOBS: Self-contained units of work (simulation parameters) distributable to any worker.
 
 - ROUNDS: All games in a round complete before writing to DB. This ensures
     no partial games are recorded and learning is consistent.
 
+- PHASES: Training alternates between:
+    * Prune phase: ALL agents play worst moves (worst vs worst) - find bad lines
+    * Exploit phase: ALL agents play best moves (best vs best) - reinforce good lines
+
 Recommended usage with partitioned memory:
 
     from games.tic_tac_toe import TicTacToe
 
     game = TicTacToe()
-    memory = GameMemory.for_game(game, base_dir="data/memory")  # Creates tic_tac_toe.db
+    memory = GameMemory.for_game(game, base_dir="data/memory")
     swarms = {1: [Agent() for _ in range(20)], 2: [Agent() for _ in range(20)]}
 
     start_simulations(swarms, game, turn_depth=20, simulations=200, memory=memory)
@@ -47,7 +50,6 @@ from wise_explorer import wise_explorer_algorithm
 logger = logging.getLogger(__name__)
 
 DEFAULT_WORKER_COUNT = max(1, mp.cpu_count() - 1)
-LOSING_OUTCOMES = frozenset({State.LOSS, State.TIE})
 
 
 # ---------------------------------------------------------------------------
@@ -73,9 +75,8 @@ class GameJob:
 
     game: GameBase
     player_map: Dict[int, int]  # player_id -> swarm_index
-    exploration: Dict[int, bool]  # player_id -> should_explore
     max_turns: int
-    is_prune: bool
+    is_prune: bool  # Global phase: True = worst vs worst, False = best vs best
 
 
 @dataclass
@@ -97,8 +98,7 @@ _worker_memory: Optional[GameMemory] = None
 
 def _worker_init(db_path: str) -> None:
     """Initialize DB connection for this worker process."""
-    # global is required for multiprocessing
-    global _worker_memory  # pylint: disable=[W0603]
+    global _worker_memory
     _worker_memory = GameMemory(db_path, read_only=True)
 
 
@@ -114,7 +114,7 @@ def run_game(job: GameJob) -> JobResult:
     players = sorted(job.player_map.keys())
 
     # Create local agents
-    agents = {pid: _make_agent(pid, job.exploration.get(pid, False)) for pid in players}
+    agents = {pid: _make_agent(pid) for pid in players}
 
     # Play the game
     moves: Dict[int, List[MoveRecord]] = {pid: [] for pid in players}
@@ -126,7 +126,7 @@ def run_game(job: GameJob) -> JobResult:
         pid = game.current_player()
         agent = agents[pid]
 
-        # Get move from wise_explorer
+        # Get move from wise_explorer (global phase applies to all)
         wise_explorer_algorithm.update_agent(agent, game, _worker_memory, job.is_prune)
 
         # Record and apply
@@ -144,11 +144,10 @@ def run_game(job: GameJob) -> JobResult:
     )
 
 
-def _make_agent(player_id: int, should_explore: bool) -> Agent:
+def _make_agent(player_id: int) -> Agent:
     """Create an agent configured for simulation."""
     agent = Agent()
     agent.player_id = player_id
-    agent.change = should_explore
     return agent
 
 
@@ -203,13 +202,19 @@ class SimulationRunner:
         swarms: Dict[int, List[Agent]],
         game: GameBase,
         num_sims: int,
-        is_prune: bool,
         max_turns: int,
+        is_prune: bool,
     ) -> int:
         """
-        Runs a batch of simulations.
+        Runs a batch of simulations with the given phase.
 
-        All games in a round complete before any writes occur.
+        Args:
+            swarms: Player ID -> list of agents
+            game: Game to simulate from
+            num_sims: Number of simulations to run
+            max_turns: Maximum turns per game
+            is_prune: True = worst vs worst, False = best vs best
+
         Returns the total number of move transitions recorded.
         """
         if num_sims <= 0 or not swarms:
@@ -228,14 +233,11 @@ class SimulationRunner:
             batch_size = min(swarm_size, remaining)
 
             # 1. Create and run jobs
-            jobs = self._make_jobs(swarms, game, batch_size, is_prune, max_turns)
+            jobs = self._make_jobs(swarms, game, batch_size, max_turns, is_prune)
             results = pool.map(run_game, jobs)
 
             # 2. Commit results atomically
             total_transitions += self._commit(results, skip_neutral=True)
-
-            # 3. Update swarm exploration flags
-            self._sync_swarms(swarms, results)
 
             remaining -= batch_size
 
@@ -246,8 +248,8 @@ class SimulationRunner:
         swarms: Dict[int, List[Agent]],
         game: GameBase,
         count: int,
-        is_prune: bool,
         max_turns: int,
+        is_prune: bool,
     ) -> List[GameJob]:
         """Generate randomized match-ups."""
         players = sorted(swarms.keys())
@@ -261,9 +263,6 @@ class SimulationRunner:
             GameJob(
                 game=game.deep_clone(),
                 player_map={pid: indices[pid][i] for pid in players},
-                exploration={
-                    pid: swarms[pid][indices[pid][i]].change for pid in players
-                },
                 max_turns=max_turns,
                 is_prune=is_prune,
             )
@@ -304,13 +303,6 @@ class SimulationRunner:
         logger.debug("Committing round %d: %d stacks", self._round_id, len(stacks))
         return self.memory.record_round(game_class, stacks)
 
-    def _sync_swarms(self, swarms: Dict[int, List[Agent]], results: List[JobResult]):
-        """Update agent exploration flags based on outcomes."""
-        for result in results:
-            for pid, swarm_idx in result.player_map.items():
-                lost = result.outcomes[pid] in LOSING_OUTCOMES
-                swarms[pid][swarm_idx].change = lost
-
 
 # ---------------------------------------------------------------------------
 # Public API
@@ -329,23 +321,28 @@ def start_simulations(
     debug_move_statistics: bool = True,
 ) -> None:
     """
-    Main entry point. Orchestrates the Training (Prune/Optimize) and Play cycle.
+    Main entry point. Orchestrates Training and Play cycle.
+
+    Training runs in two symmetric phases:
+      1. Prune phase (worst vs worst) - find and record bad lines
+      2. Exploit phase (best vs best) - reinforce good lines
 
     Args:
-        agent_swarms: Maps player_id -> list of agents (state holders)
+        agent_swarms: Maps player_id -> list of agents
         game: The game instance to play
         turn_depth: Max turns per simulated game
         simulations: Number of simulations per training step
         memory: Database for storing/retrieving learned moves
         num_workers: Number of parallel worker processes
         training_enabled: If False, skip training and just play from existing memory
-        human_players: List of player IDs controlled by human input (e.g., [1] or [1, 2])
+        human_players: List of player IDs controlled by human input
+        debug_move_statistics: If True, print move analysis during AI turns
     """
     human_set = set(human_players) if human_players else set()
     runner = SimulationRunner(memory, num_workers)
 
     print(
-        f"Starting engine with {num_workers} workers. Training: {'ON' if training_enabled else 'OFF'}"
+        f"Starting sim with {num_workers} workers. Training: {'ON' if training_enabled else 'OFF'}"
     )
     print(game.state_string())
 
@@ -362,7 +359,11 @@ def start_simulations(
                 else:
                     if training_enabled:
                         _train(runner, agent_swarms, game, simulations, turn_depth)
-                    move = _ai_turn(game, memory, debug_move_statistics)
+                    move = _ai_turn(
+                        game, memory,
+                        deterministic_top_moves=True,
+                        debug_move_statistics=debug_move_statistics
+                    )
                     if move is None:
                         break
                     print(f"\nAI (Player {current}) played: {_format_move(move)}")
@@ -388,25 +389,36 @@ def _train(
     simulations: int,
     turn_depth: int,
 ):
-    """Run training simulations (prune + optimize phases)."""
+    """
+    Run training simulations in two phases:
+      1. Prune phase (worst vs worst) - first half
+      2. Exploit phase (best vs best) - second half
+    """
     prune_count = simulations // 2
-    runner.run_batch(swarms, game, prune_count, is_prune=True, max_turns=turn_depth)
-    runner.run_batch(
-        swarms, game, simulations - prune_count, is_prune=False, max_turns=turn_depth
-    )
+    exploit_count = simulations - prune_count
+
+    # Phase 1: Prune (worst vs worst)
+    runner.run_batch(swarms, game, prune_count, max_turns=turn_depth, is_prune=True)
+
+    # Phase 2: Exploit (best vs best)
+    runner.run_batch(swarms, game, exploit_count, max_turns=turn_depth, is_prune=False)
 
 
 def _ai_turn(
-    game: GameBase, memory: GameMemory, debug_move_statistics: bool
+    game: GameBase, memory: GameMemory, deterministic_top_moves: bool, debug_move_statistics: bool
 ) -> Optional[np.ndarray]:
     """AI selects and applies move. Returns the move made, or None if no valid moves."""
-    move = memory.get_best_move(game, debug=debug_move_statistics)
+    valid_moves = game.valid_moves()
+    move = memory.get_best_move(
+        game, valid_moves,
+        deterministic=deterministic_top_moves,
+        debug=debug_move_statistics
+    )
 
     if move is None:
-        valid = game.valid_moves()
-        if len(valid) == 0:
+        if len(valid_moves) == 0:
             return None
-        move = random.choice(valid)
+        move = random.choice(valid_moves)
 
     game.apply_move(move)
     return move
