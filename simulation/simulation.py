@@ -26,7 +26,6 @@ from agent.agent import Agent, State
 from games.game_base import GameBase
 from omnicron.manager import GameMemory
 from wise_explorer.wise_explorer_algorithm import select_move, select_move_for_training
-from wise_explorer.wise_explorer_algorithm import SelectionMode
 
 logger = logging.getLogger(__name__)
 DEFAULT_WORKER_COUNT = max(1, mp.cpu_count() - 1)
@@ -252,7 +251,7 @@ def _ai_turn(game: GameBase, memory: GameMemory, debug: bool = False) -> Optiona
     if not game.valid_moves().size:
         return None
     
-    move = select_move(game, memory, debug=debug, move_mode=SelectionMode.RANDOM)
+    move = select_move(game, memory, debug=debug)
     game.apply_move(move)
     return move
 
@@ -344,6 +343,11 @@ def start_simulations(
             print("\n" + "=" * 40)
             print("GAME OVER")
             print("=" * 40)
+            
+            # Final stats
+            info = memory.get_info()
+            print(f"Final: {info['transitions']} transitions, {info['anchors']} anchors, "
+                  f"{info['total_samples']} samples")
 
     except KeyboardInterrupt:
         print("\nInterrupted - shutting down...")
