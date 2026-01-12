@@ -1,26 +1,21 @@
 """
-Utilities for exploring move space in a two-player game.
+Move selection for game AI training and inference.
 
-Strategy is determined by global phase (symmetric play):
-  - Prune phase: ALL agents bias toward worst moves (worst vs worst)
-  - Exploit phase: ALL agents bias toward best moves (best vs best)
+Two main functions:
+    select_move()              - For real play. Uses known moves only.
+    select_move_for_training() - For training. Explores unknowns.
 
-Two-stage selection:
-  1. Try to pick best/worst with probability = score (or 1-score for prune)
-     - Decisive moves (score=1.0 or 0.0) are ALWAYS picked
-     - Uncertain moves have proportional chance to fall through
-  2. Fallback: Weighted sample over ALL moves by DIRECT score
-     - Uses direct stats (not anchor-pooled) for honest local exploration
-     - Unexplored moves get min(known scores) as prior:
-       * Exploit: low weight → conservative, stick with proven moves
-       * Prune: high weight (1-min) → aggressive, unknowns might be bad!
-     - Linear weights match Stage 1 semantics
+Selection modes:
+    DETERMINISTIC  - Pick best/worst by score
+    PROBABILISTIC  - Weighted random by score
+    RANDOM         - Uniform random
 """
 
 from __future__ import annotations
 
 import random
-from typing import List, Tuple
+from enum import Enum
+from typing import Dict, List, Tuple
 
 import numpy as np
 
@@ -29,90 +24,198 @@ from games.game_base import GameBase
 from omnicron.manager import GameMemory
 
 
-def _weighted_sample(
-    moves_with_scores: List[Tuple[np.ndarray, float]],
-    is_prune: bool,
+class SelectionMode(Enum):
+    DETERMINISTIC = 1
+    PROBABILISTIC = 2
+    RANDOM = 3
+
+
+# Synthetic anchor ID for unexplored moves (used by manager.py)
+UNEXPLORED_ANCHOR_ID = -999
+
+
+# ---------------------------------------------------------------------------
+# Core Selection Helpers
+# ---------------------------------------------------------------------------
+
+
+def _weighted_select(
+    items: List,
+    scores: List[float],
+    pick_best: bool,
+) -> any:
+    """
+    Select item with probability weighted by score.
+    
+    If pick_best=True, higher scores get higher probability.
+    If pick_best=False, lower scores get higher probability.
+    """
+    weights = scores if pick_best else [1.0 - s for s in scores]
+    weights = [max(0.01, w) for w in weights]  # Ensure all items have some chance
+    return random.choices(items, weights=weights, k=1)[0]
+
+
+def _pick_from_dict(
+    scores: Dict[int, float],
+    mode: SelectionMode,
+    pick_best: bool,
+) -> int:
+    """Select a key from {key: score} dict based on mode."""
+    if mode == SelectionMode.RANDOM:
+        return random.choice(list(scores.keys()))
+    
+    if mode == SelectionMode.DETERMINISTIC:
+        fn = max if pick_best else min
+        return fn(scores.keys(), key=lambda k: scores[k])
+    
+    # PROBABILISTIC
+    keys = list(scores.keys())
+    return _weighted_select(keys, [scores[k] for k in keys], pick_best)
+
+
+def _pick_move_from_list(
+    moves: List[Tuple[np.ndarray, float]],
+    mode: SelectionMode,
+    pick_best: bool,
+) -> np.ndarray:
+    """Select a move from [(move, score), ...] list based on mode."""
+    if len(moves) == 1:
+        return moves[0][0]
+    
+    if mode == SelectionMode.RANDOM:
+        return random.choice(moves)[0]
+    
+    if mode == SelectionMode.DETERMINISTIC:
+        fn = max if pick_best else min
+        return fn(moves, key=lambda m: m[1])[0]
+    
+    # PROBABILISTIC
+    return _weighted_select(moves, [m[1] for m in moves], pick_best)[0]
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+
+def select_move(
+    game: GameBase,
+    memory: GameMemory,
+    is_prune: bool = False,
+    anchor_mode: SelectionMode = SelectionMode.DETERMINISTIC,
+    move_mode: SelectionMode = SelectionMode.DETERMINISTIC,
+    debug: bool = False,
 ) -> np.ndarray:
     """
-    Sample a move weighted by score.
+    Select a move for real play (inference).
     
-    Exploit: weight = score → favors high scores
-    Prune: weight = 1-score → favors low scores
-    
-    Linear weights match Stage 1's probability semantics:
-    score 0.8 is 4x more likely than score 0.2 (0.8/0.2 = 4)
-    """
-    if not moves_with_scores:
-        raise ValueError("No moves to sample from")
-    
-    moves = [m for m, s in moves_with_scores]
-    scores = [s for m, s in moves_with_scores]
-    
-    if is_prune:
-        weights = [1.0 - s for s in scores]
-    else:
-        weights = scores
-    
-    return random.choices(moves, weights=weights, k=1)[0]
-
-
-def _set_move(
-    agent: Agent, game: GameBase, memory: GameMemory, is_prune: bool
-) -> None:
-    """
-    Update ``agent.core_move`` based on global phase.
-
-    Two-stage selection:
-      1. Try best/worst with probability based on score
-         - Score 1.0 (exploit) or 0.0 (prune) → always picked (decisive)
-         - Lower confidence → proportional chance to fall through
-      2. Fallback: weighted sample over ALL moves by direct score
-         - Uses direct stats for honest local exploration
-         - Unexplored get min(known) prior: conservative exploit, aggressive prune
+    Uses KNOWN moves only - a known move with score 0.499 beats an unknown.
+    Falls back to random only if no recorded data exists.
     
     Parameters
     ----------
-    agent:
-        The agent whose move is being updated.
-    is_prune:
-        * ``True`` - Prune phase: bias toward worst moves
-        * ``False`` - Exploit phase: bias toward best moves
+    game : GameBase
+        Current game state.
+    memory : GameMemory
+        Game memory database.
+    is_prune : bool
+        False = pick best (default), True = pick worst.
+    anchor_mode : SelectionMode
+        How to select anchor.
+    move_mode : SelectionMode
+        How to select move within anchor.
+    debug : bool
+        If True, render debug visualization.
     """
     valid_moves = game.valid_moves()
+    evaluation = memory.evaluate_moves_for_selection(game, valid_moves)
     
-    # Stage 1: Try to pick best/worst with probability = score
-    if is_prune:
-        result = memory.get_worst_move_with_score(game, valid_moves, deterministic=False)
-        if result is not None:
-            move, score = result
-            # Want LOW scores in prune mode
-            # Score 0.0 → always pick (1.0 - 0.0 = 1.0)
-            # Score 0.8 → 20% chance to pick
-            pick_prob = 1.0 - score
-            if random.random() < pick_prob:
-                agent.core_move = move
-                return
+    anchors_with_moves = evaluation.get("anchors_with_moves", {})
+    anchor_scores = evaluation.get("anchor_scores", {})
+    pick_best = not is_prune
+    
+    # Filter to known moves only (exclude synthetic unexplored anchor)
+    known_anchors = {k: v for k, v in anchor_scores.items() if k != UNEXPLORED_ANCHOR_ID}
+    known_moves = {k: v for k, v in anchors_with_moves.items() if k != UNEXPLORED_ANCHOR_ID}
+    
+    # Select from known moves if available
+    if known_anchors:
+        anchor_id = _pick_from_dict(known_anchors, anchor_mode, pick_best)
+        move = _pick_move_from_list(known_moves[anchor_id], move_mode, pick_best)
+    # Fall back to unknown moves
+    elif UNEXPLORED_ANCHOR_ID in anchors_with_moves:
+        move = random.choice(anchors_with_moves[UNEXPLORED_ANCHOR_ID])[0]
+    # Ultimate fallback
     else:
-        result = memory.get_best_move_with_score(game, valid_moves, deterministic=False)
-        if result is not None:
-            move, score = result
-            # Want HIGH scores in exploit mode
-            # Score 1.0 → always pick
-            # Score 0.3 → 30% chance to pick
-            pick_prob = score
-            if random.random() < pick_prob:
-                agent.core_move = move
-                return
+        move = random.choice(valid_moves)
+    
+    if debug:
+        memory.debug_move_selection(game, valid_moves, move)
+    return move
 
-    # Stage 2: Smart fallback - weighted sample by DIRECT scores
-    # Uses direct stats (not anchor-pooled) for honest local exploration
-    moves_with_scores = memory.get_all_moves_with_scores(game, valid_moves)
+
+def select_move_for_training(
+    game: GameBase,
+    memory: GameMemory,
+    is_prune: bool,
+    primary_move: SelectionMode = SelectionMode.RANDOM,
+    fallback_anchor: SelectionMode = SelectionMode.RANDOM,
+    fallback_move: SelectionMode = SelectionMode.RANDOM,
+    debug: bool = False,
+) -> np.ndarray:
+    """
+    Select a move for training with probability-gated exploration.
     
-    if moves_with_scores:
-        agent.core_move = _weighted_sample(moves_with_scores, is_prune)
+    Includes unknown moves (scored at 0.5) to encourage exploration.
+    
+    Two-stage selection:
+    
+    PRIMARY (fires with probability = anchor_score):
+        - Anchor: Always deterministic (best/worst)
+        - Move: Uses `primary_move` mode
+        
+    FALLBACK (fires when primary doesn't):
+        - Anchor: Uses `fallback_anchor` mode
+        - Move: Uses `fallback_move` mode
+    
+    This naturally explores uncertain positions more:
+        - Score 0.9 → 90% primary, 10% fallback
+        - Score 0.5 → 50% primary, 50% fallback
+        - Score 0.2 → 20% primary, 80% fallback
+    """
+    valid_moves = game.valid_moves()
+    evaluation = memory.evaluate_moves_for_selection(game, valid_moves)
+    
+    anchors_with_moves = evaluation.get("anchors_with_moves", {})
+    anchor_scores = evaluation.get("anchor_scores", {})
+    
+    if not anchors_with_moves:
+        move = random.choice(valid_moves)
+        if debug:
+            memory.debug_move_selection(game, valid_moves, move)
+        return move
+    
+    pick_best = not is_prune
+    
+    # PRIMARY: Try best/worst anchor with probability = score
+    primary_anchor = _pick_from_dict(anchor_scores, SelectionMode.DETERMINISTIC, pick_best)
+    score = anchor_scores[primary_anchor]
+    fire_prob = score if pick_best else (1.0 - score)
+    
+    if random.random() < fire_prob:
+        move = _pick_move_from_list(
+            anchors_with_moves[primary_anchor], primary_move, pick_best
+        )
     else:
-        # Ultimate fallback (shouldn't happen if valid_moves is non-empty)
-        agent.core_move = random.choice(valid_moves)
+        # FALLBACK: Configurable exploration
+        anchor_id = _pick_from_dict(anchor_scores, fallback_anchor, pick_best)
+        move = _pick_move_from_list(
+            anchors_with_moves[anchor_id], fallback_move, pick_best
+        )
+    
+    if debug:
+        memory.debug_move_selection(game, valid_moves, move)
+    return move
 
 
 def update_agent(
@@ -120,21 +223,11 @@ def update_agent(
     game: GameBase,
     memory: GameMemory,
     is_prune: bool,
+    primary_move: SelectionMode = SelectionMode.RANDOM,
+    fallback_anchor: SelectionMode = SelectionMode.RANDOM,
+    fallback_move: SelectionMode = SelectionMode.RANDOM,
 ) -> None:
-    """
-    Update the agent's move based on global phase.
-
-    Parameters
-    ----------
-    agent:
-        The agent to update.
-    game:
-        Current game state.
-    memory:
-        Game memory database.
-    is_prune:
-        True = prune phase (all play worst), False = exploit phase (all play best).
-
-    This function mutates the agent in place.
-    """
-    _set_move(agent, game, memory, is_prune)
+    """Convenience wrapper: select training move and assign to agent.core_move."""
+    agent.core_move = select_move_for_training(
+        game, memory, is_prune, primary_move, fallback_anchor, fallback_move
+    )
