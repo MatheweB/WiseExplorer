@@ -127,7 +127,24 @@ def _log_bayes_factor(counts1: Tuple[int, ...], counts2: Tuple[int, ...]) -> flo
 
 
 def _compatible(counts1: Tuple[int, ...], counts2: Tuple[int, ...]) -> bool:
-    """Are distributions compatible? Uses sqrt-scaled Bayes factor threshold."""
+    """
+    Are these distributions statistically compatible? (Parameter-free)
+    
+    Uses Bayes factor with sqrt-scaled threshold:
+        threshold = 0.5 * log(n_large / n_small)
+    
+    This is the "information asymmetry" dampened by sqrt, giving:
+        - Equal sizes: threshold = 0 (easy merge if BF > 0)
+        - 10:1 ratio: threshold = 1.15
+        - 100:1 ratio: threshold = 2.3
+        - 1000:1 ratio: threshold = 3.45
+    
+    Used consistently for:
+        - Checking if transition should STAY in anchor
+        - Checking if transition should JOIN anchor
+        - Checking if anchors should MERGE
+        - Deciding whether to use anchor vs direct stats
+    """
     n1, n2 = sum(counts1), sum(counts2)
     if n1 == 0:
         return True
@@ -238,7 +255,7 @@ class GameMemory:
         return {
             "direct": direct,
             "anchor": self._get_anchor_stats(from_hash, to_hash),
-            "anchor_id": self._get_anchor_id(from_hash, to_hash), # or -1,
+            "anchor_id": self._get_anchor_id(from_hash, to_hash),
             "effective": self.get_effective_stats(from_hash, to_hash),
         }
 
@@ -486,15 +503,31 @@ class GameMemory:
 
             for key, data in changed.items():
                 old_aid = existing.get(key)
-                best_aid = self._find_nearest(data["counts"], anchors)
                 
-                compatible = False
+                # Step 1: Check if we should STAY in current anchor
+                stay_in_current = False
+                if old_aid is not None and old_aid in anchors:
+                    if _compatible(data["counts"], anchors[old_aid]["counts"]):
+                        stay_in_current = True
+                    else:
+                        # We've diverged - will leave current anchor
+                        moved_from.add(old_aid)
+                
+                if stay_in_current:
+                    # Happy where we are - just update stats
+                    modified.add(old_aid)
+                    continue
+                
+                # Step 2: Look for a new home (stricter threshold)
+                best_aid = self._find_nearest(data["counts"], anchors)
+                can_join = False
                 if best_aid is not None:
-                    compatible = _compatible(data["counts"], anchors[best_aid]["counts"])
-
-                if compatible:
+                    can_join = _compatible(data["counts"], anchors[best_aid]["counts"])
+                
+                if can_join:
                     new_aid = best_aid
                 else:
+                    # Create our own anchor
                     max_id += 1
                     new_aid = max_id
                     cur.execute(
@@ -511,7 +544,6 @@ class GameMemory:
                         "UPDATE transition_anchors SET anchor_id=? WHERE from_hash=? AND to_hash=?",
                         (new_aid, key[0], key[1]),
                     )
-                    moved_from.add(old_aid)
 
                 modified.add(new_aid)
 
@@ -583,10 +615,14 @@ class GameMemory:
                 for aid2 in list(anchors.keys()):
                     if aid2 == aid1 or aid2 not in anchors:
                         continue
-                        
-                    if _compatible(anchors[aid1]["counts"], anchors[aid2]["counts"]):
+                    
+                    a1, a2 = anchors[aid1], anchors[aid2]
+                    
+                    # _compatible handles size ratio automatically
+                    if _compatible(a1["counts"], a2["counts"]):
                         # Larger absorbs smaller
-                        if sum(anchors[aid1]["counts"]) >= sum(anchors[aid2]["counts"]):
+                        n1, n2 = sum(a1["counts"]), sum(a2["counts"])
+                        if n1 >= n2:
                             survivor, absorbed = aid1, aid2
                         else:
                             survivor, absorbed = aid2, aid1
@@ -667,142 +703,6 @@ class GameMemory:
             raise
 
         return len(anchors)
-
-    def revalidate_anchors(self) -> Tuple[int, int]:
-        """Check all memberships against sqrt threshold. Returns (kept, ejected)."""
-        if self.read_only:
-            raise RuntimeError("Read-only")
-
-        cur = self.conn.cursor()
-        cur.execute("BEGIN IMMEDIATE")
-
-        try:
-            rows = cur.execute("""
-                SELECT ta.from_hash, ta.to_hash, ta.anchor_id,
-                       t.wins, t.ties, t.neutral, t.losses,
-                       a.wins, a.ties, a.neutral, a.losses
-                FROM transition_anchors ta
-                JOIN transitions t ON ta.from_hash = t.from_hash AND ta.to_hash = t.to_hash
-                JOIN anchors a ON ta.anchor_id = a.anchor_id
-            """).fetchall()
-
-            kept, to_eject = 0, []
-            for from_h, to_h, aid, tw, tt, tn, tl, aw, at, an, al in rows:
-                direct_counts, anchor_counts = (tw, tt, tn, tl), (aw, at, an, al)
-                if sum(direct_counts) == 0 or sum(anchor_counts) == 0:
-                    continue
-                    
-                if _compatible(direct_counts, anchor_counts):
-                    kept += 1
-                else:
-                    to_eject.append((from_h, to_h, aid))
-
-            # Eject incompatible → create own anchors
-            max_id = cur.execute("SELECT MAX(anchor_id) FROM anchors").fetchone()[0] or 0
-            for from_h, to_h, old_aid in to_eject:
-                max_id += 1
-                row = cur.execute(
-                    "SELECT wins,ties,neutral,losses FROM transitions WHERE from_hash=? AND to_hash=?",
-                    (from_h, to_h)
-                ).fetchone()
-                cur.execute("INSERT INTO anchors VALUES (?,?,?,?,?,?,?)", (max_id, from_h, to_h, *row))
-                cur.execute(
-                    "UPDATE transition_anchors SET anchor_id=? WHERE from_hash=? AND to_hash=?",
-                    (max_id, from_h, to_h)
-                )
-
-            # Recalc affected anchors
-            for aid in set(aid for _, _, aid in to_eject):
-                row = cur.execute("""
-                    SELECT COALESCE(SUM(t.wins),0), COALESCE(SUM(t.ties),0),
-                           COALESCE(SUM(t.neutral),0), COALESCE(SUM(t.losses),0), COUNT(*)
-                    FROM transition_anchors ta
-                    JOIN transitions t ON ta.from_hash=t.from_hash AND ta.to_hash=t.to_hash
-                    WHERE ta.anchor_id=?
-                """, (aid,)).fetchone()
-                if row[4] == 0:
-                    cur.execute("DELETE FROM anchors WHERE anchor_id=?", (aid,))
-                else:
-                    cur.execute(
-                        "UPDATE anchors SET wins=?,ties=?,neutral=?,losses=? WHERE anchor_id=?",
-                        (row[0], row[1], row[2], row[3], aid)
-                    )
-
-            cur.execute("COMMIT")
-            return kept, len(to_eject)
-        except Exception:
-            cur.execute("ROLLBACK")
-            raise
-
-    def consolidate_anchors(self) -> Tuple[int, int]:
-        """Merge compatible anchors. Returns (before_count, after_count)."""
-        if self.read_only:
-            raise RuntimeError("Read-only")
-
-        rows = self.conn.execute(
-            "SELECT anchor_id, repr_from, repr_to, wins, ties, neutral, losses FROM anchors"
-        ).fetchall()
-
-        before_count = len(rows)
-        if before_count < 2:
-            return before_count, before_count
-
-        anchors = {}
-        for aid, rf, rt, w, t, n, l in rows:
-            total = w + t + n + l
-            if total > 0:
-                anchors[aid] = {
-                    "counts": (w, t, n, l),
-                    "dist": (w / total, t / total, n / total, l / total),
-                    "repr": (rf, rt),
-                }
-
-        cur = self.conn.cursor()
-        cur.execute("BEGIN IMMEDIATE")
-        try:
-            sorted_aids = sorted(anchors.keys(), key=lambda a: sum(anchors[a]["counts"]), reverse=True)
-            absorbed, merges = set(), []
-
-            for i, aid1 in enumerate(sorted_aids):
-                if aid1 in absorbed:
-                    continue
-                a1 = anchors[aid1]
-                for aid2 in sorted_aids[i + 1:]:
-                    if aid2 in absorbed:
-                        continue
-                    if _compatible(a1["counts"], anchors[aid2]["counts"]):
-                        absorbed.add(aid2)
-                        merges.append((aid2, aid1))
-                        a1["counts"] = tuple(a1["counts"][j] + anchors[aid2]["counts"][j] for j in range(4))
-                        total = sum(a1["counts"])
-                        a1["dist"] = tuple(c / total for c in a1["counts"])
-
-            for absorbed_id, survivor_id in merges:
-                cur.execute(
-                    "UPDATE transition_anchors SET anchor_id=? WHERE anchor_id=?",
-                    (survivor_id, absorbed_id),
-                )
-                cur.execute("DELETE FROM anchors WHERE anchor_id=?", (absorbed_id,))
-
-            # Update survivor stats
-            for aid in set(s for _, s in merges):
-                row = cur.execute("""
-                    SELECT COALESCE(SUM(t.wins),0), COALESCE(SUM(t.ties),0),
-                           COALESCE(SUM(t.neutral),0), COALESCE(SUM(t.losses),0)
-                    FROM transition_anchors ta
-                    JOIN transitions t ON ta.from_hash=t.from_hash AND ta.to_hash=t.to_hash
-                    WHERE ta.anchor_id=?
-                """, (aid,)).fetchone()
-                cur.execute(
-                    "UPDATE anchors SET wins=?,ties=?,neutral=?,losses=? WHERE anchor_id=?",
-                    (*row, aid)
-                )
-
-            cur.execute("COMMIT")
-            return before_count, before_count - len(absorbed)
-        except Exception:
-            cur.execute("ROLLBACK")
-            raise
 
     # -------------------------------------------------------------------------
     # Debug Visualization
