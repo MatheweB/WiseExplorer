@@ -25,6 +25,7 @@ import numpy as np
 from agent.agent import Agent, State
 from games.game_base import GameBase
 from omnicron.manager import GameMemory
+from wise_explorer.wise_explorer_algorithm import SelectionMode
 from wise_explorer.wise_explorer_algorithm import select_move, select_move_for_training
 
 logger = logging.getLogger(__name__)
@@ -251,7 +252,7 @@ def _ai_turn(game: GameBase, memory: GameMemory, debug: bool = False) -> Optiona
     if not game.valid_moves().size:
         return None
     
-    move = select_move(game, memory, debug=debug)
+    move = select_move(game, memory, debug=debug, move_mode=SelectionMode.RANDOM)
     game.apply_move(move)
     return move
 
