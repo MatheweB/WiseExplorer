@@ -40,6 +40,7 @@ DEFAULT_WORKER_COUNT = max(1, mp.cpu_count() - 1)
 @dataclass
 class MoveRecord:
     """A single move with its context."""
+
     move: np.ndarray
     board_before: np.ndarray
     player: int
@@ -49,14 +50,14 @@ class MoveRecord:
 class GameJob:
     """Self-contained job for a worker process."""
     game: GameBase
-    player_map: Dict[int, int]  # player_id -> swarm_index
+    player_map: Dict[int, int]
     max_turns: int
-    is_prune: bool
-
+    prune_players: set[int]  # Set of player IDs that should prune
 
 @dataclass
 class JobResult:
     """Result from a completed game simulation."""
+
     moves: Dict[int, List[MoveRecord]]
     outcomes: Dict[int, State]
     player_map: Dict[int, int]
@@ -91,10 +92,13 @@ def run_game(job: GameJob) -> JobResult:
 
         pid = game.current_player()
         board_before = game.get_state().board.copy()
-        
-        move = select_move_for_training(game, _worker_memory, job.is_prune)
+
+        # Check if THIS specific player should prune
+        is_prune = pid in job.prune_players
+
+        move = select_move_for_training(game, _worker_memory, is_prune)
         move = np.array(move, copy=True)
-        
+
         game.apply_move(move)
         moves[pid].append(MoveRecord(move, board_before, pid))
 
@@ -149,10 +153,14 @@ class SimulationRunner:
         game: GameBase,
         num_sims: int,
         max_turns: int,
-        is_prune: bool,
+        prune_players: set[int],
     ) -> int:
         """
         Run a batch of simulations.
+        
+        Args:
+            prune_players: Set of player IDs that should play worst moves.
+                        Empty set = all players exploit (play best).
         
         Returns total transitions recorded.
         """
@@ -170,11 +178,11 @@ class SimulationRunner:
         while remaining > 0:
             self._round_id += 1
             batch_size = min(swarm_size, remaining)
-            
-            jobs = self._make_jobs(swarms, game, batch_size, max_turns, is_prune)
+
+            jobs = self._make_jobs(swarms, game, batch_size, max_turns, prune_players)
             results = pool.map(run_game, jobs)
-            total_transitions += self._commit(results)
-            
+            total_transitions += self._commit(results, prune_players, skip_neutral=True)
+
             remaining -= batch_size
 
         return total_transitions
@@ -185,23 +193,25 @@ class SimulationRunner:
         game: GameBase,
         count: int,
         max_turns: int,
-        is_prune: bool,
+        prune_players: set[int],
     ) -> List[GameJob]:
         """Generate randomized match-ups."""
         players = sorted(swarms.keys())
-        indices = {pid: random.sample(range(len(swarms[pid])), count) for pid in players}
+        indices = {
+            pid: random.sample(range(len(swarms[pid])), count) for pid in players
+        }
 
         return [
             GameJob(
                 game=game.deep_clone(),
                 player_map={pid: indices[pid][i] for pid in players},
                 max_turns=max_turns,
-                is_prune=is_prune,
+                prune_players=prune_players,  # Same set for all jobs in batch
             )
             for i in range(count)
         ]
 
-    def _commit(self, results: List[JobResult], skip_neutral: bool = True) -> int:
+    def _commit(self, results: List[JobResult], prune_players: set[int], skip_neutral: bool = True) -> int:
         """Write game results to memory. Returns transitions recorded."""
         if not results:
             return 0
@@ -212,10 +222,12 @@ class SimulationRunner:
                 outcome = result.outcomes[pid]
                 if skip_neutral and outcome == State.NEUTRAL:
                     continue
-                stacks.append((
-                    [(m.move, m.board_before, m.player) for m in move_list],
-                    outcome,
-                ))
+                stacks.append(
+                    (
+                        [(m.move, m.board_before, m.player) for m in move_list],
+                        outcome,
+                    )
+                )
 
         if not stacks:
             return 0
@@ -236,23 +248,78 @@ def _train(
     simulations: int,
     turn_depth: int,
 ) -> None:
-    """Run training: half prune (worst vs worst), half exploit (best vs best)."""
-    half = simulations // 2
-    runner.run_batch(swarms, game, half, max_turns=turn_depth, is_prune=True)
-    runner.run_batch(swarms, game, simulations - half, max_turns=turn_depth, is_prune=False)
+    """
+    Run training with a 50/50 Prune vs Exploit split.
 
+    - 50% of simulations: pruning enabled (rotated across players)
+    - 50% of simulations: pure exploitation
+    """
+    player_ids = sorted(swarms.keys())
+    num_players = len(player_ids)
+
+    if simulations <= 0 or num_players == 0:
+        return
+
+    # Split simulations evenly
+    prune_sims = simulations // 2
+    exploit_sims = simulations - prune_sims
+
+    # ---- PRUNE PHASE (rotating per player) ----
+    if prune_sims > 0:
+        sims_per_player = max(1, prune_sims // num_players)
+        sims_run = 0
+
+        for pid in player_ids:
+            remaining = prune_sims - sims_run
+            if remaining <= 0:
+                break
+
+            batch = min(sims_per_player, remaining)
+            runner.run_batch(
+                swarms,
+                game,
+                num_sims=batch,
+                max_turns=turn_depth,
+                prune_players={pid},
+            )
+            sims_run += batch
+
+        # If integer division left leftovers, assign them round-robin
+        pid_index = 0
+        while sims_run < prune_sims:
+            runner.run_batch(
+                swarms,
+                game,
+                num_sims=1,
+                max_turns=turn_depth,
+                prune_players={player_ids[pid_index]},
+            )
+            sims_run += 1
+            pid_index = (pid_index + 1) % num_players
+
+    # ---- EXPLOIT PHASE (no pruning) ----
+    if exploit_sims > 0:
+        runner.run_batch(
+            swarms,
+            game,
+            num_sims=exploit_sims,
+            max_turns=turn_depth,
+            prune_players=set(),
+        )
 
 # ---------------------------------------------------------------------------
 # Turn Handlers
 # ---------------------------------------------------------------------------
 
 
-def _ai_turn(game: GameBase, memory: GameMemory, debug: bool = False) -> Optional[np.ndarray]:
+def _ai_turn(
+    game: GameBase, memory: GameMemory, debug: bool = False
+) -> Optional[np.ndarray]:
     """AI selects and applies move. Returns move or None if no valid moves."""
     if not game.valid_moves().size:
         return None
-    
-    move = select_move(game, memory, debug=debug, move_mode=SelectionMode.RANDOM)
+
+    move = select_move(game, memory, debug=True, move_mode=SelectionMode.RANDOM)
     game.apply_move(move)
     return move
 
@@ -263,7 +330,9 @@ def _human_turn(game: GameBase) -> np.ndarray:
     if len(valid) > 0:
         example = valid[0]
         print(f"\nYour turn (Player {game.current_player()})")
-        print(f"Format: {len(example)} comma-separated values (e.g., {','.join(map(str, example))})")
+        print(
+            f"Format: {len(example)} comma-separated values (e.g., {','.join(map(str, example))})"
+        )
 
     while True:
         try:
@@ -295,7 +364,7 @@ def start_simulations(
 ) -> None:
     """
     Main entry point: orchestrate training and play.
-    
+
     Parameters
     ----------
     agent_swarms : Dict[int, List[Agent]]
@@ -320,7 +389,9 @@ def start_simulations(
     human_set = set(human_players or [])
     runner = SimulationRunner(memory, num_workers)
 
-    print(f"Starting sim with {num_workers} workers. Training: {'ON' if training_enabled else 'OFF'}")
+    print(
+        f"Starting sim with {num_workers} workers. Training: {'ON' if training_enabled else 'OFF'}"
+    )
     print(game.state_string())
 
     try:
@@ -344,11 +415,13 @@ def start_simulations(
             print("\n" + "=" * 40)
             print("GAME OVER")
             print("=" * 40)
-            
+
             # Final stats
             info = memory.get_info()
-            print(f"Final: {info['transitions']} transitions, {info['anchors']} anchors, "
-                  f"{info['total_samples']} samples")
+            print(
+                f"Final: {info['transitions']} transitions, {info['anchors']} anchors, "
+                f"{info['total_samples']} samples"
+            )
 
     except KeyboardInterrupt:
         print("\nInterrupted - shutting down...")

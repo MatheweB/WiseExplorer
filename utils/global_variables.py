@@ -1,3 +1,4 @@
+import math
 import numpy as np
 
 from games.tic_tac_toe import TicTacToe
@@ -21,8 +22,16 @@ INITIAL_STATES = {
     "tic_tac_toe": tic_tac_toe_init_state,
     "minichess": minichess_init_state,
 }
-EPOCHS = 20
+
+def _round_epochs_for_clean_split(epochs: int, num_players: int) -> int:
+    """Round epochs up to ensure clean division in training phases for prune-rounds."""
+    divisor = num_players + 1  # 2-player → 3, 3-player → 4, etc.
+    return math.ceil(epochs / divisor) * divisor
+
+
+SELECTED_GAME = "tic_tac_toe"
+EPOCHS_BEFORE_ROUNDING = 100
+EPOCHS =_round_epochs_for_clean_split(EPOCHS_BEFORE_ROUNDING, GAMES[SELECTED_GAME]().num_players())
 NUM_AGENTS = DEFAULT_WORKER_COUNT
 SIMULATIONS = EPOCHS * NUM_AGENTS
 TURN_DEPTH = 40
-SELECTED_GAME = "tic_tac_toe"

@@ -12,20 +12,20 @@ Core Principle:
     - The board before/after the move
     - Who moved (implicit in the state change)
     - What move was made (the difference between states)
-    
+
     Outcomes are recorded per transition. A "win" means the game was won
     by whoever made that transition. No player numbers needed.
 
 Markov vs Non-Markov:
     The system supports both Markov and non-Markov domains:
-    
+
     MARKOV (markov=True, default):
         - State is a sufficient statistic (e.g., board position)
         - Different paths to same state have same continuation distribution
         - Score by destination state (aggregated across all predecessors)
         - Anchors cluster similar states
         - Examples: TTT, Chess with random play
-    
+
     NON-MARKOV (markov=False):
         - History matters beyond current state (e.g., language)
         - Different paths to same state may have different continuations
@@ -36,7 +36,7 @@ Markov vs Non-Markov:
 The "scoring unit" abstraction:
     - Markov: scoring_key = to_hash (destination state)
     - Non-Markov: scoring_key = (from_hash, to_hash) (transition)
-    
+
     All logic (Stats, anchors, scoring formula) operates uniformly on scoring keys.
 
 Anchor System:
@@ -65,10 +65,9 @@ from games.game_state import GameState
 logger = logging.getLogger(__name__)
 
 # Outcome index mapping
-OUTCOME_INDEX = {State.WIN: 0, State.TIE: 1, State.NEUTRAL: 2, State.LOSS: 3}
+OUTCOME_INDEX = {State.WIN: 0, State.TIE: 1, State.LOSS: 2}
 
 # Neutral score for unexplored moves
-NEUTRAL_SCORE = 0.5
 UNEXPLORED_ANCHOR_ID = -999
 
 
@@ -79,19 +78,19 @@ UNEXPLORED_ANCHOR_ID = -999
 
 class Stats(NamedTuple):
     """Outcome counts with derived scoring properties."""
+
     wins: int = 0
     ties: int = 0
-    neutral: int = 0
     losses: int = 0
 
     @property
     def total(self) -> int:
-        return self.wins + self.ties + self.neutral + self.losses
+        return self.wins + self.ties + self.losses
 
     @property
-    def distribution(self) -> Tuple[float, float, float, float]:
+    def distribution(self) -> Tuple[float, float, float]:
         t = self.total
-        return tuple(x / t for x in self) if t > 0 else (0.25, 0.25, 0.25, 0.25)
+        return (self.wins / t, self.ties / t, self.losses / t)
 
     @property
     def score(self) -> float:
@@ -99,11 +98,26 @@ class Stats(NamedTuple):
         Lower confidence bound on utility, normalized to [0, 1].
         
         Uses Bayesian approach with uniform Dirichlet prior (α=1).
+        Utilities: Win=+1, Tie=0, Loss=-1
         """
-        w, l, n = self.wins + 1, self.losses + 1, self.total + 4
-        mean = (w - l) / n
-        var = max(0, (w + l - n * mean**2) / (n - 1))
-        return (mean - math.sqrt(var / n) + 1) / 2
+        # Apply Bayesian pseudocounts (uniform Dirichlet prior)
+        w, t, l = self.wins + 1, self.ties + 1, self.losses + 1
+        n = w + t + l
+        
+        # Mean utility ∈ [-1, 1]
+        mean = (w + 0.5 * t - 1.5 * l) / n
+        
+        # Variance via Var(X) = E[X²] - E[X]²
+        # Where E[X²] = (wins × 1² + ties × 0.5² + losses × (-1.5)²) / n
+        mean_of_squares = (w + 0.25 * t + 2.25 * l) / n
+        variance = mean_of_squares - mean**2
+        
+        # Lower confidence bound (LCB = μ - σ/√n)
+        std_error = math.sqrt(max(0, variance / n))
+        lcb = mean - std_error
+        
+        # Map [-1.5, 1] → [0, 1]
+        return (lcb + 1.5) / 2.5
 
     @property
     def utility(self) -> float:
@@ -112,13 +126,32 @@ class Stats(NamedTuple):
 
     @property
     def certainty(self) -> float:
-        """Confidence in the utility estimate."""
-        n = self.total
-        if n <= 1:
+        """
+        Confidence in the utility estimate.
+        
+        Returns 1 - std_error, where std_error ∈ [0, 1].
+        Higher values = more certain about the utility estimate.
+        """
+        if self.total <= 1:
             return 0.0
-        mean = (self.wins - self.losses) / n
-        var = max(0, (self.wins + self.losses - n * mean**2) / (n - 1))
-        return max(0.0, 1.0 - math.sqrt(var / n))
+        
+        # Use same pseudocounts as score
+        w, t, l = self.wins + 1, self.ties + 1, self.losses + 1
+        n = w + t + l
+        
+        # Mean utility on [-1.5, 1]
+        mean = (w + 0.5 * t - 1.5 * l) / n
+        
+        # Variance: E[X²] - E[X]²
+        mean_of_squares = (w + 0.25 * t + 2.25 * l) / n
+        variance = mean_of_squares - mean**2
+        
+        # Standard error
+        std_error = math.sqrt(max(0, variance / n))
+        
+        # Convert to certainty: lower std_error = higher certainty
+        # Max std_error ≈ 1.0 for utilities in [-1, 1]
+        return max(0.0, 1.0 - std_error)
 
 
 # ---------------------------------------------------------------------------
@@ -136,7 +169,7 @@ def _hash(board: np.ndarray) -> str:
 def _log_dm_marginal(counts: Tuple[int, ...]) -> float:
     """
     Log marginal likelihood under Dirichlet-Multinomial with α=1 (uniform prior).
-    
+
     P(counts | α=1) = (K-1)! / (n+K-1)! × ∏ c_i!
     """
     k, n = len(counts), sum(counts)
@@ -154,22 +187,24 @@ def _log_bayes_factor(counts1: Tuple[int, ...], counts2: Tuple[int, ...]) -> flo
     Positive = evidence for same distribution.
     """
     pooled = tuple(c1 + c2 for c1, c2 in zip(counts1, counts2))
-    return _log_dm_marginal(pooled) - (_log_dm_marginal(counts1) + _log_dm_marginal(counts2))
+    return _log_dm_marginal(pooled) - (
+        _log_dm_marginal(counts1) + _log_dm_marginal(counts2)
+    )
 
 
 def _compatible(counts1: Tuple[int, ...], counts2: Tuple[int, ...]) -> bool:
     """
     Are these distributions statistically compatible? (Parameter-free)
-    
+
     Uses Bayes factor with sqrt-scaled threshold:
         threshold = 0.5 * log(n_large / n_small)
-    
+
     This is the "information asymmetry" dampened by sqrt, giving:
         - Equal sizes: threshold = 0 (easy merge if BF > 0)
         - 10:1 ratio: threshold = 1.15
         - 100:1 ratio: threshold = 2.3
         - 1000:1 ratio: threshold = 3.45
-    
+
     Used consistently for:
         - Checking if transition should STAY in anchor
         - Checking if transition should JOIN anchor
@@ -205,7 +240,7 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS transitions (
     from_hash TEXT, to_hash TEXT,
     wins INTEGER DEFAULT 0, ties INTEGER DEFAULT 0,
-    neutral INTEGER DEFAULT 0, losses INTEGER DEFAULT 0,
+    losses INTEGER DEFAULT 0,
     PRIMARY KEY (from_hash, to_hash)
 );
 CREATE INDEX IF NOT EXISTS idx_from ON transitions(from_hash);
@@ -217,7 +252,6 @@ CREATE TABLE IF NOT EXISTS state_values (
     state_hash TEXT PRIMARY KEY,
     wins INTEGER DEFAULT 0,
     ties INTEGER DEFAULT 0,
-    neutral INTEGER DEFAULT 0,
     losses INTEGER DEFAULT 0
 );
 
@@ -228,7 +262,7 @@ CREATE TABLE IF NOT EXISTS anchors (
     anchor_id INTEGER PRIMARY KEY,
     repr_key TEXT,  -- state_hash (Markov) or "from|to" (non-Markov)
     wins INTEGER DEFAULT 0, ties INTEGER DEFAULT 0,
-    neutral INTEGER DEFAULT 0, losses INTEGER DEFAULT 0
+    losses INTEGER DEFAULT 0
 );
 
 -- Scoring anchors: maps scoring units to anchor clusters
@@ -254,9 +288,9 @@ CREATE TABLE IF NOT EXISTS metadata (
 class GameMemory:
     """
     Game transition storage with automatic pattern discovery.
-    
+
     Records (state, move, outcome) and clusters similar patterns into anchors.
-    
+
     Args:
         db_path: Path to SQLite database
         read_only: If True, don't modify database
@@ -285,7 +319,7 @@ class GameMemory:
             # Store mode in metadata
             self.conn.execute(
                 "INSERT OR REPLACE INTO metadata (key, value) VALUES ('markov', ?)",
-                ('true' if markov else 'false',)
+                ("true" if markov else "false",),
             )
             self.conn.commit()
         else:
@@ -294,11 +328,11 @@ class GameMemory:
                 "SELECT value FROM metadata WHERE key='markov'"
             ).fetchone()
             if row:
-                self.markov = row[0] == 'true'
+                self.markov = row[0] == "true"
 
     def _scoring_key(self, from_hash: str, to_hash: str) -> str:
         """Get the scoring key based on mode.
-        
+
         Markov: key = to_hash (destination state)
         Non-Markov: key = "from|to" (full transition)
         """
@@ -313,7 +347,7 @@ class GameMemory:
         game: GameBase,
         base_dir: str | Path = "data/memory",
         markov: bool = True,
-        **kw
+        **kw,
     ) -> "GameMemory":
         """Create GameMemory for a specific game type."""
         game_id = getattr(game, "game_id", lambda: type(game).__name__.lower())()
@@ -324,7 +358,7 @@ class GameMemory:
     # -------------------------------------------------------------------------
 
     def _iter_moves_with_hashes(
-        self, game: GameBase, valid_moves: np.ndarray
+        self, game: GameBase, valid_moves: List[np.ndarray]
     ) -> List[Tuple[np.ndarray, str]]:
         """Apply each move to clone and return (move, to_hash) pairs."""
         results = []
@@ -343,23 +377,23 @@ class GameMemory:
         """Get full stats for a move, or None if unexplored."""
         if to_hash not in transitions:
             return None
-        
+
         direct = transitions[to_hash]
         if direct.total == 0:
             return None
-        
+
         scoring_key = self._scoring_key(from_hash, to_hash)
-        
+
         if self.markov:
             # Markov mode: use state-based stats
             unit_stats = self.get_state_stats(to_hash)
         else:
             # Non-Markov mode: use transition-specific stats
             unit_stats = self.get_stats(from_hash, to_hash)
-        
+
         anchor_stats = self._get_anchor_stats(scoring_key)
         effective = self.get_effective_stats(scoring_key)
-            
+
         return {
             "direct": direct,
             "unit": unit_stats,  # Renamed from "state" for generality
@@ -379,16 +413,16 @@ class GameMemory:
     ) -> int:
         """
         Record game outcomes atomically. Returns number of unique transitions.
-        
+
         stacks: List of (moves, outcome) where moves is [(move, board, player), ...]
         """
         if self.read_only:
             raise RuntimeError("Cannot write to read-only GameMemory")
 
-        transitions: Dict[Tuple[str, str], List[int]] = defaultdict(lambda: [0, 0, 0, 0])
-        
+        transitions: Dict[Tuple[str, str], List[int]] = defaultdict(lambda: [0, 0, 0])
+
         for moves, outcome in stacks:
-            outcome_idx = OUTCOME_INDEX.get(outcome, 2)
+            outcome_idx = OUTCOME_INDEX.get(outcome, -1)
             game = game_class()
             for move, board, player in moves:
                 from_hash = _hash(board)
@@ -410,37 +444,36 @@ class GameMemory:
         try:
             # Always update transitions table
             cur.executemany(
-                """INSERT INTO transitions VALUES (?,?,?,?,?,?)
+                """INSERT INTO transitions VALUES (?,?,?,?,?)
                    ON CONFLICT DO UPDATE SET
                    wins=wins+excluded.wins, ties=ties+excluded.ties,
-                   neutral=neutral+excluded.neutral, losses=losses+excluded.losses""",
+                   losses=losses+excluded.losses""",
                 [(f, t, *c) for (f, t), c in transitions.items()],
             )
-            
+
             if self.markov:
                 # Markov mode: aggregate outcomes by destination state
-                state_updates = defaultdict(lambda: [0, 0, 0, 0])
-                for (_, to_hash), (w, t, n, l) in transitions.items():
+                state_updates = defaultdict(lambda: [0, 0, 0])
+                for (_, to_hash), (w, t, l) in transitions.items():
                     state_updates[to_hash][0] += w
                     state_updates[to_hash][1] += t
-                    state_updates[to_hash][2] += n
-                    state_updates[to_hash][3] += l
-                
+                    state_updates[to_hash][2] += l
+
                 cur.executemany(
-                    """INSERT INTO state_values (state_hash, wins, ties, neutral, losses)
-                       VALUES (?, ?, ?, ?, ?)
+                    """INSERT INTO state_values (state_hash, wins, ties, losses)
+                       VALUES (?, ?, ?, ?)
                        ON CONFLICT(state_hash) DO UPDATE SET
                            wins = wins + excluded.wins,
                            ties = ties + excluded.ties,
-                           neutral = neutral + excluded.neutral,
                            losses = losses + excluded.losses""",
                     [(s, *counts) for s, counts in state_updates.items()],
                 )
                 scoring_keys = list(state_updates.keys())
             else:
+
                 # Non-Markov mode: scoring keys are transitions
                 scoring_keys = [f"{f}|{t}" for f, t in transitions.keys()]
-            
+
             cur.execute("COMMIT")
             self._cache.clear()
             # Update anchors for modified scoring units
@@ -460,7 +493,7 @@ class GameMemory:
         if from_hash is None or to_hash is None:
             raise ValueError("Provide both from_hash and to_hash, or neither")
         row = self.conn.execute(
-            "SELECT wins,ties,neutral,losses FROM transitions WHERE from_hash=? AND to_hash=?",
+            "SELECT wins,ties,losses FROM transitions WHERE from_hash=? AND to_hash=?",
             (from_hash, to_hash),
         ).fetchone()
         return Stats(*row) if row else Stats()
@@ -468,10 +501,10 @@ class GameMemory:
     def get_effective_stats(self, scoring_key: str) -> Stats:
         """
         Get stats for a scoring unit, preferring anchor when it provides more data.
-        
+
         Args:
             scoring_key: State hash (Markov) or "from|to" (non-Markov)
-        
+
         Returns:
             Stats from direct observation or anchor, whichever is more informative.
         """
@@ -502,13 +535,13 @@ class GameMemory:
     def get_state_stats(self, state_hash: str) -> Stats:
         """
         Get aggregated Stats for transitions ending at this state.
-        
-        Returns Stats with the combined (wins, ties, neutral, losses) from
+
+        Returns Stats with the combined (wins, ties, losses) from
         all transitions that led to this state. Returns empty Stats if
         no transitions to this state have been recorded.
         """
         row = self.conn.execute(
-            "SELECT wins, ties, neutral, losses FROM state_values WHERE state_hash = ?",
+            "SELECT wins, ties, losses FROM state_values WHERE state_hash = ?",
             (state_hash,),
         ).fetchone()
         return Stats(*row) if row else Stats()
@@ -516,22 +549,18 @@ class GameMemory:
     def get_move_score(self, from_hash: str, to_hash: str) -> float:
         """
         Get score for a move (from_hash → to_hash).
-        
+
         In Markov mode: Uses aggregated state stats (destination state).
         In non-Markov mode: Uses transition-specific stats (preserves context).
-        
+
         Returns:
             Score in [0, 1] using Stats.score (LCB formula)
         """
-        scoring_key = self._scoring_key(from_hash, to_hash)
-        
         if self.markov:
             stats = self.get_state_stats(to_hash)
         else:
             stats = self.get_stats(from_hash, to_hash)
-        
-        if stats.total == 0:
-            return NEUTRAL_SCORE
+
         return stats.score
 
     def get_state_value_stats(self) -> Dict[str, Any]:
@@ -539,27 +568,27 @@ class GameMemory:
         total_states = self.conn.execute(
             "SELECT COUNT(DISTINCT to_hash) FROM transitions"
         ).fetchone()[0]
-        
+
         tracked_states = self.conn.execute(
-            "SELECT COUNT(*) FROM state_values WHERE (wins + ties + neutral + losses) > 0"
+            "SELECT COUNT(*) FROM state_values WHERE (wins + ties + losses) > 0"
         ).fetchone()[0]
-        
+
         avg_count = self.conn.execute(
-            "SELECT AVG(wins + ties + neutral + losses) FROM state_values WHERE (wins + ties + neutral + losses) > 0"
+            "SELECT AVG(wins + ties + losses) FROM state_values WHERE (wins + ties + losses) > 0"
         ).fetchone()[0]
-        
+
         return {
             "total_states": total_states,
             "tracked_states": tracked_states,
             "avg_sample_count": avg_count or 0,
-            "coverage": tracked_states / total_states if total_states > 0 else 0
+            "coverage": tracked_states / total_states if total_states > 0 else 0,
         }
 
     def get_transitions_from(self, from_hash: str) -> Dict[str, Stats]:
         """All transitions from a state (cached)."""
         if from_hash not in self._cache:
             rows = self.conn.execute(
-                "SELECT to_hash,wins,ties,neutral,losses FROM transitions WHERE from_hash=?",
+                "SELECT to_hash,wins,ties,losses FROM transitions WHERE from_hash=?",
                 (from_hash,),
             ).fetchall()
             self._cache[from_hash] = {r[0]: Stats(*r[1:]) for r in rows}
@@ -568,7 +597,7 @@ class GameMemory:
     def _get_anchor_stats(self, scoring_key: str) -> Stats:
         """Get anchor stats for a scoring unit."""
         row = self.conn.execute(
-            """SELECT a.wins, a.ties, a.neutral, a.losses 
+            """SELECT a.wins, a.ties, a.losses 
                FROM scoring_anchors sa
                JOIN anchors a ON sa.anchor_id = a.anchor_id
                WHERE sa.scoring_key = ?""",
@@ -589,17 +618,17 @@ class GameMemory:
     # -------------------------------------------------------------------------
 
     def get_all_moves_with_scores(
-        self, game: GameBase, valid_moves: np.ndarray
+        self, game: GameBase, valid_moves: List[np.ndarray]
     ) -> List[Tuple[np.ndarray, float]]:
         """
         Get scores for all valid moves.
-        
+
         Uses aggregated state stats for scoring (more data than transition-specific).
-        Unrecorded moves get 0.5 (neutral).
+        Unrecorded moves get default from unexplored score (~0.74)
         """
         state = game.get_state()
         from_hash = _hash(state.board)
-        
+
         results = []
         for move, to_hash in self._iter_moves_with_hashes(game, valid_moves):
             score = self.get_move_score(from_hash, to_hash)
@@ -607,13 +636,13 @@ class GameMemory:
         return results
 
     def evaluate_moves_for_selection(
-        self, game: GameBase, valid_moves: np.ndarray
+        self, game: GameBase, valid_moves: List[np.ndarray]
     ) -> Dict[str, Any]:
         """
-        Evaluate all moves for wise_explorer selection.
-        
+        Evaluate all moves for selection.
+
         Returns:
-            anchors_with_moves: {anchor_id: [(move, blended_score), ...]}
+            anchors_with_moves: {anchor_id: [(move, score), ...]}
             anchor_scores: {anchor_id: pooled_score}
         """
         state = game.get_state()
@@ -622,25 +651,25 @@ class GameMemory:
 
         anchors_with_moves: Dict[int, List[Tuple[np.ndarray, float]]] = defaultdict(list)
         anchor_scores: Dict[int, float] = {}
-        unexplored: List[np.ndarray] = []
 
         for move, to_hash in self._iter_moves_with_hashes(game, valid_moves):
             data = self._get_move_data(from_hash, to_hash, transitions)
-            
+
             if data and data["effective"].total > 0:
+                # Known move
                 aid = data["anchor_id"]
-                # Use state score (aggregated across all predecessors)
                 move_score = self.get_move_score(from_hash, to_hash)
                 anchors_with_moves[aid].append((move, move_score))
                 anchor_scores[aid] = data["effective"].score
             else:
-                unexplored.append(move)
-
-        # Add unexplored as synthetic anchor
-        if unexplored:
-            anchor_scores[UNEXPLORED_ANCHOR_ID] = NEUTRAL_SCORE
-            for move in unexplored:
-                anchors_with_moves[UNEXPLORED_ANCHOR_ID].append((move, NEUTRAL_SCORE))
+                # Unexplored move - use natural LCB from pseudocounts
+                unexplored_stats = Stats(0, 0, 0)
+                unexplored_score = unexplored_stats.score
+                
+                # Each unexplored move gets its own synthetic anchor
+                # (or group them together, but use the natural score)
+                anchors_with_moves[UNEXPLORED_ANCHOR_ID].append((move, unexplored_score))
+                anchor_scores[UNEXPLORED_ANCHOR_ID] = unexplored_score
 
         return {
             "anchors_with_moves": dict(anchors_with_moves),
@@ -661,9 +690,15 @@ class GameMemory:
         if self.conn.execute("SELECT COUNT(*) FROM anchors").fetchone()[0] == 0:
             has_data = False
             if self.markov:
-                has_data = self.conn.execute("SELECT COUNT(*) FROM state_values").fetchone()[0] > 0
+                has_data = (
+                    self.conn.execute("SELECT COUNT(*) FROM state_values").fetchone()[0]
+                    > 0
+                )
             else:
-                has_data = self.conn.execute("SELECT COUNT(*) FROM transitions").fetchone()[0] > 0
+                has_data = (
+                    self.conn.execute("SELECT COUNT(*) FROM transitions").fetchone()[0]
+                    > 0
+                )
             if has_data:
                 self.rebuild_anchors()
         self._anchors_dirty = False
@@ -679,7 +714,10 @@ class GameMemory:
             stats = self._get_unit_stats(key)
             if stats.total > 0:
                 counts = tuple(stats)
-                changed[key] = {"counts": counts, "dist": tuple(x / stats.total for x in counts)}
+                changed[key] = {
+                    "counts": counts,
+                    "dist": tuple(x / stats.total for x in counts),
+                }
 
         if not changed:
             return
@@ -688,22 +726,21 @@ class GameMemory:
         try:
             # Load existing anchors
             anchors = {}
-            for aid, repr_key, w, t, n, l in cur.execute(
-                "SELECT anchor_id, repr_key, wins, ties, neutral, losses FROM anchors"
+            for aid, repr_key, w, t, l in cur.execute(
+                "SELECT anchor_id, repr_key, wins, ties, losses FROM anchors"
             ):
-                total = w + t + n + l
+                total = w + t + l
                 if total > 0:
                     anchors[aid] = {
-                        "counts": (w, t, n, l),
-                        "dist": (w / total, t / total, n / total, l / total),
+                        "counts": (w, t, l),
+                        "dist": (w / total, t / total, l / total),
                         "repr": repr_key,
                     }
-
             max_id = max(anchors.keys(), default=-1)
 
             # Get existing memberships
             existing = {}
-            placeholders = ','.join('?' for _ in changed)
+            placeholders = ",".join("?" for _ in changed)
             rows = cur.execute(
                 f"SELECT scoring_key, anchor_id FROM scoring_anchors WHERE scoring_key IN ({placeholders})",
                 list(changed.keys()),
@@ -714,7 +751,7 @@ class GameMemory:
 
             for key, data in changed.items():
                 old_aid = existing.get(key)
-                
+
                 # Check if we should STAY in current anchor
                 stay_in_current = False
                 if old_aid is not None and old_aid in anchors:
@@ -722,15 +759,17 @@ class GameMemory:
                         stay_in_current = True
                     else:
                         moved_from.add(old_aid)
-                
+
                 if stay_in_current:
                     modified.add(old_aid)
                     continue
-                
+
                 # Look for a new home
                 best_aid = self._find_nearest(data["counts"], anchors)
-                can_join = best_aid is not None and _compatible(data["counts"], anchors[best_aid]["counts"])
-                
+                can_join = best_aid is not None and _compatible(
+                    data["counts"], anchors[best_aid]["counts"]
+                )
+
                 if can_join:
                     new_aid = best_aid
                 else:
@@ -738,14 +777,20 @@ class GameMemory:
                     max_id += 1
                     new_aid = max_id
                     cur.execute(
-                        "INSERT INTO anchors VALUES (?, ?, ?, ?, ?, ?)",
+                        "INSERT INTO anchors VALUES (?, ?, ?, ?, ?)",
                         (new_aid, key, *data["counts"]),
                     )
-                    anchors[new_aid] = {"counts": data["counts"], "dist": data["dist"], "repr": key}
+                    anchors[new_aid] = {
+                        "counts": data["counts"],
+                        "dist": data["dist"],
+                        "repr": key,
+                    }
 
                 # Update membership
                 if old_aid is None:
-                    cur.execute("INSERT INTO scoring_anchors VALUES (?, ?)", (key, new_aid))
+                    cur.execute(
+                        "INSERT INTO scoring_anchors VALUES (?, ?)", (key, new_aid)
+                    )
                 elif old_aid != new_aid:
                     cur.execute(
                         "UPDATE scoring_anchors SET anchor_id = ? WHERE scoring_key = ?",
@@ -767,19 +812,25 @@ class GameMemory:
             cur.execute("ROLLBACK")
             raise
 
-    def _find_nearest(self, counts: Tuple[int, ...], anchors: Dict[int, dict]) -> Optional[int]:
+    def _find_nearest(
+        self, counts: Tuple[int, ...], anchors: Dict[int, dict]
+    ) -> Optional[int]:
         """Find most similar anchor by Bayes factor."""
         if not anchors:
             return None
-        return max(anchors.keys(), key=lambda aid: _similarity(counts, anchors[aid]["counts"]))
+        return max(
+            anchors.keys(), key=lambda aid: _similarity(counts, anchors[aid]["counts"])
+        )
 
-    def _recalc_anchor(self, aid: int, anchors: Dict[int, dict], cur: sqlite3.Cursor) -> None:
+    def _recalc_anchor(
+        self, aid: int, anchors: Dict[int, dict], cur: sqlite3.Cursor
+    ) -> None:
         """Recalculate anchor stats from members."""
         if self.markov:
             # Join with state_values
             row = cur.execute(
                 """SELECT COALESCE(SUM(sv.wins),0), COALESCE(SUM(sv.ties),0),
-                          COALESCE(SUM(sv.neutral),0), COALESCE(SUM(sv.losses),0), COUNT(*)
+                          COALESCE(SUM(sv.losses),0), COUNT(*)
                    FROM scoring_anchors sa
                    JOIN state_values sv ON sa.scoring_key = sv.state_hash
                    WHERE sa.anchor_id = ?""",
@@ -793,21 +844,23 @@ class GameMemory:
                 "SELECT scoring_key FROM scoring_anchors WHERE anchor_id = ?",
                 (aid,),
             ).fetchall()
-            
-            w, t, n, l = 0, 0, 0, 0
+
+            w, t, l = 0, 0, 0
             for (key,) in members:
                 parts = key.split("|", 1)
                 if len(parts) == 2:
                     r = cur.execute(
-                        "SELECT wins, ties, neutral, losses FROM transitions WHERE from_hash=? AND to_hash=?",
+                        "SELECT wins, ties, losses FROM transitions WHERE from_hash=? AND to_hash=?",
                         (parts[0], parts[1]),
                     ).fetchone()
                     if r:
-                        w += r[0]; t += r[1]; n += r[2]; l += r[3]
-            row = (w, t, n, l, len(members))
+                        w += r[0]
+                        t += r[1]
+                        l += r[2]
+            row = (w, t, l, len(members))
 
-        w, t, n, l, count = row
-        total = w + t + n + l
+        w, t, l, count = row
+        total = w + t + l
 
         if count == 0 or total == 0:
             cur.execute("DELETE FROM anchors WHERE anchor_id = ?", (aid,))
@@ -815,12 +868,12 @@ class GameMemory:
             return
 
         cur.execute(
-            "UPDATE anchors SET wins = ?, ties = ?, neutral = ?, losses = ? WHERE anchor_id = ?",
-            (w, t, n, l, aid),
+            "UPDATE anchors SET wins = ?, ties = ?, losses = ? WHERE anchor_id = ?",
+            (w, t, l, aid),
         )
         anchors[aid] = {
-            "counts": (w, t, n, l),
-            "dist": (w / total, t / total, n / total, l / total),
+            "counts": (w, t, l),
+            "dist": (w / total, t / total, l / total),
             "repr": anchors.get(aid, {}).get("repr"),
         }
 
@@ -833,20 +886,20 @@ class GameMemory:
 
         to_check = set(modified_only)
         merged = True
-        
+
         while merged:
             merged = False
             for aid1 in list(to_check):
                 if aid1 not in anchors:
                     to_check.discard(aid1)
                     continue
-                    
+
                 for aid2 in list(anchors.keys()):
                     if aid2 == aid1 or aid2 not in anchors:
                         continue
-                    
+
                     a1, a2 = anchors[aid1], anchors[aid2]
-                    
+
                     if _compatible(a1["counts"], a2["counts"]):
                         n1, n2 = sum(a1["counts"]), sum(a2["counts"])
                         if n1 >= n2:
@@ -858,7 +911,9 @@ class GameMemory:
                             "UPDATE scoring_anchors SET anchor_id = ? WHERE anchor_id = ?",
                             (survivor, absorbed),
                         )
-                        cur.execute("DELETE FROM anchors WHERE anchor_id = ?", (absorbed,))
+                        cur.execute(
+                            "DELETE FROM anchors WHERE anchor_id = ?", (absorbed,)
+                        )
                         del anchors[absorbed]
                         to_check.discard(absorbed)
                         self._recalc_anchor(survivor, anchors, cur)
@@ -877,26 +932,30 @@ class GameMemory:
         units = []
         if self.markov:
             rows = self.conn.execute(
-                """SELECT state_hash, wins, ties, neutral, losses
-                   FROM state_values WHERE wins + ties + neutral + losses > 0"""
+                """SELECT state_hash, wins, ties, losses
+                   FROM state_values WHERE wins + ties + losses > 0"""
             ).fetchall()
-            for key, w, ti, n, l in rows:
-                total = w + ti + n + l
-                dist = (w / total, ti / total, n / total, l / total)
+            for key, w, ti, l in rows:
+                total = w + ti + l
+                dist = (w / total, ti / total, l / total)
                 entropy = -sum(p * math.log(p + 1e-12) for p in dist)
-                units.append({"key": key, "counts": (w, ti, n, l), "dist": dist, "entropy": entropy})
+                units.append(
+                    {"key": key, "counts": (w, ti, l), "dist": dist, "entropy": entropy}
+                )
         else:
             # Non-Markov: use transitions as scoring units
             rows = self.conn.execute(
-                """SELECT from_hash, to_hash, wins, ties, neutral, losses
-                   FROM transitions WHERE wins + ties + neutral + losses > 0"""
+                """SELECT from_hash, to_hash, wins, ties, losses
+                   FROM transitions WHERE wins + ties + losses > 0"""
             ).fetchall()
-            for fh, th, w, ti, n, l in rows:
+            for fh, th, w, ti, l in rows:
                 key = f"{fh}|{th}"
-                total = w + ti + n + l
-                dist = (w / total, ti / total, n / total, l / total)
+                total = w + ti + l
+                dist = (w / total, ti / total, l / total)
                 entropy = -sum(p * math.log(p + 1e-12) for p in dist)
-                units.append({"key": key, "counts": (w, ti, n, l), "dist": dist, "entropy": entropy})
+                units.append(
+                    {"key": key, "counts": (w, ti, l), "dist": dist, "entropy": entropy}
+                )
 
         if not units:
             return 0
@@ -909,19 +968,32 @@ class GameMemory:
         for unit in units:
             best_idx = None
             if anchors:
-                best_idx = max(range(len(anchors)), key=lambda i: _similarity(unit["counts"], anchors[i]["counts"]))
+                best_idx = max(
+                    range(len(anchors)),
+                    key=lambda i: _similarity(unit["counts"], anchors[i]["counts"]),
+                )
 
-            compatible = best_idx is not None and _compatible(unit["counts"], anchors[best_idx]["counts"])
+            compatible = best_idx is not None and _compatible(
+                unit["counts"], anchors[best_idx]["counts"]
+            )
 
             if compatible:
                 a = anchors[best_idx]
-                a["counts"] = tuple(a["counts"][i] + unit["counts"][i] for i in range(4))
+                a["counts"] = tuple(
+                    a["counts"][i] + unit["counts"][i] for i in range(3)
+                )
                 total = sum(a["counts"])
                 a["dist"] = tuple(c / total for c in a["counts"])
                 membership[unit["key"]] = best_idx
             else:
                 membership[unit["key"]] = len(anchors)
-                anchors.append({"counts": unit["counts"], "dist": unit["dist"], "repr": unit["key"]})
+                anchors.append(
+                    {
+                        "counts": unit["counts"],
+                        "dist": unit["dist"],
+                        "repr": unit["key"],
+                    }
+                )
 
         # Persist
         cur = self.conn.cursor()
@@ -931,7 +1003,7 @@ class GameMemory:
             cur.execute("DELETE FROM scoring_anchors")
             for i, a in enumerate(anchors):
                 cur.execute(
-                    "INSERT INTO anchors VALUES (?, ?, ?, ?, ?, ?)",
+                    "INSERT INTO anchors VALUES (?, ?, ?, ?, ?)",
                     (i, a["repr"], *a["counts"]),
                 )
             cur.executemany(
@@ -985,39 +1057,70 @@ class GameMemory:
             clone = game.deep_clone()
             clone.apply_move(move)
             next_state = clone.get_state()
-            
+
             data = self._get_move_data(from_hash, to_hash, transitions)
             is_selected = to_hash == chosen_to_hash
-            
+
             # Board diff
-            diff = [(i, state.board[i], next_state.board[i]) 
-                    for i in np.ndindex(state.board.shape) 
-                    if state.board[i] != next_state.board[i]]
+            diff = [
+                (i, state.board[i], next_state.board[i])
+                for i in np.ndindex(state.board.shape)
+                if state.board[i] != next_state.board[i]
+            ]
 
             if data and data["effective"].total > 0:
                 eff, direct, anchor = data["effective"], data["direct"], data["anchor"]
-                debug_rows.append({
-                    "diff": diff, "move": move, "is_selected": is_selected,
-                    "score": eff.score, "utility": eff.utility, "certainty": eff.certainty,
-                    "total": eff.total,
-                    "pW": eff.wins / eff.total, "pT": eff.ties / eff.total,
-                    "pN": eff.neutral / eff.total, "pL": eff.losses / eff.total,
-                    "direct_total": direct.total, "direct_W": direct.wins,
-                    "direct_T": direct.ties, "direct_L": direct.losses,
-                    "anchor_id": data["anchor_id"], "anchor_total": anchor.total,
-                    "anchor_W": anchor.wins, "anchor_L": anchor.losses,
-                    "direct_score": direct.score,
-                    "using_anchor": eff.total == anchor.total and anchor.total > direct.total,
-                })
+                debug_rows.append(
+                    {
+                        "diff": diff,
+                        "move": move,
+                        "is_selected": is_selected,
+                        "score": eff.score,
+                        "utility": eff.utility,
+                        "certainty": eff.certainty,
+                        "total": eff.total,
+                        "pW": eff.wins / eff.total,
+                        "pT": eff.ties / eff.total,
+                        "pL": eff.losses / eff.total,
+                        "direct_total": direct.total,
+                        "direct_W": direct.wins,
+                        "direct_T": direct.ties,
+                        "direct_L": direct.losses,
+                        "anchor_id": data["anchor_id"],
+                        "anchor_total": anchor.total,
+                        "anchor_W": anchor.wins,
+                        "anchor_L": anchor.losses,
+                        "direct_score": direct.score,
+                        "using_anchor": eff.total == anchor.total
+                        and anchor.total > direct.total,
+                    }
+                )
             else:
-                debug_rows.append({
-                    "diff": diff, "move": move, "is_selected": is_selected,
-                    "score": 0.5, "utility": 0.0, "certainty": 0.0, "total": 0,
-                    "pW": 0.0, "pT": 0.0, "pN": 0.0, "pL": 0.0,
-                    "direct_total": 0, "direct_W": 0, "direct_T": 0, "direct_L": 0,
-                    "anchor_id": None, "anchor_total": 0, "anchor_W": 0, "anchor_L": 0,
-                    "direct_score": 0.5, "using_anchor": False, "unexplored": True,
-                })
+                debug_rows.append(
+                    {
+                        "diff": diff,
+                        "move": move,
+                        "is_selected": is_selected,
+                        "score": 0.0,
+                        "utility": 0.0,
+                        "certainty": 0.0,
+                        "total": 0,
+                        "pW": 0.0,
+                        "pT": 0.0,
+                        "pL": 0.0,
+                        "direct_total": 0,
+                        "direct_W": 0,
+                        "direct_T": 0,
+                        "direct_L": 0,
+                        "anchor_id": None,
+                        "anchor_total": 0,
+                        "anchor_W": 0,
+                        "anchor_L": 0,
+                        "direct_score": 0.0,
+                        "using_anchor": False,
+                        "unexplored": True,
+                    }
+                )
 
         if debug_rows:
             render_debug(state.board, debug_rows)
@@ -1033,10 +1136,14 @@ class GameMemory:
         trans = self.conn.execute("SELECT COUNT(*) FROM transitions").fetchone()[0]
         anchors = self.conn.execute("SELECT COUNT(*) FROM anchors").fetchone()[0]
         samples = self.conn.execute(
-            "SELECT COALESCE(SUM(wins+ties+neutral+losses),0) FROM transitions"
+            "SELECT COALESCE(SUM(wins+ties+losses),0) FROM transitions"
         ).fetchone()[0]
-        from_states = self.conn.execute("SELECT COUNT(DISTINCT from_hash) FROM transitions").fetchone()[0]
-        to_states = self.conn.execute("SELECT COUNT(DISTINCT to_hash) FROM transitions").fetchone()[0]
+        from_states = self.conn.execute(
+            "SELECT COUNT(DISTINCT from_hash) FROM transitions"
+        ).fetchone()[0]
+        to_states = self.conn.execute(
+            "SELECT COUNT(DISTINCT to_hash) FROM transitions"
+        ).fetchone()[0]
         return {
             "transitions": trans,
             "from_states": from_states,
@@ -1053,18 +1160,22 @@ class GameMemory:
     def get_anchor_details(self) -> List[Dict[str, Any]]:
         """Detailed anchor information."""
         rows = self.conn.execute(
-            """SELECT a.anchor_id, a.repr_key, a.wins, a.ties, a.neutral, a.losses,
+            """SELECT a.anchor_id, a.repr_key, a.wins, a.ties, a.losses,
                       COUNT(sa.scoring_key)
                FROM anchors a LEFT JOIN scoring_anchors sa ON a.anchor_id = sa.anchor_id
-               GROUP BY a.anchor_id ORDER BY (a.wins + a.ties + a.neutral + a.losses) DESC"""
+               GROUP BY a.anchor_id ORDER BY (a.wins + a.ties + a.losses) DESC"""
         ).fetchall()
 
         return [
             {
-                "anchor_id": r[0], "repr_key": r[1],
-                "wins": r[2], "ties": r[3], "neutral": r[4], "losses": r[5],
-                "total": (t := r[2] + r[3] + r[4] + r[5]), "members": r[6],
-                "distribution": (r[2] / t, r[3] / t, r[4] / t, r[5] / t) if t else (0, 0, 0, 0),
+                "anchor_id": r[0],
+                "repr_key": r[1],
+                "wins": r[2],
+                "ties": r[3],
+                "losses": r[4],
+                "total": (t := r[2] + r[3] + r[4]),
+                "members": r[5],
+                "distribution": (r[2] / t, r[3] / t, r[4] / t) if t else (0, 0, 0),
             }
             for r in rows
         ]

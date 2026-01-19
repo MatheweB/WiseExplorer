@@ -94,7 +94,7 @@ class MiniChess(GameBase):
     def current_player(self) -> int:
         return self.state.current_player
 
-    def valid_moves(self) -> np.ndarray:
+    def valid_moves(self) -> List[np.ndarray]:
         """
         Return all legal MOVES as [(from_r, from_c, to_r, to_c)].
 
