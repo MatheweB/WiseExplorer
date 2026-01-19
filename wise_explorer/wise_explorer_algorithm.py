@@ -46,7 +46,7 @@ def _weighted_select(
 ) -> any:
     """
     Select item with probability weighted by score.
-    
+
     If pick_best=True, higher scores get higher probability.
     If pick_best=False, lower scores get higher probability.
     """
@@ -63,11 +63,11 @@ def _pick_from_dict(
     """Select a key from {key: score} dict based on mode."""
     if mode == SelectionMode.RANDOM:
         return random.choice(list(scores.keys()))
-    
+
     if mode == SelectionMode.DETERMINISTIC:
         fn = max if pick_best else min
         return fn(scores.keys(), key=lambda k: scores[k])
-    
+
     # PROBABILISTIC
     keys = list(scores.keys())
     return _weighted_select(keys, [scores[k] for k in keys], pick_best)
@@ -81,14 +81,14 @@ def _pick_move_from_list(
     """Select a move from [(move, score), ...] list based on mode."""
     if len(moves) == 1:
         return moves[0][0]
-    
+
     if mode == SelectionMode.RANDOM:
         return random.choice(moves)[0]
-    
+
     if mode == SelectionMode.DETERMINISTIC:
         fn = max if pick_best else min
         return fn(moves, key=lambda m: m[1])[0]
-    
+
     # PROBABILISTIC
     return _weighted_select(moves, [m[1] for m in moves], pick_best)[0]
 
@@ -108,10 +108,11 @@ def select_move(
 ) -> np.ndarray:
     """
     Select a move for real play (inference).
-    
+
+    Uses LCB (conservative estimates) for anchor scoring.
     Uses KNOWN moves only - a known move with score 0.499 beats an unknown.
     Falls back to random only if no recorded data exists.
-    
+
     Parameters
     ----------
     game : GameBase
@@ -121,23 +122,27 @@ def select_move(
     is_prune : bool
         False = pick best (default), True = pick worst.
     anchor_mode : SelectionMode
-        How to select anchor.
+        How to select anchor (default: DETERMINISTIC).
     move_mode : SelectionMode
-        How to select move within anchor.
+        How to select move within anchor (default: RANDOM).
     debug : bool
         If True, render debug visualization.
     """
     valid_moves = game.valid_moves()
     evaluation = memory.evaluate_moves_for_selection(game, valid_moves)
-    
+
     anchors_with_moves = evaluation.get("anchors_with_moves", {})
     anchor_scores = evaluation.get("anchor_scores", {})
     pick_best = not is_prune
-    
+
     # Filter to known moves only (exclude synthetic unexplored anchor)
-    known_anchors = {k: v for k, v in anchor_scores.items() if k != UNEXPLORED_ANCHOR_ID}
-    known_moves = {k: v for k, v in anchors_with_moves.items() if k != UNEXPLORED_ANCHOR_ID}
-    
+    known_anchors = {
+        k: v for k, v in anchor_scores.items() if k != UNEXPLORED_ANCHOR_ID
+    }
+    known_moves = {
+        k: v for k, v in anchors_with_moves.items() if k != UNEXPLORED_ANCHOR_ID
+    }
+
     # Select from known moves if available
     if known_anchors:
         anchor_id = _pick_from_dict(known_anchors, anchor_mode, pick_best)
@@ -148,7 +153,7 @@ def select_move(
     # Ultimate fallback
     else:
         move = random.choice(valid_moves)
-    
+
     if debug:
         memory.debug_move_selection(game, valid_moves, move)
     return move
@@ -158,61 +163,86 @@ def select_move_for_training(
     game: GameBase,
     memory: GameMemory,
     is_prune: bool,
-    primary_move: SelectionMode = SelectionMode.RANDOM,
-    fallback_anchor: SelectionMode = SelectionMode.RANDOM,
-    fallback_move: SelectionMode = SelectionMode.RANDOM,
+    primary_move: SelectionMode = SelectionMode.PROBABILISTIC,
+    fallback_anchor: SelectionMode = SelectionMode.PROBABILISTIC,
+    fallback_move: SelectionMode = SelectionMode.PROBABILISTIC,
     debug: bool = False,
 ) -> np.ndarray:
     """
     Select a move for training with probability-gated exploration.
-    
+
     Includes unknown moves (scored at 0.5) to encourage exploration.
-    
+
     Two-stage selection:
-    
-    PRIMARY (fires with probability = anchor_score):
-        - Anchor: Always deterministic (best/worst)
-        - Move: Uses `primary_move` mode
-        
+
+    PRIMARY (fires with probability based on confidence):
+        - Pick best/worst anchor Probabilistically
+        - Fire with probability = how confident we are it's good/bad
+        - When fires: select move using `primary_move` mode
+
     FALLBACK (fires when primary doesn't):
         - Anchor: Uses `fallback_anchor` mode
         - Move: Uses `fallback_move` mode
-    
-    This naturally explores uncertain positions more:
-        - Score 0.9 → 90% primary, 10% fallback
-        - Score 0.5 → 50% primary, 50% fallback
-        - Score 0.2 → 20% primary, 80% fallback
+
+    Exploration behavior:
+        - High confidence (0.9) → 90% exploit, 10% explore
+        - Medium confidence (0.5) → 50% exploit, 50% explore
+        - Low confidence (0.2) → 20% exploit, 80% explore
     """
+    # If a move we're picking has a near-certain outcome statistically, treat it as certain
+    ABSOLUTE_CONFIDENCE_THRESHOLD = 0.995
+
     valid_moves = game.valid_moves()
     evaluation = memory.evaluate_moves_for_selection(game, valid_moves)
-    
+
     anchors_with_moves = evaluation.get("anchors_with_moves", {})
     anchor_scores = evaluation.get("anchor_scores", {})
-    
+
     if not anchors_with_moves:
         move = random.choice(valid_moves)
         if debug:
             memory.debug_move_selection(game, valid_moves, move)
         return move
-    
+
     pick_best = not is_prune
+
+    # If we have a definitive win or loss, we treat it as such
+    best_anchor = _pick_from_dict(
+        anchor_scores, SelectionMode.DETERMINISTIC, pick_best
+    )
+    best_score = anchor_scores[best_anchor]
+    best_confidence = best_score if pick_best else (1.0 - best_score)
+    if best_confidence > ABSOLUTE_CONFIDENCE_THRESHOLD:
+        move = _pick_move_from_list(
+            anchors_with_moves[best_anchor], SelectionMode.PROBABILISTIC, pick_best
+        )
+        return move
+
+
+    # PRIMARY: pick best/worst anchor
+    primary_anchor = _pick_from_dict(
+        anchor_scores, SelectionMode.PROBABILISTIC, pick_best
+    )
+    primary_score = anchor_scores[primary_anchor]
     
-    # PRIMARY: Try best/worst anchor with probability = score
-    primary_anchor = _pick_from_dict(anchor_scores, SelectionMode.DETERMINISTIC, pick_best)
-    score = anchor_scores[primary_anchor]
-    fire_prob = score if pick_best else (1.0 - score)
-    
-    if random.random() < fire_prob:
+    # Compute confidence: how sure are we this is a good/bad move?
+    # - For pick_best: high score = high confidence (that it's good)
+    # - For pick_worst: low score = high confidence (that it's bad)
+    confidence = primary_score if pick_best else (1.0 - primary_score)
+
+    # Fire primary with probability = confidence
+    if random.random() < confidence:
+        # EXPLOIT: Use the deterministic best/worst
         move = _pick_move_from_list(
             anchors_with_moves[primary_anchor], primary_move, pick_best
         )
     else:
-        # FALLBACK: Configurable exploration
+        # EXPLORE: Use fallback modes
         anchor_id = _pick_from_dict(anchor_scores, fallback_anchor, pick_best)
         move = _pick_move_from_list(
             anchors_with_moves[anchor_id], fallback_move, pick_best
         )
-    
+
     if debug:
         memory.debug_move_selection(game, valid_moves, move)
     return move

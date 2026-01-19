@@ -62,7 +62,7 @@ class TicTacToe(GameBase):
     def current_player(self) -> int:
         return self.state.current_player
 
-    def valid_moves(self) -> np.ndarray:
+    def valid_moves(self) -> List[np.ndarray]:
         """
         Return all legal MOVES from the current state.
 

@@ -65,17 +65,6 @@ def _score_color(score: float) -> str:
     if score >= 0.35: return ORANGE
     return RED
 
-
-def _compute_score(wins: int, losses: int, total: int) -> float:
-    """Bayesian score with uniform Dirichlet prior (α=1 pseudocounts)."""
-    w_eff = wins + 1
-    l_eff = losses + 1
-    n_eff = total + 4
-    mean = (w_eff - l_eff) / n_eff
-    var = max(0, (w_eff + l_eff - n_eff * mean**2) / (n_eff - 1))
-    return (mean - math.sqrt(var / n_eff) + 1) / 2
-
-
 def _player_marker(piece_val) -> str:
     if piece_val is None or piece_val == 0:
         return "·"
@@ -262,7 +251,7 @@ def render_debug(
             else:
                 d_w_pct = d_l_pct = d_t_pct = 0
             
-            solo_score = _compute_score(direct_W, direct_L, direct_total)
+            solo_score = m.get("direct_score")
             pooled_score = m.get("score", 0)
             
             solo_col = _score_color(solo_score)

@@ -1,5 +1,6 @@
 # game_base.py
 from abc import ABC, abstractmethod
+from typing import List
 from numpy.typing import NDArray
 
 from agent.agent import State
@@ -70,7 +71,7 @@ class GameBase(ABC):
     # Move interface (PRIMARY)
     # ----------------------------------------------------------
     @abstractmethod
-    def valid_moves(self) -> NDArray:
+    def valid_moves(self) -> List[NDArray]:
         """
         Return all legal moves from the current state.
         Example (TicTacToe): [(row, col), ...]
