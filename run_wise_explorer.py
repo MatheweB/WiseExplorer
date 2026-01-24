@@ -56,7 +56,7 @@ def main():
 
     # Memory manager - partitioned by game type
     # Creates: data/memory/{game_id}.db (e.g., tic_tac_toe.db, minichess.db)
-    memory = GameMemory.for_game(game, base_dir="data/memory", markov=True)
+    memory = GameMemory.for_game(game, base_dir="data/memory")
 
     # Start generalized multi-agent, multi-player simulation
     start_simulations(
