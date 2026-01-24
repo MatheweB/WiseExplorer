@@ -1,96 +1,96 @@
 """
-Move selection for game AI training and inference.
+Move selection for game AI.
 
-Two main functions:
-    select_move()              - For real play. Uses known moves only.
-    select_move_for_training() - For training. Explores unknowns.
+TRAINING: Probabilistic weighted by (std_error + promise)
+INFERENCE: Deterministic best anchor, then best or random move
 
-Selection modes:
-    DETERMINISTIC  - Pick best/worst by score
-    PROBABILISTIC  - Weighted random by score
-    RANDOM         - Uniform random
+The Formula (training):
+    weight = std_error + promise
+    
+    - std_error is UNCAPPED (infinity for unknowns)
+    - promise = mean_score (exploit) or 1-mean_score (prune)
+    - Probabilistic selection maintains diversity
 """
 
 from __future__ import annotations
 
 import random
-from enum import Enum
 from typing import Dict, List, Tuple
 
 import numpy as np
 
 from agent.agent import Agent
 from games.game_base import GameBase
-from omnicron.manager import GameMemory
+from omnicron.manager import GameMemory, Stats, UNEXPLORED_ANCHOR_ID
 
 
-class SelectionMode(Enum):
-    DETERMINISTIC = 1
-    PROBABILISTIC = 2
-    RANDOM = 3
-
-
-# Synthetic anchor ID for unexplored moves (used by manager.py)
-UNEXPLORED_ANCHOR_ID = -999
+# Large weight for infinite uncertainty
+INF_WEIGHT = 100.0
 
 
 # ---------------------------------------------------------------------------
-# Core Selection Helpers
+# Training Selection (Probabilistic: std_error + promise)
 # ---------------------------------------------------------------------------
 
 
-def _weighted_select(
-    items: List,
-    scores: List[float],
-    pick_best: bool,
-) -> any:
-    """
-    Select item with probability weighted by score.
-
-    If pick_best=True, higher scores get higher probability.
-    If pick_best=False, lower scores get higher probability.
-    """
-    weights = scores if pick_best else [1.0 - s for s in scores]
-    weights = [max(0.01, w) for w in weights]  # Ensure all items have some chance
-    return random.choices(items, weights=weights, k=1)[0]
+def _exploration_weight(stats: Stats, pick_best: bool) -> float:
+    """weight = std_error + promise (uncapped)"""
+    se = stats.std_error
+    
+    if se == float('inf'):
+        return INF_WEIGHT
+    
+    promise = stats.mean_score if pick_best else (1.0 - stats.mean_score)
+    return se + promise
 
 
-def _pick_from_dict(
-    scores: Dict[int, float],
-    mode: SelectionMode,
-    pick_best: bool,
-) -> int:
-    """Select a key from {key: score} dict based on mode."""
-    if mode == SelectionMode.RANDOM:
-        return random.choice(list(scores.keys()))
-
-    if mode == SelectionMode.DETERMINISTIC:
-        fn = max if pick_best else min
-        return fn(scores.keys(), key=lambda k: scores[k])
-
-    # PROBABILISTIC
-    keys = list(scores.keys())
-    return _weighted_select(keys, [scores[k] for k in keys], pick_best)
+def _select_anchor_for_training(anchor_stats: Dict[int, Stats], pick_best: bool) -> int:
+    """Probabilistic weighted selection by uncertainty + promise."""
+    if not anchor_stats:
+        raise ValueError("No anchors")
+    if len(anchor_stats) == 1:
+        return next(iter(anchor_stats.keys()))
+    
+    aids = list(anchor_stats.keys())
+    weights = [_exploration_weight(anchor_stats[a], pick_best) for a in aids]
+    return random.choices(aids, weights=weights, k=1)[0]
 
 
-def _pick_move_from_list(
-    moves: List[Tuple[np.ndarray, float]],
-    mode: SelectionMode,
-    pick_best: bool,
-) -> np.ndarray:
-    """Select a move from [(move, score), ...] list based on mode."""
+def _select_move_for_training(moves: List[Tuple[np.ndarray, Stats]], pick_best: bool) -> np.ndarray:
+    """Probabilistic weighted selection within anchor."""
     if len(moves) == 1:
         return moves[0][0]
+    
+    weights = [_exploration_weight(stats, pick_best) for _, stats in moves]
+    return random.choices(moves, weights=weights, k=1)[0][0]
 
-    if mode == SelectionMode.RANDOM:
-        return random.choice(moves)[0]
 
-    if mode == SelectionMode.DETERMINISTIC:
-        fn = max if pick_best else min
-        return fn(moves, key=lambda m: m[1])[0]
+# ---------------------------------------------------------------------------
+# Inference Selection (Deterministic Best)
+# ---------------------------------------------------------------------------
 
-    # PROBABILISTIC
-    return _weighted_select(moves, [m[1] for m in moves], pick_best)[0]
+
+def _best_anchor(anchor_stats: Dict[int, Stats], pick_best: bool) -> int:
+    """Deterministic: pick anchor with best/worst mean_score."""
+    if pick_best:
+        return max(anchor_stats.keys(), key=lambda k: anchor_stats[k].mean_score)
+    else:
+        return min(anchor_stats.keys(), key=lambda k: anchor_stats[k].mean_score)
+
+
+def _best_move(moves: List[Tuple[np.ndarray, Stats]], pick_best: bool) -> np.ndarray:
+    """Deterministic: pick move with best/worst mean_score."""
+    if len(moves) == 1:
+        return moves[0][0]
+    if pick_best:
+        return max(moves, key=lambda m: m[1].mean_score)[0]
+    else:
+        return min(moves, key=lambda m: m[1].mean_score)[0]
+
+
+def _random_move(moves: List[Tuple[np.ndarray, Stats]]) -> np.ndarray:
+    """Random: all moves in anchor are equivalent."""
+    return random.choice(moves)[0]
 
 
 # ---------------------------------------------------------------------------
@@ -102,150 +102,94 @@ def select_move(
     game: GameBase,
     memory: GameMemory,
     is_prune: bool = False,
-    anchor_mode: SelectionMode = SelectionMode.DETERMINISTIC,
-    move_mode: SelectionMode = SelectionMode.DETERMINISTIC,
+    random_in_anchor: bool = True,
     debug: bool = False,
 ) -> np.ndarray:
     """
-    Select a move for real play (inference).
-
-    Uses LCB (conservative estimates) for anchor scoring.
-    Uses KNOWN moves only - a known move with score 0.499 beats an unknown.
-    Falls back to random only if no recorded data exists.
-
-    Parameters
-    ----------
-    game : GameBase
-        Current game state.
-    memory : GameMemory
-        Game memory database.
-    is_prune : bool
-        False = pick best (default), True = pick worst.
-    anchor_mode : SelectionMode
-        How to select anchor (default: DETERMINISTIC).
-    move_mode : SelectionMode
-        How to select move within anchor (default: RANDOM).
-    debug : bool
-        If True, render debug visualization.
+    Select move for inference (competitive play).
+    
+    Pure exploitation:
+    - Anchor: deterministic best by mean_score
+    - Move: random (default, all equivalent) or deterministic best
+    
+    Args:
+        random_in_anchor: If True, random among anchor's moves (they're equivalent).
+                         If False, pick best by mean_score.
     """
     valid_moves = game.valid_moves()
     evaluation = memory.evaluate_moves_for_selection(game, valid_moves)
-
+    
     anchors_with_moves = evaluation.get("anchors_with_moves", {})
-    anchor_scores = evaluation.get("anchor_scores", {})
+    anchor_stats = evaluation.get("anchor_stats", {})
+    
+    if not anchors_with_moves:
+        return random.choice(valid_moves)
+    
     pick_best = not is_prune
-
-    # Filter to known moves only (exclude synthetic unexplored anchor)
-    known_anchors = {
-        k: v for k, v in anchor_scores.items() if k != UNEXPLORED_ANCHOR_ID
-    }
-    known_moves = {
-        k: v for k, v in anchors_with_moves.items() if k != UNEXPLORED_ANCHOR_ID
-    }
-
-    # Select from known moves if available
-    if known_anchors:
-        anchor_id = _pick_from_dict(known_anchors, anchor_mode, pick_best)
-        move = _pick_move_from_list(known_moves[anchor_id], move_mode, pick_best)
-    # Fall back to unknown moves
-    elif UNEXPLORED_ANCHOR_ID in anchors_with_moves:
-        move = random.choice(anchors_with_moves[UNEXPLORED_ANCHOR_ID])[0]
-    # Ultimate fallback
+    
+    # Filter to explored moves only
+    known_stats = {k: v for k, v in anchor_stats.items() if k != UNEXPLORED_ANCHOR_ID}
+    known_moves = {k: v for k, v in anchors_with_moves.items() if k != UNEXPLORED_ANCHOR_ID}
+    
+    if not known_stats:
+        if UNEXPLORED_ANCHOR_ID in anchors_with_moves:
+            return random.choice(anchors_with_moves[UNEXPLORED_ANCHOR_ID])[0]
+        return random.choice(valid_moves)
+    
+    # Deterministic best anchor
+    best_anchor_id = _best_anchor(known_stats, pick_best)
+    
+    # Move selection within anchor
+    if random_in_anchor:
+        selected_move = _random_move(known_moves[best_anchor_id])
     else:
-        move = random.choice(valid_moves)
-
+        selected_move = _best_move(known_moves[best_anchor_id], pick_best)
+    
     if debug:
-        memory.debug_move_selection(game, valid_moves, move)
-    return move
+        memory.debug_move_selection(game, valid_moves, selected_move)
+    
+    return np.asarray(selected_move)
 
 
 def select_move_for_training(
     game: GameBase,
     memory: GameMemory,
     is_prune: bool,
-    primary_move: SelectionMode = SelectionMode.PROBABILISTIC,
-    fallback_anchor: SelectionMode = SelectionMode.PROBABILISTIC,
-    fallback_move: SelectionMode = SelectionMode.PROBABILISTIC,
     debug: bool = False,
 ) -> np.ndarray:
     """
-    Select a move for training with probability-gated exploration.
-
-    Includes unknown moves (scored at 0.5) to encourage exploration.
-
-    Two-stage selection:
-
-    PRIMARY (fires with probability based on confidence):
-        - Pick best/worst anchor Probabilistically
-        - Fire with probability = how confident we are it's good/bad
-        - When fires: select move using `primary_move` mode
-
-    FALLBACK (fires when primary doesn't):
-        - Anchor: Uses `fallback_anchor` mode
-        - Move: Uses `fallback_move` mode
-
-    Exploration behavior:
-        - High confidence (0.9) → 90% exploit, 10% explore
-        - Medium confidence (0.5) → 50% exploit, 50% explore
-        - Low confidence (0.2) → 20% exploit, 80% explore
+    Select move for training.
+    
+    Probabilistic weighted by: std_error + promise
+    
+    - Unknowns (std_error=∞) always prioritized
+    - High uncertainty → explored
+    - Low uncertainty → score dominates
     """
-    # If a move we're picking has a near-certain outcome statistically, treat it as certain
-    ABSOLUTE_CONFIDENCE_THRESHOLD = 0.995
-
     valid_moves = game.valid_moves()
     evaluation = memory.evaluate_moves_for_selection(game, valid_moves)
-
-    anchors_with_moves = evaluation.get("anchors_with_moves", {})
-    anchor_scores = evaluation.get("anchor_scores", {})
-
-    if not anchors_with_moves:
-        move = random.choice(valid_moves)
-        if debug:
-            memory.debug_move_selection(game, valid_moves, move)
-        return move
-
-    pick_best = not is_prune
-
-    # If we have a definitive win or loss, we treat it as such
-    best_anchor = _pick_from_dict(
-        anchor_scores, SelectionMode.DETERMINISTIC, pick_best
-    )
-    best_score = anchor_scores[best_anchor]
-    best_confidence = best_score if pick_best else (1.0 - best_score)
-    if best_confidence > ABSOLUTE_CONFIDENCE_THRESHOLD:
-        move = _pick_move_from_list(
-            anchors_with_moves[best_anchor], SelectionMode.PROBABILISTIC, pick_best
-        )
-        return move
-
-
-    # PRIMARY: pick best/worst anchor
-    primary_anchor = _pick_from_dict(
-        anchor_scores, SelectionMode.PROBABILISTIC, pick_best
-    )
-    primary_score = anchor_scores[primary_anchor]
     
-    # Compute confidence: how sure are we this is a good/bad move?
-    # - For pick_best: high score = high confidence (that it's good)
-    # - For pick_worst: low score = high confidence (that it's bad)
-    confidence = primary_score if pick_best else (1.0 - primary_score)
-
-    # Fire primary with probability = confidence
-    if random.random() < confidence:
-        # EXPLOIT: Use the deterministic best/worst
-        move = _pick_move_from_list(
-            anchors_with_moves[primary_anchor], primary_move, pick_best
-        )
-    else:
-        # EXPLORE: Use fallback modes
-        anchor_id = _pick_from_dict(anchor_scores, fallback_anchor, pick_best)
-        move = _pick_move_from_list(
-            anchors_with_moves[anchor_id], fallback_move, pick_best
-        )
-
+    anchors_with_moves = evaluation.get("anchors_with_moves", {})
+    anchor_stats = evaluation.get("anchor_stats", {})
+    
+    if not anchors_with_moves:
+        return np.asarray(random.choice(valid_moves))
+    
+    pick_best = not is_prune
+    
+    # Probabilistic weighted selection
+    selected_anchor = _select_anchor_for_training(anchor_stats, pick_best)
+    selected_move = _select_move_for_training(anchors_with_moves[selected_anchor], pick_best)
+    
     if debug:
-        memory.debug_move_selection(game, valid_moves, move)
-    return move
+        memory.debug_move_selection(game, valid_moves, selected_move)
+    
+    return np.asarray(selected_move)
+
+
+# ---------------------------------------------------------------------------
+# Utility
+# ---------------------------------------------------------------------------
 
 
 def update_agent(
@@ -253,11 +197,6 @@ def update_agent(
     game: GameBase,
     memory: GameMemory,
     is_prune: bool,
-    primary_move: SelectionMode = SelectionMode.RANDOM,
-    fallback_anchor: SelectionMode = SelectionMode.RANDOM,
-    fallback_move: SelectionMode = SelectionMode.RANDOM,
 ) -> None:
-    """Convenience wrapper: select training move and assign to agent.core_move."""
-    agent.core_move = select_move_for_training(
-        game, memory, is_prune, primary_move, fallback_anchor, fallback_move
-    )
+    """Convenience wrapper."""
+    agent.core_move = select_move_for_training(game, memory, is_prune)

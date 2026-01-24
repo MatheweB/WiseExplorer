@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import logging
 import multiprocessing as mp
+from multiprocessing.pool import Pool
 import random
 from dataclasses import dataclass
 from typing import Dict, List, Optional
@@ -25,7 +26,7 @@ import numpy as np
 from agent.agent import Agent, State
 from games.game_base import GameBase
 from omnicron.manager import GameMemory
-from wise_explorer.wise_explorer_algorithm import SelectionMode
+#from wise_explorer.wise_explorer_algorithm import SelectionMode
 from wise_explorer.wise_explorer_algorithm import select_move, select_move_for_training
 
 logger = logging.getLogger(__name__)
@@ -121,7 +122,7 @@ class SimulationRunner:
     def __init__(self, memory: GameMemory, num_workers: int = DEFAULT_WORKER_COUNT):
         self.memory = memory
         self.num_workers = num_workers
-        self._pool: Optional[mp.Pool] = None
+        self._pool: Optional[Pool] = None
         self._round_id = 0
 
     def __enter__(self):
@@ -131,9 +132,9 @@ class SimulationRunner:
     def __exit__(self, *_):
         self.shutdown()
 
-    def _ensure_pool(self) -> mp.Pool:
+    def _ensure_pool(self) -> Pool:
         if self._pool is None:
-            self._pool = mp.Pool(
+            self._pool = Pool(
                 processes=self.num_workers,
                 initializer=_worker_init,
                 initargs=(str(self.memory.db_path),),
@@ -222,6 +223,8 @@ class SimulationRunner:
                 outcome = result.outcomes[pid]
                 if skip_neutral and outcome == State.NEUTRAL:
                     continue
+                # if len(prune_players) > 0 and pid not in prune_players:
+                #     continue
                 stacks.append(
                     (
                         [(m.move, m.board_before, m.player) for m in move_list],
@@ -319,7 +322,7 @@ def _ai_turn(
     if not game.valid_moves().size:
         return None
 
-    move = select_move(game, memory, debug=True, move_mode=SelectionMode.RANDOM)
+    move = select_move(game, memory, debug=True)
     game.apply_move(move)
     return move
 
