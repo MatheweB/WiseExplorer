@@ -1,12 +1,12 @@
 # Wise Explorer
 
-A pattern-based learning model for General Game Playing that explores both promising and unpromising paths to master any N-player game.
+A multiagent learning model in General Game Playing that explores both promising and unpromising paths to succeed in any N-player game.
 
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
 ## Overview
 
-Wise Explorer takes a unique approach to Monte Carlo Tree Search (MCTS) by deliberately exploring not just the most promising branches, but also the *least* promising ones. This dual-exploration strategy enables rapid pattern recognition without heuristics, training data, or game-specific knowledge.
+Wise Explorer takes a unique approach to Monte Carlo Tree Search (MCTS) by deliberately exploring not just the most promising branches, but also the *least* promising ones. This dual-exploration strategy enables pattern recognition without heuristics, training data, or game-specific knowledge.
 
 **Key Features:**
 - **Zero prior knowledge required** — no heuristics, no training data
@@ -15,7 +15,7 @@ Wise Explorer takes a unique approach to Monte Carlo Tree Search (MCTS) by delib
 - **Statistical clustering** — borrows knowledge from similar positions
 - **Bayesian confidence scoring** — conservative estimates that improve with data
 
-[Read the research paper](https://digitalcommons.oberlin.edu/honors/116/) for full technical details.
+[Read the research paper](https://digitalcommons.oberlin.edu/honors/116/) for full technical details, or check out https://www.mathewe.com for more about me.
 
 ## A Note
 
@@ -139,7 +139,7 @@ Training alternates between two complementary strategies:
 | **Prune** | Intentionally play worst moves | Identify and confirm losing patterns |
 | **Exploit** | Always play best moves | Reinforce winning strategies |
 
-By systematically exploring both extremes, Wise Explorer rapidly builds a comprehensive understanding of the game space.
+By systematically exploring both extremes, Wise Explorer builds a comprehensive understanding of the game space.
 
 ## Project Structure
 
@@ -319,6 +319,16 @@ pytest                  # Run all tests
 pytest tests/core/      # Run core module tests
 pytest -v               # Verbose output
 ```
+
+## Troubleshooting
+
+Training is cumulative, so every time you run `wise-explorer`, the model learns more. It may take a few 1000 epochs for reliably good gameplay to emerge, patience is key!
+
+Feel free to play around with the weights at the top of `core/types.py` to see different behaviors while learning.
+
+If you make large changes to the weights, or if you want to start over with training, delete the database files in `data/memory`.
+
+If you run into a *database locked* issue, just delete the `.db-shm` and `.db-wal` files.
 
 ## Performance
 
