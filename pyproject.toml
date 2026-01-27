@@ -1,30 +1,23 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
 [project]
 name = "wise-explorer"
-version = "0.1.0"
-description = "Pattern-based learning model for General Game Playing"
+version = "1.0.0"
+description = "Pattern-based game AI using Monte Carlo Simulations, Nash Equilibria Convergence, and Bayes factor clustering"
 readme = "README.md"
 license = {text = "Apache-2.0"}
 requires-python = ">=3.10"
+dependencies = ["numpy>=1.24.0"]
 authors = [
     { name = "Mathewe Banda" },
 ]
-keywords = ["game-ai", "machine-learning", "reinforcement-learning", "board-games", "general-game-playing", "mcts"]
+keywords = ["general-game-playing", "interpretable-ai", "general-ai", "mcts", "reinforcement-learning"]
 classifiers = [
-    "Development Status :: 3 - Alpha",
-    "Intended Audience :: Developers",
     "Intended Audience :: Science/Research",
     "License :: OSI Approved :: Apache Software License",
     "Programming Language :: Python :: 3",
-    "Topic :: Scientific/Engineering :: Artificial Intelligence",
-]
-dependencies = [
-    "numpy>=1.20",
-]
-
-[project.optional-dependencies]
-dev = [
-    "pytest>=7.0",
-    "pytest-cov>=4.0",
 ]
 
 [project.urls]
@@ -32,24 +25,16 @@ Homepage = "https://github.com/MatheweB/WiseExplorer"
 Repository = "https://github.com/MatheweB/WiseExplorer"
 Issues = "https://github.com/MatheweB/WiseExplorer/issues"
 
-[build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
-
-[tool.hatch.build.targets.wheel]
-packages = ["omnicron", "simulation", "agent", "games", "wise_explorer", "utils"]
-
-[tool.pytest.ini_options]
-testpaths = ["tests"]
-pythonpath = ["."]
-
-[tool.ruff]
-line-length = 100
-target-version = "py310"
-
-[tool.ruff.lint]
-select = ["E", "F", "I", "W"]
-ignore = ["E501"]
+[project.optional-dependencies]
+dev = ["pytest>=7.0.0"]
 
 [project.scripts]
-wise-explorer = "run_wise_explorer:main"
+wise-explorer = "wise_explorer.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/wise_explorer"]
+
+[tool.pytest.ini_options]
+testpaths = ["./tests"]
+
+

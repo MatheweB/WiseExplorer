@@ -18,6 +18,7 @@ Wise Explorer takes a unique approach to Monte Carlo Tree Search (MCTS) by delib
 [Read the research paper](https://digitalcommons.oberlin.edu/honors/116/) for full technical details.
 
 ## A Note
+
 This project is a re-imagining and re-implementation of my Honors thesis. Many strides have been made in efficiency and applicability that I wasn't able to achieve in 2019, and new concepts such as "anchors" and probability distribution sampling are the result of my independent learning and research.
 
 ## Installation
@@ -28,35 +29,59 @@ cd WiseExplorer
 pip install -e .
 ```
 
-### Troubleshooting Installation
-
-If you encounter an import error like `ImportError: cannot import name 'main' from 'main'`, this is due to a naming conflict with Anaconda/Conda. To fix:
+For development (includes pytest):
 
 ```bash
-pip uninstall wise-explorer
-pip install -e .
+pip install -e ".[dev]"
 ```
-
-If the issue persists, ensure you don't have conflicting packages installed in your environment.
 
 ## Quick Start
 
-### Using as a Library (Recommended)
+### Command Line
+
+```bash
+# Play Tic-Tac-Toe against the AI (default)
+wise-explorer
+
+# Play Mini Chess with more training
+wise-explorer --game minichess --epochs 200
+
+# Watch AI play itself
+wise-explorer --ai-only
+
+# Use existing knowledge without training
+wise-explorer --no-training
+
+# See all options
+wise-explorer --help
+```
+
+### CLI Options
+
+| Flag | Short | Description |
+|------|-------|-------------|
+| `--game` | `-g` | Game to play: `tic_tac_toe`, `minichess` |
+| `--epochs` | `-e` | Training epochs per move (default: 100) |
+| `--turn-depth` | `-t` | Max turns per simulation (default: 40) |
+| `--workers` | `-w` | Parallel worker processes (default: CPU count - 1) |
+| `--no-training` | | Play using existing memory only |
+| `--ai-only` | | AI plays both sides |
+
+### As a Library
 
 ```python
-from omnicron.manager import GameMemory
-from simulation.simulation import start_simulations
-from agent.agent import Agent
-from games.tic_tac_toe import TicTacToe
+from wise_explorer.api import start_simulations
+from wise_explorer.memory import GameMemory
+from wise_explorer.agent.agent import Agent
+from wise_explorer.games import TicTacToe
+from wise_explorer.utils.factory import create_agent_swarms
 
-# Initialize your game (must implement GameBase interface)
+# Initialize game
 game = TicTacToe()
 
 # Create agent swarms (one per player)
-swarms = {
-    1: [Agent() for _ in range(20)],
-    2: [Agent() for _ in range(20)],
-}
+players = [1, 2]
+swarms = create_agent_swarms(players, agents_per_player=20)
 
 # Create memory database
 memory = GameMemory.for_game(game)
@@ -65,8 +90,8 @@ memory = GameMemory.for_game(game)
 start_simulations(
     agent_swarms=swarms,
     game=game,
-    turn_depth=20,       # Maximum turns per training game
-    simulations=200,     # Training games per move
+    turn_depth=20,
+    simulations=200,
     memory=memory,
 )
 ```
@@ -109,40 +134,61 @@ This prevents the algorithm from overcommitting to moves based on lucky early re
 
 Training alternates between two complementary strategies:
 
-| Phase   | Agent Behavior            | Purpose                              |
-|---------|---------------------------|--------------------------------------|
-| **Prune**   | Intentionally play worst moves | Identify and confirm losing patterns |
-| **Exploit** | Always play best moves         | Reinforce winning strategies         |
+| Phase | Agent Behavior | Purpose |
+|-------|----------------|---------|
+| **Prune** | Intentionally play worst moves | Identify and confirm losing patterns |
+| **Exploit** | Always play best moves | Reinforce winning strategies |
 
 By systematically exploring both extremes, Wise Explorer rapidly builds a comprehensive understanding of the game space.
 
 ## Project Structure
 
 ```
-src/
-├── run_wise_explorer.py                    # Main entry point
-├── pyproject.toml            # Project configuration
-├── pytest.ini                # Test configuration
+src/wise_explorer/
+├── cli.py                 # Command-line interface
+├── api.py                 # Public API (start_simulations)
+│
 ├── agent/
-│   └── agent.py              # Agent implementation
-├── data/
-│   └── memory/               # SQLite databases
+│   └── __init__.py        # Agent class and State enum
+│
+├── core/
+│   ├── types.py           # Stats, scoring constants
+│   ├── hashing.py         # Board state hashing
+│   └── bayes.py           # Bayes factor clustering
+│
 ├── games/
-│   ├── game_base.py          # Game interface
-│   ├── game_rules.py         # Rule definitions
-│   ├── game_state.py         # State representation
-│   ├── minichess.py          # Example: Chess variant
-│   └── tic_tac_toe.py        # Example: Tic-tac-toe
-├── omnicron/
-│   ├── manager.py            # GameMemory orchestration
-│   ├── serializers.py        # State serialization
-│   └── transition.py         # Transition records
+│   ├── game_base.py       # Abstract game interface
+│   ├── game_state.py      # GameState container
+│   ├── game_rules.py      # Board utilities
+│   ├── tic_tac_toe.py     # Tic-Tac-Toe implementation
+│   └── minichess.py       # Mini Chess implementation
+│
+├── memory/
+│   ├── schema.py          # Database schema
+│   ├── anchor_manager.py  # Anchor logic class
+│   └── game_memory.py     # GameMemory class
+│
+├── selection/
+│   ├── training.py        # Probabilistic selection (exploration)
+│   └── inference.py       # Deterministic selection (exploitation)
+│
 ├── simulation/
-│   └── simulation.py         # Training loop
+│   ├── jobs.py            # Job data structures
+│   ├── worker.py          # Parallel worker logic
+│   ├── runner.py          # SimulationRunner
+│   └── training.py        # Training orchestration
+│
 ├── utils/
-│   └── global_variables.py   # Configuration
-└── wise_explorer/
-    └── wise_explorer_algorithm.py  # Core algorithm
+│   ├── config.py          # Game registry and Config class
+│   └── factory.py         # Factory functions
+│
+├── data/memory/           # SQLite databases (auto-created)
+│
+└── debug/
+    └── viz.py             # Terminal visualization
+
+tests/                     # Test suite (mirrors src structure)
+
 ```
 
 ## Key Concepts
@@ -152,17 +198,20 @@ src/
 The knowledge database that records transitions, manages anchors, and scores moves.
 
 ```python
+from wise_explorer.memory import GameMemory
+
 # Initialize memory for a game
 memory = GameMemory.for_game(game)
 
-# Record game outcomes
-memory.record_round(GameClass, [
-    (player1_moves, State.WIN),
-    (player2_moves, State.LOSS),
-])
+# Custom database path
+memory = GameMemory("path/to/my_game.db")
 
-# Query move quality (returns 0.0 to 1.0)
-score = memory.get_move_score(from_hash, to_hash)
+# Read-only mode (for parallel workers)
+memory = GameMemory("path/to/my_game.db", read_only=True)
+
+# Query statistics
+info = memory.get_info()
+print(f"Transitions: {info['transitions']}, Anchors: {info['anchors']}")
 ```
 
 ### Agent Strategy
@@ -172,17 +221,17 @@ Agents operate in one of two modes:
 - **Prune mode** (`is_prune=True`): Deliberately makes poor moves to map out losing strategies
 - **Exploit mode** (`is_prune=False`): Selects the highest-scoring moves
 
-The `simulation.py` module implements round-robin pruning, ensuring each player systematically explores bad moves during training.
+The training module implements round-robin pruning, ensuring each player systematically explores bad moves during training.
 
 ### Markov vs Non-Markov Modes
 
 Choose how the algorithm treats game states:
 
 ```python
-# Non-Markov mode (default): Each unique transition is distinct. The acting player is implicitly encoded.
+# Non-Markov (default): Each transition is distinct
 memory = GameMemory.for_game(game, markov=False)
 
-# Markov mode: Only the resulting position matters. The acting player is not encoded.
+# Markov: Only the resulting position matters
 memory = GameMemory.for_game(game, markov=True)
 ```
 
@@ -193,11 +242,17 @@ memory = GameMemory.for_game(game, markov=True)
 Create a class that implements the `GameBase` interface:
 
 ```python
-from games.game_base import GameBase
-from games.game_state import GameState, State
+from wise_explorer.games import GameBase, GameState
+from wise_explorer.agent.agent import State
 import numpy as np
 
 class MyGame(GameBase):
+    def game_id(self) -> str:
+        return "my_game"
+    
+    def num_players(self) -> int:
+        return 2
+    
     def get_state(self) -> GameState:
         """Return current board state and active player."""
         pass
@@ -207,11 +262,11 @@ class MyGame(GameBase):
         pass
         
     def valid_moves(self) -> np.ndarray:
-        """Return array of all legal moves in current position."""
+        """Return array of all legal moves."""
         pass
         
     def apply_move(self, move: np.ndarray) -> None:
-        """Execute the move and update game state."""
+        """Execute move and update game state."""
         pass
         
     def is_over(self) -> bool:
@@ -219,42 +274,53 @@ class MyGame(GameBase):
         pass
         
     def get_result(self, player: int) -> State:
-        """Return WIN/LOSS/TIE/NEUTRAL for the specified player."""
+        """Return WIN/LOSS/TIE/NEUTRAL for the player."""
         pass
         
     def current_player(self) -> int:
-        """Return the active player's identifier."""
+        """Return the active player's ID."""
         pass
         
     def deep_clone(self) -> "MyGame":
-        """Create an independent copy of the game state."""
+        """Create an independent copy."""
         pass
+    
+    def clone(self) -> "MyGame":
+        """Shallow copy."""
+        pass
+    
+    def state_string(self) -> str:
+        """Pretty-print for debugging."""
+        pass
+```
+
+Then register it in `utils/config.py`:
+
+```python
+from wise_explorer.games.my_game import MyGame
+
+GAMES = {
+    "tic_tac_toe": TicTacToe,
+    "minichess": MiniChess,
+    "my_game": MyGame,  # Add your game
+}
+
+INITIAL_STATES = {
+    # ... add initial state for your game
+}
 ```
 
 See `games/tic_tac_toe.py` and `games/minichess.py` for complete examples.
 
-## Configuration
+## Testing
 
-### Environment Variables
-
-No environment variables are required. Modify `utils/global_variables.py` for custom settings.
-
-### Database Storage
-
-Wise Explorer uses SQLite for persistence, automatically created at first run.
-
-```python
-# Default location: data/memory/{game_id}.db
-memory = GameMemory.for_game(game)
-
-# Custom database path
-memory = GameMemory("path/to/my_game.db")
-
-# Read-only mode (useful for parallel workers)
-memory = GameMemory("path/to/my_game.db", read_only=True)
+```bash
+pytest                  # Run all tests
+pytest tests/core/      # Run core module tests
+pytest -v               # Verbose output
 ```
 
-## Performance Characteristics
+## Performance
 
 - **Training throughput**: 1,000–5,000 games/second (varies by game complexity)
 - **Move selection latency**: <1ms for cached positions
@@ -262,31 +328,9 @@ memory = GameMemory("path/to/my_game.db", read_only=True)
 
 Performance scales well with multiprocessing for independent game simulations.
 
-## Testing
-
-Run the test suite to verify your installation:
-
-```bash
-pip install -e ".[dev]"
-pytest
-```
-
 ## License
 
-This project is licensed under the MIT License. See the LICENSE file for details.
-
-## Contributing
-
-Contributions are welcome! Please follow these steps:
-
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/amazing-feature`)
-3. Run tests to ensure nothing breaks (`pytest`)
-4. Commit your changes (`git commit -m 'Add amazing feature'`)
-5. Push to the branch (`git push origin feature/amazing-feature`)
-6. Open a Pull Request
-
-For bug reports and feature requests, please open an issue on GitHub.
+This project is licensed under the Apache License 2.0. See the [LICENSE](LICENSE) file for details.
 
 ## Citation
 
@@ -295,18 +339,25 @@ If you use Wise Explorer in your research, please cite:
 ```bibtex
 @thesis{wise_explorer,
   title={General Game Playing as a Bandit-Arms Problem: A Multiagent Monte-Carlo Solution Exploiting Nash Equilibria},
-  author={[Mathewe Banda]},
-  year={[2019]},
+  author={Mathewe Banda},
+  year={2019},
   school={Oberlin College},
   url={https://digitalcommons.oberlin.edu/honors/116/}
 }
 ```
 
-## Support
+## Contributing
 
-- **Documentation**: [Research Paper](https://digitalcommons.oberlin.edu/honors/116/)
-- **Issues**: [GitHub Issues](https://github.com/MatheweB/WiseExplorer/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/MatheweB/WiseExplorer/discussions)
+Contributions are welcome!
+
+1. Fork the repository
+2. Create a feature branch (`git checkout -b feature/amazing-feature`)
+3. Run tests (`pytest`)
+4. Commit your changes (`git commit -m 'Add amazing feature'`)
+5. Push to the branch (`git push origin feature/amazing-feature`)
+6. Open a Pull Request
+
+For bug reports and feature requests, please [open an issue](https://github.com/MatheweB/WiseExplorer/issues).
 
 ---
 
