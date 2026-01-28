@@ -10,9 +10,7 @@ from __future__ import annotations
 from typing import Dict, List, Optional, TYPE_CHECKING
 
 from wise_explorer.simulation.jobs import GameJob, JobResult, MoveRecord
-
-if TYPE_CHECKING:
-    from wise_explorer.memory.game_memory import GameMemory
+from wise_explorer.memory.game_memory import GameMemory
 
 
 # Global worker state (initialized per process)
@@ -22,7 +20,6 @@ _worker_memory: Optional["GameMemory"] = None
 def worker_init(db_path: str) -> None:
     """Initialize read-only database connection for worker process."""
     global _worker_memory
-    from wise_explorer.memory.game_memory import GameMemory
     _worker_memory = GameMemory(db_path, read_only=True)
 
 
