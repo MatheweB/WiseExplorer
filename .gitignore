@@ -1,0 +1,14 @@
+# Python bytecode
+__pycache__/
+*.pyc
+*.pyo
+
+# Local settings
+settings.json
+
+# macOS junk
+.DS_Store
+
+# Database files
+*.db
+*.db-*
