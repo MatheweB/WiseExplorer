@@ -114,6 +114,7 @@ class AnchorManager:
                 "total": total,
                 "members": members,
                 "distribution": (w/total, t/total, l/total) if total else (0, 0, 0),
+                "markov_mode": self._markov,
             })
         return results
 
@@ -224,11 +225,22 @@ class AnchorManager:
             anchors[aid].add(delta)
 
     def _update_denormalized_id(self, scoring_key: str, anchor_id: int, cur: sqlite3.Cursor) -> None:
-        """Update denormalized anchor_id in main table."""
+        """
+        Update denormalized anchor_id in main table.
+        
+        In Markov mode: scoring_key is the state_hash, update state_values
+        In transition mode: scoring_key is from|to, update transitions
+        """
         if self._markov:
-            cur.execute("UPDATE state_values SET anchor_id=? WHERE state_hash=?", (anchor_id, scoring_key))
+            cur.execute(
+                "UPDATE state_values SET anchor_id=? WHERE state_hash=?",
+                (anchor_id, scoring_key)
+            )
         else:
-            cur.execute("UPDATE transitions SET anchor_id=? WHERE scoring_key=?", (anchor_id, scoring_key))
+            cur.execute(
+                "UPDATE transitions SET anchor_id=? WHERE scoring_key=?",
+                (anchor_id, scoring_key)
+            )
 
     def _load_anchors(self, cur: sqlite3.Cursor) -> Dict[int, Anchor]:
         """Load all anchors from database."""
@@ -311,10 +323,10 @@ class AnchorManager:
         """Merge two anchors, keeping the larger one."""
         survivor, absorbed = (aid1, aid2) if anchors[aid1].total >= anchors[aid2].total else (aid2, aid1)
         
-        # Reassign memberships
+        # Reassign memberships in scoring_anchors
         cur.execute("UPDATE scoring_anchors SET anchor_id=? WHERE anchor_id=?", (survivor, absorbed))
         
-        # Update denormalized IDs
+        # Update denormalized IDs in the appropriate table
         table = "state_values" if self._markov else "transitions"
         cur.execute(f"UPDATE {table} SET anchor_id=? WHERE anchor_id=?", (survivor, absorbed))
         
@@ -356,7 +368,12 @@ class AnchorManager:
         return len(anchors)
 
     def _collect_units(self) -> List[Tuple[str, Counts, float]]:
-        """Collect all scoring units as (key, counts, entropy) tuples."""
+        """
+        Collect all scoring units as (key, counts, entropy) tuples.
+        
+        In Markov mode: scoring units are states from state_values
+        In transition mode: scoring units are transitions from transitions table
+        """
         if self._markov:
             query = "SELECT state_hash, wins, ties, losses FROM state_values WHERE wins+ties+losses > 0"
             rows = [(h, (w, t, l)) for h, w, t, l in self._conn.execute(query)]
@@ -412,7 +429,7 @@ class AnchorManager:
             list(membership.items())
         )
         
-        # Update denormalized anchor_ids
+        # Update denormalized anchor_ids in the appropriate table
         table, col = ("state_values", "state_hash") if self._markov else ("transitions", "scoring_key")
         cur.executemany(
             f"UPDATE {table} SET anchor_id=? WHERE {col}=?",
