@@ -88,13 +88,25 @@ class GameMemory:
         parts = scoring_key.split("|", 1)
         return self.get_stats(parts[0], parts[1]) if len(parts) == 2 else Stats()
 
+    def get_direct_stats(self, from_hash: str, to_hash: str) -> Stats:
+        """Get direct stats for a move, respecting current mode."""
+        if self.markov:
+            return self.get_state_stats(to_hash)
+        return self.get_stats(from_hash, to_hash)
+
     def get_transitions_from(self, from_hash: str) -> Dict[str, Stats]:
         """Get all transitions from a given state."""
         cached = self._get_transitions_with_anchors(from_hash)
         return {to_hash: stats for to_hash, (_, stats) in cached.items()}
 
     def _get_transitions_with_anchors(self, from_hash: str) -> Dict[str, Tuple[Optional[int], Stats]]:
-        """Get all transitions from a position with anchor IDs."""
+        """
+        Get all transitions from a position with anchor IDs.
+        
+        Note: This returns per-transition data from the transitions table.
+        In Markov mode, use get_state_stats() and get_anchor_id() instead
+        for proper state-based statistics.
+        """
         if from_hash in self._transition_cache:
             return self._transition_cache[from_hash]
         
@@ -115,14 +127,25 @@ class GameMemory:
         from_states = self.conn.execute("SELECT COUNT(DISTINCT from_hash) FROM transitions").fetchone()[0]
         to_states = self.conn.execute("SELECT COUNT(DISTINCT to_hash) FROM transitions").fetchone()[0]
         
-        return {
+        info = {
             "transitions": trans,
             "from_states": from_states,
             "to_states": to_states,
             "total_samples": samples,
             "anchors": anchors,
             "compression_ratio": to_states / anchors if anchors else 1.0,
+            "markov_mode": self.markov,
         }
+        
+        if self.markov:
+            state_count = self.conn.execute("SELECT COUNT(*) FROM state_values").fetchone()[0]
+            state_samples = self.conn.execute(
+                "SELECT COALESCE(SUM(wins+ties+losses), 0) FROM state_values"
+            ).fetchone()[0]
+            info["unique_states"] = state_count
+            info["state_samples"] = state_samples
+        
+        return info
 
     # -------------------------------------------------------------------------
     # Anchor-Aware Queries
@@ -193,24 +216,23 @@ class GameMemory:
         Returns dict with anchors_with_moves and anchor_stats.
         """
         from_hash = hash_board(game.get_state().board)
-        transitions = self._get_transitions_with_anchors(from_hash)
 
         anchors_with_moves: Dict[int, List[Tuple[np.ndarray, Stats]]] = defaultdict(list)
         anchor_stats: Dict[int, Stats] = {}
 
         for move, to_hash in self._compute_move_hashes(game, valid_moves):
-            if to_hash in transitions:
-                anchor_id, direct_stats = transitions[to_hash]
+            scoring_key = self._scoring_key(from_hash, to_hash)
+            
+            # Get stats appropriate for mode
+            direct_stats = self.get_direct_stats(from_hash, to_hash)
+            
+            if direct_stats.total > 0:
+                anchor_id = self.get_anchor_id(scoring_key)
+                aid = anchor_id if anchor_id is not None else UNEXPLORED_ANCHOR_ID
+                anchors_with_moves[aid].append((move, direct_stats))
                 
-                if direct_stats.total > 0:
-                    aid = anchor_id if anchor_id is not None else UNEXPLORED_ANCHOR_ID
-                    anchors_with_moves[aid].append((move, direct_stats))
-                    
-                    if aid not in anchor_stats:
-                        anchor_stats[aid] = self.get_anchor_stats_by_id(aid) if aid != UNEXPLORED_ANCHOR_ID else Stats()
-                else:
-                    anchors_with_moves[UNEXPLORED_ANCHOR_ID].append((move, Stats()))
-                    anchor_stats[UNEXPLORED_ANCHOR_ID] = Stats()
+                if aid not in anchor_stats:
+                    anchor_stats[aid] = self.get_anchor_stats_by_id(aid) if aid != UNEXPLORED_ANCHOR_ID else Stats()
             else:
                 anchors_with_moves[UNEXPLORED_ANCHOR_ID].append((move, Stats()))
                 anchor_stats[UNEXPLORED_ANCHOR_ID] = Stats()
@@ -331,7 +353,6 @@ class GameMemory:
 
         state = game.get_state()
         from_hash = hash_board(state.board)
-        transitions = self.get_transitions_from(from_hash)
         
         # Get chosen move's destination hash
         chosen_to_hash = None
@@ -355,7 +376,9 @@ class GameMemory:
             ]
 
             scoring_key = self._scoring_key(from_hash, to_hash)
-            direct = transitions.get(to_hash, Stats())
+            
+            # Get stats appropriate for mode
+            direct = self.get_direct_stats(from_hash, to_hash)
             
             if direct.total > 0:
                 anchor_id = self.get_anchor_id(scoring_key)
