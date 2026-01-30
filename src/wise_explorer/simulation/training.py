@@ -7,7 +7,7 @@ Alternates between:
 """
 
 from __future__ import annotations
-from typing import Dict, List, Set, TYPE_CHECKING
+from typing import Dict, List, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from wise_explorer.agent.agent import Agent

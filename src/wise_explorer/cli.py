@@ -44,12 +44,48 @@ def parse_args() -> argparse.Namespace:
         help="Play without training (use existing memory)",
     )
     parser.add_argument(
-        "--ai-only",
+        "--self-play",
         action="store_true",
-        help="AI plays both sides (no human player)",
+        help="AI plays for all players (no human players)",
+    )
+    parser.add_argument(
+        "--players", "-p",
+        type=str,
+        default=None,
+        help="Comma-separated list of human player numbers (e.g., '1,2'). Overrides --self-play.",
+    )
+    parser.add_argument(
+        "--markov",
+        action="store_true",
+        help="Uses Markov states in favor of transitions",
     )
     return parser.parse_args()
 
+def parse_human_players(players_str: str | None, num_players: int, game_id: str, self_play: bool) -> list[int]:
+    """Parse and validate the human players argument."""
+    if self_play and players_str is None:
+        return []
+    
+    if players_str is None:
+        return [1]  # Default: player 1 is human
+    
+    # Parse comma-separated values
+    try:
+        human_players = [int(p.strip()) for p in players_str.split(",") if p.strip()]
+    except ValueError as e:
+        raise ValueError(
+            f"Invalid --players format: '{players_str}'. "
+            "Expected comma-separated integers (e.g., '1,2')."
+        ) from e
+    
+    # Validate player numbers
+    invalid = [p for p in human_players if p < 1 or p > num_players]
+    if invalid:
+        raise ValueError(
+            f"Invalid player number(s): {invalid}. {game_id} only supports players 1-{num_players}."
+        )
+    
+    return sorted(set(human_players))
 
 def main() -> None:
     args = parse_args()
@@ -71,11 +107,11 @@ def main() -> None:
     agent_swarms = create_agent_swarms(players, config.num_agents)
     
     # Set up memory
-    memory = GameMemory.for_game(game, base_dir=MEMORY_DIR)
+    memory = GameMemory.for_game(game, base_dir=MEMORY_DIR, markov=args.markov)
     
     # Determine human players
-    human_players = [] if args.ai_only else [1]
-    
+    human_players = parse_human_players(args.players, game.num_players(), game.game_id(), args.self_play)
+
     # Run
     start_simulations(
         agent_swarms=agent_swarms,

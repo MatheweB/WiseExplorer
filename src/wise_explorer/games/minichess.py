@@ -31,6 +31,14 @@ DIAGONAL = ((1, 1), (1, -1), (-1, 1), (-1, -1))
 ALL_DIRS = ORTHOGONAL + DIAGONAL
 KING_DIRS = ALL_DIRS  # King moves 1 step in any direction
 
+CELL_STRINGS = {
+    0: "  ",
+    1: "P1", -1: "P2",
+    2: "C1", -2: "C2",
+    3: "K1", -3: "K2",
+    4: "Q1", -4: "Q2",
+}
+
 
 class MiniChess(GameBase):
     """Optimized Mini Chess on 6x4 board."""
@@ -60,6 +68,9 @@ class MiniChess(GameBase):
 
     def game_id(self) -> str:
         return "mini_chess"
+
+    def get_cell_strings(self) -> dict[int, str]:
+        return CELL_STRINGS
 
     def num_players(self) -> int:
         return 2
@@ -168,14 +179,67 @@ class MiniChess(GameBase):
                 else:
                     break
 
-    def apply_move(self, move: np.ndarray) -> None:
-        """Apply move: [from_r, from_c, to_r, to_c]."""
-        fr, fc, tr, tc = int(move[0]), int(move[1]), int(move[2]), int(move[3])
+    def is_valid_move(self, move: np.ndarray | list | tuple) -> bool:
+        """
+        Check whether `move` is a legal move for the current player.
+        Accepts array-like [fr, fc, tr, tc].
+        """
+        # Normalize move to a tuple of ints
+        try:
+            fr, fc, tr, tc = int(move[0]), int(move[1]), int(move[2]), int(move[3])
+        except Exception:
+            return False
+
+        # Basic bounds check
+        if not (0 <= fr < self.ROWS and 0 <= fc < self.COLS and 0 <= tr < self.ROWS and 0 <= tc < self.COLS):
+            return False
+
         board = self.state.board
-        
+        piece = int(board[fr, fc])
+
+        # From square must not be empty and must belong to the current player
+        if piece == 0:
+            return False
+
+        is_p1 = self.state.current_player == 1
+        if (is_p1 and piece < 0) or (not is_p1 and piece > 0):
+            return False
+
+        # Instead of reimplementing all movement rules, check membership in valid_moves
+        vm = self.valid_moves()
+        if vm.shape[0] == 0:
+            return False
+
+        # Vectorized membership test
+        # Convert move to array and compare rows
+        target_row = np.array([fr, fc, tr, tc], dtype=np.int32)
+        matches = np.all(vm == target_row, axis=1)
+        return bool(np.any(matches))
+
+    def apply_move(self, move: np.ndarray | list | tuple) -> None:
+        """Apply move: [from_r, from_c, to_r, to_c].
+
+        Raises:
+            RuntimeError: if the game is already over.
+            ValueError: if move is invalid for current player.
+        """
+        if self.is_over():
+            raise RuntimeError("Cannot apply move: the game is already over.")
+
+        # Normalize move to ints
+        try:
+            fr, fc, tr, tc = int(move[0]), int(move[1]), int(move[2]), int(move[3])
+        except Exception as exc:
+            raise exc
+
+        # Validate
+        if not self.is_valid_move((fr, fc, tr, tc)):
+            raise ValueError(f"Invalid move {(fr, fc, tr, tc)} for player {self.state.current_player}")
+
+        board = self.state.board
         piece = board[fr, fc]
         target = board[tr, tc]
-        
+
         # Check if capturing King
         if abs(target) == KING:
             self.winner = self.state.current_player
@@ -218,20 +282,12 @@ class MiniChess(GameBase):
         return State.NEUTRAL
 
     def state_string(self) -> str:
-        """Pretty-print the board."""
-        symbols = {
-            0: "  ",
-            PAWN: "P1", -PAWN: "P2",
-            CASTLE: "C1", -CASTLE: "C2",
-            KING: "K1", -KING: "K2",
-            QUEEN: "Q1", -QUEEN: "Q2",
-        }
-        
+        """Pretty-print the board."""        
         board = self.state.board
         lines = ["╭────┬────┬────┬────╮"]
         
         for i in range(self.ROWS):
-            row_strs = [f"{symbols[board[i, j]]:^2}" for j in range(self.COLS)]
+            row_strs = [f"{CELL_STRINGS[board[i, j]]:^2}" for j in range(self.COLS)]
             lines.append("│ " + " │ ".join(row_strs) + " │")
             if i < self.ROWS - 1:
                 lines.append("├────┼────┼────┼────┤")

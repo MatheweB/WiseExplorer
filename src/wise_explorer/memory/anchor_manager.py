@@ -33,18 +33,27 @@ class Anchor:
     
     @property
     def distribution(self) -> Tuple[float, float, float]:
-        t = self.total
-        return tuple(c / t for c in self.counts) if t > 0 else (0.0, 0.0, 0.0)
+        w, t, l = self.counts
+        total = self.total
+        return (w/total, t/total, l/total) if t > 0 else (0.0, 0.0, 0.0)
     
     def add(self, delta: Counts) -> None:
-        self.counts = tuple(a + b for a, b in zip(self.counts, delta))
-    
+        w, t, l = self.counts
+        dw, dt, dl = delta
+        self.counts = (w + dw, t + dt, l + dl)
+
+
     def subtract(self, delta: Counts) -> None:
-        self.counts = tuple(a - b for a, b in zip(self.counts, delta))
-    
+        w, t, l = self.counts
+        dw, dt, dl = delta
+        self.counts = (w - dw, t - dt, l - dl)
+
+
     def without(self, other: Counts) -> Counts:
         """Return counts with other subtracted (for self-exclusion checks)."""
-        return tuple(a - b for a, b in zip(self.counts, other))
+        w, t, l = self.counts
+        ow, ot, ol = other
+        return (w - ow, t - ot, l - ol)
 
 
 def _sub_counts(a: Counts, b: Counts) -> Counts:
@@ -78,9 +87,9 @@ class AnchorManager:
         """Get pooled statistics from the anchor cluster."""
         row = self._conn.execute(
             """SELECT a.wins, a.ties, a.losses 
-               FROM scoring_anchors sa 
-               JOIN anchors a ON sa.anchor_id = a.anchor_id 
-               WHERE sa.scoring_key = ?""",
+                FROM scoring_anchors sa 
+                JOIN anchors a ON sa.anchor_id = a.anchor_id 
+                WHERE sa.scoring_key = ?""",
             (scoring_key,)
         ).fetchone()
         return Stats(*row) if row else self._mem.get_unit_stats(scoring_key)
@@ -97,11 +106,11 @@ class AnchorManager:
         """Get detailed information about all anchors."""
         rows = self._conn.execute(
             """SELECT a.anchor_id, a.repr_key, a.wins, a.ties, a.losses, 
-                      COUNT(sa.scoring_key)
-               FROM anchors a 
-               LEFT JOIN scoring_anchors sa ON a.anchor_id = sa.anchor_id 
-               GROUP BY a.anchor_id 
-               ORDER BY a.wins + a.ties + a.losses DESC"""
+                    COUNT(sa.scoring_key)
+                FROM anchors a 
+                LEFT JOIN scoring_anchors sa ON a.anchor_id = sa.anchor_id 
+                GROUP BY a.anchor_id 
+                ORDER BY a.wins + a.ties + a.losses DESC"""
         ).fetchall()
         
         results = []

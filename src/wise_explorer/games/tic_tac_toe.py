@@ -9,14 +9,14 @@ Uses int8 board:
 
 from __future__ import annotations
 
-from typing import List
-
 import numpy as np
 
 from wise_explorer.agent.agent import State
 from wise_explorer.games.game_base import GameBase
 from wise_explorer.games.game_state import GameState
 
+# Cell strings: each cell value maps to its display string
+CELL_STRINGS = {0: " ", 1: "X", 2: "O"}
 
 # Pre-computed winning lines (indices into flattened 3x3 board)
 _WIN_LINES = np.array([
@@ -34,6 +34,9 @@ class TicTacToe(GameBase):
     def __init__(self):
         self.state = GameState(np.zeros((3, 3), dtype=np.int8), current_player=1)
         self.winner = 0  # 0=none, 1=player1, 2=player2
+
+    def get_cell_strings(self) -> dict[int, str]:
+        return CELL_STRINGS
 
     def game_id(self) -> str:
         return "tic_tac_toe"
@@ -64,8 +67,8 @@ class TicTacToe(GameBase):
     def current_player(self) -> int:
         return self.state.current_player
 
-    def valid_moves(self) -> List[np.ndarray]:
-        """Return empty cell positions as array of [row, col]."""
+    def valid_moves(self) -> np.ndarray:
+        """Return empty cell positions as array of shape (N, 2)."""
         return np.argwhere(self.state.board == 0)
 
     def apply_move(self, move: np.ndarray) -> None:
@@ -104,16 +107,15 @@ class TicTacToe(GameBase):
         for line in _WIN_LINES:
             v = flat[line[0]]
             if v != 0 and flat[line[1]] == v and flat[line[2]] == v:
-                return v
+                return int(v)
         return 0
 
     def state_string(self) -> str:
-        symbols = {0: " ", 1: "X", 2: "O"}
         board = self.state.board
         
         lines = ["╭───┬───┬───╮"]
         for i in range(3):
-            row = "│ " + " │ ".join(symbols[board[i, j]] for j in range(3)) + " │"
+            row = "│ " + " │ ".join(CELL_STRINGS[board[i, j]] for j in range(3)) + " │"
             lines.append(row)
             if i < 2:
                 lines.append("├───┼───┼───┤")
