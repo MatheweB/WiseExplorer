@@ -101,7 +101,7 @@ def start_simulations(
     runner = SimulationRunner(memory, num_workers)
 
     print(
-        f"Starting sim with {num_workers} workers. "
+        f"Starting {game.game_id()} sim with {num_workers} workers. "
         f"Training: {'ON' if training_enabled else 'OFF'}"
     )
     print(game.state_string())

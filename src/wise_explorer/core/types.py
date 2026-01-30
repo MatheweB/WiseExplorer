@@ -72,6 +72,9 @@ class Stats(NamedTuple):
     ties: int = 0
     losses: int = 0
 
+    def as_tuple(self) -> Tuple[int, int, int]:
+        return (self.wins, self.ties, self.losses)
+
     @property
     def total(self) -> int:
         return self.wins + self.ties + self.losses

@@ -90,6 +90,14 @@ class GameBase(ABC):
             WIN / TIE / NEUTRAL / LOSS
         """
         pass
+    
+    @abstractmethod
+    def get_cell_strings(self) -> dict[int, str]:
+        """
+        Return a dictionary of [int -> str] where each cell value maps to its display string
+            (e.g. {0: " ", 1: "X", 2: "O"} for tic_tac_toe)
+        """
+        pass
 
     @abstractmethod
     def state_string(self) -> str:

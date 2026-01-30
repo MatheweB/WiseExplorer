@@ -189,7 +189,7 @@ class GameMemory:
         
         if anchor.total <= direct.total:
             return direct
-        if direct.total > 0 and not compatible(tuple(direct), tuple(anchor)):
+        if direct.total > 0 and not compatible(direct.as_tuple(), anchor.as_tuple()):
             return direct
         return anchor
 
@@ -284,52 +284,62 @@ class GameMemory:
         """Write transitions to database with incremental anchor updates."""
         if not transitions:
             return
-        
+
         cur = self.conn.cursor()
-        
-        # Build insert data and track deltas
+
+        # Build insert data and track deltas (fixed-length 3-tuples)
         deltas: Dict[str, Tuple[int, int, int]] = {}
-        insert_data = []
+        insert_data: List[Tuple[str, str, str, int, int, int]] = []
+
         for (from_hash, to_hash), counts in transitions.items():
+            if len(counts) != 3:
+                raise ValueError(f"expected counts of length 3 for transition {(from_hash, to_hash)}, got {counts!r}")
+            w, t, l = int(counts[0]), int(counts[1]), int(counts[2])
             scoring_key = self._scoring_key(from_hash, to_hash)
-            insert_data.append((from_hash, to_hash, scoring_key, *counts))
-            deltas[scoring_key] = tuple(counts)
-        
+            insert_data.append((from_hash, to_hash, scoring_key, w, t, l))
+            deltas[scoring_key] = (w, t, l)
+
         # Batch upsert transitions
         cur.executemany(
             """INSERT INTO transitions (from_hash, to_hash, scoring_key, wins, ties, losses)
-               VALUES (?,?,?,?,?,?) 
-               ON CONFLICT(from_hash, to_hash) DO UPDATE SET
-               wins = wins + excluded.wins,
-               ties = ties + excluded.ties,
-               losses = losses + excluded.losses""",
+            VALUES (?,?,?,?,?,?) 
+            ON CONFLICT(from_hash, to_hash) DO UPDATE SET
+            wins = wins + excluded.wins,
+            ties = ties + excluded.ties,
+            losses = losses + excluded.losses""",
             insert_data,
         )
-        
+
         # Handle Markov mode
         if self.markov:
+            # accumulate per-state totals as lists for easy incrementing
             state_updates: Dict[str, List[int]] = defaultdict(lambda: [0, 0, 0])
             for (_, to_hash), counts in transitions.items():
-                for i in range(3):
-                    state_updates[to_hash][i] += counts[i]
-            
+                if len(counts) != 3:
+                    raise ValueError(f"expected counts of length 3 for transition to {to_hash}, got {counts!r}")
+                # add ints defensively
+                state_updates[to_hash][0] += int(counts[0])
+                state_updates[to_hash][1] += int(counts[1])
+                state_updates[to_hash][2] += int(counts[2])
+
+            # upsert state totals (unpack lists into separate columns)
             cur.executemany(
                 """INSERT INTO state_values (state_hash, wins, ties, losses)
-                   VALUES (?,?,?,?) 
-                   ON CONFLICT DO UPDATE SET
-                   wins = wins + excluded.wins,
-                   ties = ties + excluded.ties,
-                   losses = losses + excluded.losses""",
-                [(s, *c) for s, c in state_updates.items()],
+                VALUES (?,?,?,?) 
+                ON CONFLICT DO UPDATE SET
+                wins = wins + excluded.wins,
+                ties = ties + excluded.ties,
+                losses = losses + excluded.losses""",
+                [(s, c[0], c[1], c[2]) for s, c in state_updates.items()],
             )
+
             scoring_keys = list(state_updates.keys())
-            deltas = {k: tuple(v) for k, v in state_updates.items()}
+            deltas = {k: (v[0], v[1], v[2]) for k, v in state_updates.items()}
         else:
             scoring_keys = list(deltas.keys())
-        
-        # Incremental anchor update
+
         self._anchors.update(scoring_keys, deltas, cur)
-        
+
         self.conn.commit()
         self._clear_caches()
 
@@ -411,7 +421,7 @@ class GameMemory:
                 })
         
         if debug_rows:
-            render_debug(state.board, debug_rows)
+            render_debug(state.board, debug_rows, cell_strings=game.get_cell_strings())
         else:
             print("No candidates")
 
@@ -422,8 +432,7 @@ class GameMemory:
     @classmethod
     def for_game(cls, game: "GameBase", base_dir: str | Path = "data/memory", markov: bool = False, **kw) -> "GameMemory":
         """Create a GameMemory instance for a specific game."""
-        game_id = getattr(game, "game_id", lambda: type(game).__name__.lower())()
-        return cls(Path(base_dir) / f"{game_id}.db", markov=markov, **kw)
+        return cls(Path(base_dir) / f"{game.game_id()}.db", markov=markov, **kw)
 
     def close(self) -> None:
         """Close the database connection."""
