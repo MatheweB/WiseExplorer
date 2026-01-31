@@ -107,7 +107,6 @@ class TestStateIndependence:
 
     def test_multiple_games_independent(self):
         """Multiple created games have independent state."""
-        import numpy as np
         
         for game_name in GAMES:
             game1 = create_game(game_name)

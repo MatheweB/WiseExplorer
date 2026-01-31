@@ -131,8 +131,14 @@ def start_simulations(
 
             # Final stats
             info = memory.get_info()
+            if memory.is_markov:
+                base_units_num = info['unique_states']
+                base_units_text = "unique states"
+            else:
+                base_units_num = info['transitions']
+                base_units_text = "transitions"
             print(
-                f"Final: {info['transitions']} transitions, "
+                f"Final: {base_units_num} {base_units_text}, "
                 f"{info['anchors']} anchors, "
                 f"{info['total_samples']} samples"
             )

@@ -55,7 +55,7 @@ class SimulationRunner:
             self._pool = Pool(
                 processes=self.num_workers,
                 initializer=worker_init,
-                initargs=(str(self.memory.db_path),),
+                initargs=(str(self.memory.db_path), self.memory.is_markov),
             )
         return self._pool
 

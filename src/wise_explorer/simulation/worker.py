@@ -7,7 +7,9 @@ database. Workers receive GameJob objects and return JobResult objects.
 
 from __future__ import annotations
 
-from typing import Dict, List, Optional, TYPE_CHECKING
+from typing import Dict, List, Optional
+
+from wise_explorer.memory import open_readonly
 
 from wise_explorer.simulation.jobs import GameJob, JobResult, MoveRecord
 from wise_explorer.memory.game_memory import GameMemory
@@ -17,10 +19,10 @@ from wise_explorer.memory.game_memory import GameMemory
 _worker_memory: Optional["GameMemory"] = None
 
 
-def worker_init(db_path: str) -> None:
+def worker_init(db_path: str, is_markov: bool = False) -> None:
     """Initialize read-only database connection for worker process."""
     global _worker_memory
-    _worker_memory = GameMemory(db_path, read_only=True)
+    _worker_memory = open_readonly(db_path, is_markov)
 
 
 def run_game(job: GameJob) -> JobResult:

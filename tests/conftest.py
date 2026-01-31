@@ -17,8 +17,7 @@ import pytest
 from wise_explorer.agent.agent import Agent, State
 from wise_explorer.core.types import Stats
 from wise_explorer.games.game_base import GameBase
-from wise_explorer.games.game_state import GameState
-from wise_explorer.memory.game_memory import GameMemory
+from wise_explorer.memory import TransitionMemory, MarkovMemory, GameMemory
 
 
 # =============================================================================
@@ -124,8 +123,35 @@ def agent_swarms(two_player_game: GameBase) -> Dict[int, List[Agent]]:
 
 @pytest.fixture
 def memory(temp_db_path: Path) -> Generator[GameMemory, None, None]:
-    """GameMemory instance with temporary database."""
-    mem = GameMemory(temp_db_path)
+    """TransitionMemory instance (default for most tests)."""
+    mem = TransitionMemory(temp_db_path)
+    yield mem
+    mem.close()
+
+
+@pytest.fixture
+def transition_memory(temp_db_path: Path) -> Generator[TransitionMemory, None, None]:
+    """Explicit TransitionMemory instance."""
+    mem = TransitionMemory(temp_db_path)
+    yield mem
+    mem.close()
+
+
+@pytest.fixture
+def markov_memory(temp_db_path: Path) -> Generator[MarkovMemory, None, None]:
+    """MarkovMemory instance."""
+    mem = MarkovMemory(temp_db_path)
+    yield mem
+    mem.close()
+
+
+@pytest.fixture(params=["transition", "markov"])
+def any_memory(request, temp_db_path: Path) -> Generator[GameMemory, None, None]:
+    """Parametrized fixture that runs tests with both memory types."""
+    if request.param == "transition":
+        mem = TransitionMemory(temp_db_path)
+    else:
+        mem = MarkovMemory(temp_db_path)
     yield mem
     mem.close()
 
