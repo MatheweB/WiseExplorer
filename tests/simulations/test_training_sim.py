@@ -6,8 +6,6 @@ Tests training orchestration with prune/exploit phases.
 
 from unittest.mock import MagicMock
 
-import pytest
-
 from wise_explorer.simulation.training import run_training, run_training_interleaved
 
 

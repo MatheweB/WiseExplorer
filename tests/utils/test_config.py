@@ -21,7 +21,7 @@ class TestGameRegistry:
 
     def test_game_classes_callable(self):
         """Registered game classes can be instantiated."""
-        for name, game_class in GAMES.items():
+        for _name, game_class in GAMES.items():
             game = game_class()
             assert game is not None
             assert hasattr(game, 'game_id')
@@ -37,7 +37,7 @@ class TestInitialStates:
 
     def test_have_board_and_player(self):
         """Initial states have board and current_player."""
-        for name, state in INITIAL_STATES.items():
+        for _name, state in INITIAL_STATES.items():
             assert hasattr(state, 'board')
             assert hasattr(state, 'current_player')
             assert state.current_player == 1

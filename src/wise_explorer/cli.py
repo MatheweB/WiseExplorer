@@ -5,7 +5,7 @@ Command-line interface for game AI training and play.
 import argparse
 
 from wise_explorer.api import start_simulations
-from wise_explorer.memory import GameMemory
+import wise_explorer.memory as Memory
 from wise_explorer.utils.config import Config, GAMES, MEMORY_DIR
 from wise_explorer.utils.factory import create_game, create_agent_swarms
 
@@ -107,7 +107,7 @@ def main() -> None:
     agent_swarms = create_agent_swarms(players, config.num_agents)
     
     # Set up memory
-    memory = GameMemory.for_game(game, base_dir=MEMORY_DIR, markov=args.markov)
+    memory = Memory.for_game(game, base_dir=MEMORY_DIR, markov=args.markov)
     
     # Determine human players
     human_players = parse_human_players(args.players, game.num_players(), game.game_id(), args.self_play)
