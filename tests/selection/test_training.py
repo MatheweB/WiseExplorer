@@ -15,25 +15,11 @@ from wise_explorer.selection.training import (
     _exploration_weight,
     select_anchor,
     select_move,
-    INF_WEIGHT,
 )
 
 
 class TestExplorationWeight:
     """_exploration_weight function tests."""
-
-    def test_infinite_for_zero_samples(self):
-        """Zero samples returns INF_WEIGHT."""
-        assert _exploration_weight(Stats(0, 0, 0), pick_best=True) == INF_WEIGHT
-
-    def test_infinite_for_single_sample(self):
-        """Single sample returns INF_WEIGHT."""
-        assert _exploration_weight(Stats(1, 0, 0), pick_best=True) == INF_WEIGHT
-
-    def test_finite_for_many_samples(self, winning_stats: Stats):
-        """Many samples returns finite weight."""
-        weight = _exploration_weight(winning_stats, pick_best=True)
-        assert 0 < weight < INF_WEIGHT
 
     def test_pick_best_vs_pick_prune(self):
         """pick_best affects weight direction."""
@@ -72,10 +58,10 @@ class TestSelectAnchor:
         assert len(selections) > 1
 
     def test_favors_unexplored(self):
-        """Unexplored anchors (infinite uncertainty) are strongly favored."""
+        """Unexplored anchors are favored over losing anchors."""
         stats = {
-            0: Stats(1000, 500, 500),  # Very certain
-            1: Stats(0, 0, 0),          # Unexplored
+            0: Stats(0, 0, 5000),  # Very certain loss
+            1: Stats(0, 0, 0),     # Unexplored
         }
         
         random.seed(42)

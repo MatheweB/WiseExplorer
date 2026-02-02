@@ -13,7 +13,6 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-from wise_explorer.core.types import UNEXPLORED_ANCHOR_ID
 from wise_explorer.selection import training, inference
 
 if TYPE_CHECKING:
@@ -82,9 +81,8 @@ def select_move_for_training(
     """
     Select move for training.
 
-    Probabilistic weighted by: std_error + promise
+    Probabilistic weighted by promise
 
-    - Unknowns (std_error=∞) always prioritized
     - High uncertainty → explored
     - Low uncertainty → score dominates
 

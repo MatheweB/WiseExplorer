@@ -16,7 +16,7 @@ from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
 
 import numpy as np
 
-from wise_explorer.core.types import Stats, OUTCOME_INDEX, UNEXPLORED_ANCHOR_ID
+from wise_explorer.core.types import Stats, OUTCOME_INDEX
 from wise_explorer.core.hashing import hash_board
 from wise_explorer.core.bayes import compatible
 from wise_explorer.memory.anchor_manager import AnchorManager
@@ -26,7 +26,7 @@ if TYPE_CHECKING:
     from wise_explorer.games.game_base import GameBase
 
 Counts = Tuple[int, int, int]
-
+UNEXPLORED_ANCHOR_ID = -999
 
 class GameMemory(ABC):
     """Abstract base for game memory implementations."""
@@ -38,6 +38,7 @@ class GameMemory(ABC):
         self.db_path = Path(db_path).resolve()
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.read_only = read_only
+        self._closed = False
 
         self._anchor_stats_cache: Dict[int, Stats] = {}
         self._anchor_id_cache: Dict[Any, Optional[int]] = {}
@@ -350,10 +351,14 @@ class GameMemory(ABC):
 
     def close(self) -> None:
         """Close the database connection."""
+        if self._closed:
+            return
+        self._closed = True
+
         self._clear_caches()
         try:
             self.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-        except:
+        except Exception:
             pass
         self.conn.close()
 

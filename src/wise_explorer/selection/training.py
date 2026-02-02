@@ -5,9 +5,8 @@ Training uses probabilistic selection weighted by uncertainty and promise
 to ensure diverse exploration while focusing on promising lines.
 
 The Formula:
-    weight = std_error + promise
+    weight = promise
     
-    - std_error is UNCAPPED (infinity for unknowns → always explored)
     - promise = mean_score (exploit) or 1-mean_score (prune)
     - Probabilistic selection maintains diversity
 """
@@ -22,28 +21,19 @@ import numpy as np
 from wise_explorer.core.types import Stats
 
 
-# Large weight for infinite uncertainty (ensures unknowns are explored)
-INF_WEIGHT = 100.0
-
-
 def _exploration_weight(stats: Stats, pick_best: bool) -> float:
     """
     Calculate exploration weight for a move/anchor.
     
-    weight = std_error + promise
+    weight = promise
     
     Args:
         stats: Move statistics
-        pick_best: If True, promise = mean_score (exploit mode)
-                  If False, promise = 1 - mean_score (prune mode)
+        pick_best:  If True, promise = mean_score (exploit mode)
+                    If False, promise = 1 - mean_score (prune mode)
     """
-    se = stats.std_error
-    
-    if se == float('inf'):
-        return INF_WEIGHT
-    
     promise = stats.mean_score if pick_best else (1.0 - stats.mean_score)
-    return se + promise
+    return promise
 
 
 def select_anchor(anchor_stats: Dict[int, Stats], pick_best: bool) -> int:
