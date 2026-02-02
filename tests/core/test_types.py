@@ -4,7 +4,6 @@ Tests for wise_explorer.core.types
 Tests Stats class and scoring calculations - central to move evaluation.
 """
 
-import math
 import pytest
 
 from wise_explorer.agent.agent import State
@@ -12,8 +11,9 @@ from wise_explorer.core.types import (
     Stats,
     W_WEIGHT, T_WEIGHT, L_WEIGHT,
     SCORE_MIN, SCORE_MAX, SCORE_RANGE,
-    OUTCOME_INDEX, UNEXPLORED_ANCHOR_ID,
+    OUTCOME_INDEX
 )
+from wise_explorer.memory.game_memory import UNEXPLORED_ANCHOR_ID
 
 
 class TestConstants:
@@ -108,21 +108,16 @@ class TestStatsMeanScore:
 class TestStatsStdError:
     """Tests for Stats.std_error property."""
 
-    def test_std_error_infinite_for_low_samples(self, zero_stats):
-        """Low sample counts have infinite std_error."""
-        assert zero_stats.std_error == float('inf')
-        assert Stats(1, 0, 0).std_error == float('inf')
-
-    def test_std_error_finite_for_many_samples(self, winning_stats):
-        """Many samples have finite std_error."""
-        assert math.isfinite(winning_stats.std_error)
-        assert winning_stats.std_error >= 0.0
-
     def test_std_error_decreases_with_samples(self):
         """Std error decreases as sample count increases."""
         small = Stats(10, 5, 5)
         large = Stats(100, 50, 50)
         assert large.std_error < small.std_error
+
+    def test_std_error_finite_for_zero_stats(self, zero_stats):
+        """Zero stats have finite std_error (uses pseudocounts)."""
+        assert zero_stats.std_error < 1.0
+        assert zero_stats.std_error > 0.0
 
 
 class TestStatsUtility:
@@ -142,14 +137,16 @@ class TestStatsUtility:
 class TestStatsCertainty:
     """Tests for Stats.certainty property."""
 
-    def test_certainty_zero_for_low_samples(self, zero_stats):
-        """Low sample counts have zero certainty."""
-        assert zero_stats.certainty == 0.0
-        assert Stats(1, 0, 0).certainty == 0.0
+    def test_certainty_low_for_few_samples(self, zero_stats):
+        """Low sample counts have low certainty."""
+        # Certainty = 1 - std_error, where std_error is ~0.27 for zero stats
+        assert zero_stats.certainty < 0.8
+        assert Stats(1, 0, 0).certainty < 0.8
 
-    def test_certainty_in_range(self, winning_stats):
+    def test_certainty_in_range(self, winning_stats, zero_stats):
         """Certainty is in [0, 1]."""
         assert 0.0 <= winning_stats.certainty <= 1.0
+        assert 0.0 <= zero_stats.certainty <= 1.0
 
     def test_certainty_increases_with_samples(self):
         """Certainty increases with more samples."""

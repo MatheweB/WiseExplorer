@@ -29,7 +29,7 @@ from wise_explorer.api import (
     DEFAULT_WORKER_COUNT,
 )
 
-from wise_explorer.core import Stats, UNEXPLORED_ANCHOR_ID
+from wise_explorer.core import Stats
 
 __version__ = "1.0.0"
 
@@ -43,5 +43,4 @@ __all__ = [
     "DEFAULT_WORKER_COUNT",
     # Types
     "Stats",
-    "UNEXPLORED_ANCHOR_ID",
 ]
