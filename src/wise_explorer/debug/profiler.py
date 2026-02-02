@@ -30,8 +30,10 @@ Usage:
 """
 
 import cProfile
+import os
 import pstats
 import io
+import re
 import time
 import functools
 from contextlib import contextmanager
@@ -40,6 +42,63 @@ from dataclasses import dataclass
 
 from wise_explorer.core.hashing import hash_board
 from wise_explorer.selection import select_move_for_training
+
+
+# ---------------------------------------------------------------------------
+# Path Helpers
+# ---------------------------------------------------------------------------
+
+def _find_project_root() -> Optional[str]:
+    """Find the project root by walking up from wise_explorer's location."""
+    import wise_explorer
+    pkg_dir = os.path.dirname(os.path.abspath(wise_explorer.__file__))
+    # pkg_dir is .../src/wise_explorer — go up to project root
+    # Walk up until we leave 'src' or hit a pyproject.toml/setup.py
+    candidate = pkg_dir
+    for _ in range(5):
+        parent = os.path.dirname(candidate)
+        if parent == candidate:
+            break
+        candidate = parent
+        if os.path.exists(os.path.join(candidate, "pyproject.toml")) or \
+           os.path.exists(os.path.join(candidate, "setup.py")):
+            return candidate + os.sep
+    # Fallback: two levels up from wise_explorer package
+    return os.path.dirname(os.path.dirname(pkg_dir)) + os.sep
+
+
+_project_root: Optional[str] = None
+
+
+def _get_project_root() -> str:
+    """Cached project root lookup."""
+    global _project_root
+    if _project_root is None:
+        _project_root = _find_project_root() or ""
+    return _project_root
+
+
+def _relativize_profile_output(text: str) -> str:
+    """
+    Replace absolute project paths with relative ones in cProfile output.
+    
+    Project files:  /Users/x/project/src/wise_explorer/core/foo.py → src/wise_explorer/core/foo.py
+    External files:  /Users/x/.../site-packages/numpy/core/foo.py  → numpy/core/foo.py
+    Stdlib files:    /usr/lib/python3.12/foo.py                    → foo.py
+    """
+    root = _get_project_root()
+
+    # Strip project root prefix (keeps src/wise_explorer/... structure)
+    if root:
+        text = text.replace(root, "")
+
+    # Collapse site-packages paths to just package-relative
+    text = re.sub(r'[^\s(]*/site-packages/', '', text)
+
+    # Collapse stdlib paths to just filename
+    text = re.sub(r'/[^\s(]*/lib/python[\d.]*/(?!site-packages)', '', text)
+
+    return text
 
 
 # ---------------------------------------------------------------------------
@@ -216,7 +275,7 @@ def _print_profile_view(pr: cProfile.Profile, sort_by: str, top_n: int, title: s
     print(f"{'-'*80}")
     
     stats.print_stats(top_n)
-    print(stream.getvalue())
+    print(_relativize_profile_output(stream.getvalue()))
 
 
 def profile_function(func: Callable, *args, top_n: int = 30, **kwargs):
@@ -230,7 +289,7 @@ def profile_function(func: Callable, *args, top_n: int = 30, **kwargs):
     stats = pstats.Stats(pr, stream=stream)
     stats.sort_stats("cumulative")
     stats.print_stats(top_n)
-    print(stream.getvalue())
+    print(_relativize_profile_output(stream.getvalue()))
     
     return result
 
@@ -406,7 +465,7 @@ def profile_evaluate_moves(memory, game, num_calls: int = 100):
     stats = pstats.Stats(pr, stream=stream)
     stats.sort_stats("cumulative")
     stats.print_stats(25)
-    print(stream.getvalue())
+    print(_relativize_profile_output(stream.getvalue()))
 
 
 def profile_single_game(game, memory, max_turns: int = 50):
@@ -458,44 +517,69 @@ def profile_single_game(game, memory, max_turns: int = 50):
 def profile_database(memory, num_queries: int = 500):
     """
     Profile database query performance.
+    
+    Works with both TransitionMemory and MarkovMemory.
     """
     import random
-    
+    from wise_explorer.memory.transition_memory import TransitionMemory
+
     print("\n" + "=" * 80)
     print(f"{'DATABASE PROFILE':^80}")
     print("=" * 80)
-    
+
+    is_transition = isinstance(memory, TransitionMemory)
+    mode_label = "transition" if is_transition else "markov"
+    print(f"Mode: {mode_label}")
+
     # Get sample keys
-    rows = memory.conn.execute(
-        "SELECT from_hash, to_hash FROM transitions LIMIT 100"
-    ).fetchall()
-    
+    if is_transition:
+        rows = memory.conn.execute(
+            "SELECT from_hash, to_hash FROM transitions LIMIT 100"
+        ).fetchall()
+    else:
+        rows = memory.conn.execute(
+            "SELECT state_hash FROM states LIMIT 100"
+        ).fetchall()
+
     if not rows:
         print("No data in database to profile.")
         return
-    
+
     print(f"Running {num_queries} queries...\n")
-    
+
     clear_timing_stats()
-    
+
     for _ in range(num_queries):
-        from_h, to_h = random.choice(rows)
-        scoring_key = memory._scoring_key(from_h, to_h)
-        
         # Clear caches to force real queries
-        memory._transition_cache.clear()
         memory._anchor_id_cache.clear()
         memory._anchor_stats_cache.clear()
-        
-        with timed("get_transitions_from"):
-            _ = memory.get_transitions_from(from_h)
-        
-        with timed("get_anchor_id"):
-            _ = memory.get_anchor_id(scoring_key)
-        
-        with timed("get_anchor_stats"):
-            _ = memory.get_anchor_stats(scoring_key)
-    
+
+        if is_transition:
+            from_h, to_h = random.choice(rows)
+
+            with timed("get_move_stats"):
+                _ = memory.get_move_stats(from_h, to_h)
+
+            with timed("get_anchor_id"):
+                _ = memory.get_anchor_id(from_h, to_h)
+
+            with timed("get_anchor_stats"):
+                _ = memory.get_anchor_stats(from_h, to_h)
+
+            with timed("get_transitions_from"):
+                _ = memory.get_transitions_from(from_h)
+        else:
+            state_hash = random.choice(rows)[0]
+
+            with timed("get_state_stats"):
+                _ = memory.get_state_stats(state_hash)
+
+            with timed("get_anchor_id"):
+                _ = memory.get_anchor_id("_", state_hash)
+
+            with timed("get_anchor_stats"):
+                _ = memory.get_anchor_stats("_", state_hash)
+
     print_timing_summary()
 
 

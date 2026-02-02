@@ -22,6 +22,7 @@ OPTIONS
 -------
     --full      Run comprehensive component-by-component breakdown
                 (slower but more detailed)
+    --markov    Use MarkovMemory instead of TransitionMemory
 
 EXAMPLES
 --------
@@ -33,6 +34,9 @@ EXAMPLES
 
     # Profile MiniChess with 50 simulations
     python scripts/benchmark.py minichess 50
+
+    # Profile using Markov mode
+    python scripts/benchmark.py tic_tac_toe 50 --markov
 
     # Full breakdown of all components (slower)
     python scripts/benchmark.py minichess 100 --full
@@ -74,7 +78,7 @@ Common bottlenecks and fixes:
 |----------------------------------|---------------------------|-------------------------------|
 | deep_clone > 0.1ms               | Object dtype arrays       | Use int8 boards               |
 | hash_board > 0.05ms              | repr() on object arrays   | Use tobytes() for int arrays  |
-| get_transitions_from > 0.1ms     | Missing DB index          | Add index, enable caching     |
+| get_move_stats > 0.1ms           | Missing DB index          | Add index, enable caching     |
 | evaluate_moves > 5ms             | Too many clones per call  | Batch operations, cache more  |
 | High variance between runs       | DB write contention       | Batch commits, use WAL mode   |
 
@@ -119,7 +123,7 @@ from pathlib import Path
 
 from wise_explorer.utils.config import GAMES, MEMORY_DIR
 from wise_explorer.utils.factory import create_game, create_agent_swarms
-from wise_explorer.memory.game_memory import GameMemory
+from wise_explorer.memory import for_game, TransitionMemory, MarkovMemory
 from wise_explorer.simulation.runner import SimulationRunner
 from wise_explorer.debug.profiler import (
     profile_simulations,
@@ -146,6 +150,7 @@ def main():
     game_name = "tic_tac_toe"
     num_sims = 50
     do_full = False
+    use_markov = False
     
     args = [a for a in sys.argv[1:] if not a.startswith("-")]
     flags = [a for a in sys.argv[1:] if a.startswith("-")]
@@ -153,6 +158,8 @@ def main():
     for flag in flags:
         if flag == "--full":
             do_full = True
+        elif flag == "--markov":
+            use_markov = True
         elif flag not in ("-h", "--help"):
             print(f"Unknown flag: {flag}")
             print("Use --help for usage information")
@@ -174,8 +181,10 @@ def main():
         print(f"Available: {', '.join(GAMES.keys())}")
         sys.exit(1)
     
+    mode_label = "markov" if use_markov else "transition"
+
     print(f"\n{'='*80}")
-    print(f"Profiling: {game_name}")
+    print(f"Profiling: {game_name} ({mode_label} mode)")
     print(f"Simulations: {num_sims}")
     print(f"{'='*80}")
     
@@ -184,14 +193,21 @@ def main():
     players = list(range(1, game.num_players() + 1))
     swarms = create_agent_swarms(players, agents_per_player=4)
     
-    db_path = MEMORY_DIR / f"{game_name}.db"
-    memory = GameMemory(db_path, read_only=False)
+    memory = for_game(game, base_dir=MEMORY_DIR, markov=use_markov)
     
-    print(f"\nDB: {db_path}")
+    try:
+        db_display = memory.db_path.relative_to(Path.cwd())
+    except ValueError:
+        db_display = memory.db_path
+    print(f"\nDB: {db_display}")
+    print(f"Mode: {mode_label}")
     info = memory.get_info()
-    print(f"Transitions: {info['transitions']:,}")
     print(f"Anchors: {info['anchors']:,}")
     print(f"Samples: {info['total_samples']:,}")
+    if not use_markov:
+        print(f"Transitions: {info['transitions']:,}")
+    else:
+        print(f"States: {info['unique_states']:,}")
     
     runner = SimulationRunner(memory, num_workers=4)
     
