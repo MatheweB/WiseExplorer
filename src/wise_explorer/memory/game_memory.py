@@ -211,12 +211,15 @@ class GameMemory(ABC):
         return {"anchors_with_moves": dict(anchors_with_moves), "anchor_stats": anchor_stats}
 
     def _compute_move_hashes(self, game: "GameBase", valid_moves: List[np.ndarray]) -> List[Tuple[np.ndarray, str]]:
-        """Generate (move, destination_hash) pairs."""
+        """Generate (move, destination_hash) pairs.
+
+        Moves come from valid_moves() so validation is skipped.
+        """
         results = []
         for move in valid_moves:
             clone = game.deep_clone()
             try:
-                clone.apply_move(move)
+                clone.apply_move(move, validated=True)
                 results.append((move, hash_board(clone.get_state().board)))
             except (ValueError, IndexError):
                 continue
@@ -244,7 +247,7 @@ class GameMemory(ABC):
             for move, board, player in moves:
                 from_hash = hash_board(board)
                 game.set_state(GameState(board.copy(), player))
-                game.apply_move(move)
+                game.apply_move(move, validated=True)
                 to_hash = hash_board(game.get_state().board)
                 transitions[(from_hash, to_hash)][outcome_idx] += 1
 
@@ -268,19 +271,6 @@ class GameMemory(ABC):
         self._anchor_id_cache.clear()
 
     # -------------------------------------------------------------------------
-    # Lifecycle
-    # -------------------------------------------------------------------------
-
-    def close(self) -> None:
-        """Close the database connection."""
-        self._clear_caches()
-        try:
-            self.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-        except:
-            pass
-        self.conn.close()
-
-    # -------------------------------------------------------------------------
     # Debug
     # -------------------------------------------------------------------------
 
@@ -300,7 +290,7 @@ class GameMemory(ABC):
         if chosen_move is not None:
             clone = game.deep_clone()
             try:
-                clone.apply_move(chosen_move)
+                clone.apply_move(chosen_move, validated=True)
                 chosen_to_hash = hash_board(clone.get_state().board)
             except:
                 pass
@@ -308,7 +298,7 @@ class GameMemory(ABC):
         debug_rows = []
         for move, to_hash in self._compute_move_hashes(game, valid_moves):
             clone = game.deep_clone()
-            clone.apply_move(move)
+            clone.apply_move(move, validated=True)
 
             diff = [
                 (i, state.board[i], clone.get_state().board[i])
@@ -356,6 +346,15 @@ class GameMemory(ABC):
     # -------------------------------------------------------------------------
     # Lifecycle
     # -------------------------------------------------------------------------
+
+    def close(self) -> None:
+        """Close the database connection."""
+        self._clear_caches()
+        try:
+            self.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        except:
+            pass
+        self.conn.close()
 
     def __enter__(self):
         return self

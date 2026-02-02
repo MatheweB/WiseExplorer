@@ -71,10 +71,15 @@ class GameBase(ABC):
         pass
 
     @abstractmethod
-    def apply_move(self, move: NDArray) -> None:
+    def apply_move(self, move: NDArray, *, validated: bool = False) -> None:
         """
-        Apply a move to the game.
-        Mutates internal state.
+        Apply a move to the game. Mutates internal state.
+
+        Args:
+            move: The move to apply.
+            validated:  If True, skip validation (caller guarantees
+                        the move came from valid_moves()). Games may
+                        ignore this hint if validation is already cheap.
         """
         pass
 
@@ -90,7 +95,7 @@ class GameBase(ABC):
             WIN / TIE / NEUTRAL / LOSS
         """
         pass
-    
+
     @abstractmethod
     def get_cell_strings(self) -> dict[int, str]:
         """

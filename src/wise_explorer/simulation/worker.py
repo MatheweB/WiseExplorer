@@ -10,10 +10,9 @@ from __future__ import annotations
 from typing import Dict, List, Optional
 
 from wise_explorer.memory import open_readonly
-
+from wise_explorer.selection import select_move_for_training
 from wise_explorer.simulation.jobs import GameJob, JobResult, MoveRecord
 from wise_explorer.memory.game_memory import GameMemory
-
 
 # Global worker state (initialized per process)
 _worker_memory: Optional["GameMemory"] = None
@@ -30,8 +29,6 @@ def run_game(job: GameJob) -> JobResult:
     if _worker_memory is None:
         raise RuntimeError("Worker not initialized")
 
-    from wise_explorer.selection import select_move_for_training
-
     game = job.game
     players = sorted(job.player_map.keys())
     moves: Dict[int, List[MoveRecord]] = {pid: [] for pid in players}
@@ -45,8 +42,8 @@ def run_game(job: GameJob) -> JobResult:
         is_prune = pid in job.prune_players
 
         move = select_move_for_training(game, _worker_memory, is_prune)
-        
-        game.apply_move(move)
+        game.apply_move(move, validated=True)
+
         moves[pid].append(MoveRecord(move, board_before, pid))
 
     return JobResult(
