@@ -47,7 +47,7 @@ wise-explorer
 wise-explorer --game minichess --epochs 200
 
 # Watch AI play itself
-wise-explorer --ai-only
+wise-explorer --self-play
 
 # Use existing knowledge without training
 wise-explorer --no-training

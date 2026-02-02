@@ -324,17 +324,18 @@ class GameMemory(ABC):
                     "anchor_score": anchor.mean_score,
                 })
             else:
+                prior = Stats()  # (0,0,0) — prior score via pseudocounts
                 debug_rows.append({
                     "diff": diff,
                     "move": move,
                     "is_selected": to_hash == chosen_to_hash,
                     "direct_total": 0,
                     "direct_W": 0, "direct_T": 0, "direct_L": 0,
-                    "direct_score": 0.0,
+                    "direct_score": prior.mean_score,
                     "anchor_id": None,
                     "anchor_total": 0,
                     "anchor_W": 0, "anchor_T": 0, "anchor_L": 0,
-                    "anchor_score": 0.0,
+                    "anchor_score": prior.mean_score,
                     "unexplored": True,
                 })
 
