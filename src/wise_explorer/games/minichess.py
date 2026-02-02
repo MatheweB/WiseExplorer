@@ -182,42 +182,83 @@ class MiniChess(GameBase):
     def is_valid_move(self, move: np.ndarray | list | tuple) -> bool:
         """
         Check whether `move` is a legal move for the current player.
-        Accepts array-like [fr, fc, tr, tc].
+
+        Uses per-piece movement rules directly — O(board_dim) for sliding
+        pieces, O(1) for pawns and king. Does not regenerate the full
+        move list.
         """
-        # Normalize move to a tuple of ints
         try:
             fr, fc, tr, tc = int(move[0]), int(move[1]), int(move[2]), int(move[3])
         except Exception:
             return False
 
-        # Basic bounds check
-        if not (0 <= fr < self.ROWS and 0 <= fc < self.COLS and 0 <= tr < self.ROWS and 0 <= tc < self.COLS):
+        # Bounds + identity check
+        if not (0 <= fr < self.ROWS and 0 <= fc < self.COLS
+                and 0 <= tr < self.ROWS and 0 <= tc < self.COLS):
+            return False
+        if fr == tr and fc == tc:
             return False
 
         board = self.state.board
         piece = int(board[fr, fc])
-
-        # From square must not be empty and must belong to the current player
         if piece == 0:
             return False
 
+        # Ownership
         is_p1 = self.state.current_player == 1
         if (is_p1 and piece < 0) or (not is_p1 and piece > 0):
             return False
 
-        # Instead of reimplementing all movement rules, check membership in valid_moves
-        vm = self.valid_moves()
-        if vm.shape[0] == 0:
+        # Target must be empty or enemy
+        target = int(board[tr, tc])
+        if target != 0:
+            if (is_p1 and target > 0) or (not is_p1 and target < 0):
+                return False
+
+        piece_type = abs(piece)
+        dr = tr - fr
+        dc = tc - fc
+
+        if piece_type == PAWN:
+            fwd = 1 if is_p1 else -1
+            if dr != fwd:
+                return False
+            if dc == 0:
+                return target == 0       # Forward: must be empty
+            if abs(dc) == 1:
+                return target != 0       # Diagonal: must capture
             return False
 
-        # Vectorized membership test
-        # Convert move to array and compare rows
-        target_row = np.array([fr, fc, tr, tc], dtype=np.int32)
-        matches = np.all(vm == target_row, axis=1)
-        return bool(np.any(matches))
+        if piece_type == KING:
+            return abs(dr) <= 1 and abs(dc) <= 1
 
-    def apply_move(self, move: np.ndarray | list | tuple) -> None:
+        # Sliding pieces (CASTLE, QUEEN) — check direction + clear path
+        if piece_type == CASTLE:
+            if dr != 0 and dc != 0:
+                return False             # Orthogonal only
+        elif piece_type == QUEEN:
+            if dr != 0 and dc != 0 and abs(dr) != abs(dc):
+                return False             # Must be straight line
+
+        # Walk the path — every intermediate square must be empty
+        step_r = (1 if dr > 0 else -1) if dr != 0 else 0
+        step_c = (1 if dc > 0 else -1) if dc != 0 else 0
+        cr, cc = fr + step_r, fc + step_c
+        while cr != tr or cc != tc:
+            if board[cr, cc] != 0:
+                return False
+            cr += step_r
+            cc += step_c
+
+        return True
+
+    def apply_move(self, move: np.ndarray | list | tuple, *, validated: bool = False) -> None:
         """Apply move: [from_r, from_c, to_r, to_c].
+
+        Args:
+            move: The move to apply.
+            validated:  If True, skip validation (caller guarantees legality).
+                        Use when move was already selected from valid_moves().
 
         Raises:
             RuntimeError: if the game is already over.
@@ -226,18 +267,14 @@ class MiniChess(GameBase):
         if self.is_over():
             raise RuntimeError("Cannot apply move: the game is already over.")
 
-        # Normalize move to ints
-        try:
-            fr, fc, tr, tc = int(move[0]), int(move[1]), int(move[2]), int(move[3])
-        except Exception as exc:
-            raise exc
+        fr, fc, tr, tc = int(move[0]), int(move[1]), int(move[2]), int(move[3])
 
-        # Validate
-        if not self.is_valid_move((fr, fc, tr, tc)):
-            raise ValueError(f"Invalid move {(fr, fc, tr, tc)} for player {self.state.current_player}")
+        if not validated and not self.is_valid_move((fr, fc, tr, tc)):
+            raise ValueError(
+                f"Invalid move {(fr, fc, tr, tc)} for player {self.state.current_player}"
+            )
 
         board = self.state.board
-        piece = board[fr, fc]
         target = board[tr, tc]
 
         # Check if capturing King
@@ -245,9 +282,9 @@ class MiniChess(GameBase):
             self.winner = self.state.current_player
 
         # Execute move
-        board[tr, tc] = piece
+        board[tr, tc] = board[fr, fc]
         board[fr, fc] = 0
-        
+
         self.move_count += 1
         self.state.current_player = 3 - self.state.current_player
 

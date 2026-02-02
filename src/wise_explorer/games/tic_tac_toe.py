@@ -71,10 +71,10 @@ class TicTacToe(GameBase):
         """Return empty cell positions as array of shape (N, 2)."""
         return np.argwhere(self.state.board == 0)
 
-    def apply_move(self, move: np.ndarray) -> None:
+    def apply_move(self, move: np.ndarray, *, validated: bool = False) -> None:
         r, c = int(move[0]), int(move[1])
-        
-        if self.state.board[r, c] != 0:
+
+        if not validated and self.state.board[r, c] != 0:
             raise ValueError(f"Cell ({r},{c}) is occupied")
 
         player = self.state.current_player
@@ -112,7 +112,6 @@ class TicTacToe(GameBase):
 
     def state_string(self) -> str:
         board = self.state.board
-        
         lines = ["╭───┬───┬───╮"]
         for i in range(3):
             row = "│ " + " │ ".join(CELL_STRINGS[board[i, j]] for j in range(3)) + " │"
@@ -120,5 +119,4 @@ class TicTacToe(GameBase):
             if i < 2:
                 lines.append("├───┼───┼───┤")
         lines.append("╰───┴───┴───╯")
-        
         return "\n".join(lines)
