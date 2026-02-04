@@ -79,6 +79,7 @@ class TransitionMemory(GameMemory):
         )
 
     def _commit_outcomes(self, transitions: Dict[Tuple[str, str], List[int]], cur: sqlite3.Cursor) -> Tuple[List, Dict]:
+        """Commit outcomes and return keys/deltas for anchor manager."""
         cur.executemany(
             """INSERT INTO transitions (from_hash, to_hash, wins, ties, losses)
             VALUES (?,?,?,?,?)

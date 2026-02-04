@@ -1,5 +1,8 @@
 """
-Parallel simulation runner with robust process cleanup.
+Parallel simulation runner with synchronized wave-based learning.
+
+Each wave of games completes and writes before the next wave starts,
+ensuring fresh data propagates between waves.
 """
 
 from __future__ import annotations
@@ -11,7 +14,7 @@ import random
 import signal
 import sys
 from multiprocessing.pool import Pool
-from typing import Dict, List, Optional, Set, TYPE_CHECKING
+from typing import Dict, List, Optional, Set, Tuple, TYPE_CHECKING
 
 from wise_explorer.agent.agent import State
 from wise_explorer.simulation.jobs import GameJob, JobResult
@@ -78,16 +81,17 @@ if mp.current_process().name == 'MainProcess':
 # ---------------------------------------------------------------------------
 
 class SimulationRunner:
-    """Manages parallel game simulations."""
+    """
+    Manages parallel game simulations with synchronized wave-based learning.
+    
+    Games run in waves of num_workers. Each wave completes and writes to DB
+    before the next wave starts, ensuring subsequent games see updated statistics.
+    """
 
     def __init__(self, memory: "GameMemory", num_workers: int = DEFAULT_WORKER_COUNT):
         self.memory = memory
         self.num_workers = num_workers
-        
         self._pool: Optional[Pool] = None
-        self._round_id = 0
-        self._batch_size = num_workers * 2
-        self._games_since_merge = 0
 
         _active_runners.append(self)
         register_memory(memory)
@@ -127,52 +131,44 @@ class SimulationRunner:
         max_turns: int,
         prune_players: Set[int],
     ) -> int:
-        """Run simulations and stream results to memory."""
+        """
+        Run simulations in synchronized waves.
+        
+        Each wave of num_workers games completes fully, writes to DB, and
+        consolidates anchors before the next wave starts. This ensures
+        subsequent games see updated statistics.
+        """
         if num_sims <= 0 or not swarms:
             return 0
 
         pool = self._ensure_pool()
-        jobs = self._make_jobs(swarms, game, num_sims, max_turns, prune_players)
-        chunksize = max(1, len(jobs) // (self.num_workers * 4))
-
-        total = 0
-        pending: List[JobResult] = []
+        all_jobs = self._make_jobs(swarms, game, num_sims, max_turns, prune_players)
+        
+        total_transitions = 0
+        job_idx = 0
 
         try:
-            for result in pool.imap_unordered(run_game, jobs, chunksize=chunksize):
-                pending.append(result)
-
-                if len(pending) >= self._batch_size:
-                    total += self._flush(pending, prune_players)
-                    pending = []
+            while job_idx < len(all_jobs):
+                # Get next wave of jobs (one per worker)
+                wave_jobs = all_jobs[job_idx : job_idx + self.num_workers]
+                
+                # Run wave in parallel, block until all complete
+                wave_results = pool.map(run_game, wave_jobs)
+                
+                # Write results
+                transitions, _swaps = self._commit(wave_results)
+                total_transitions += transitions
+                
+                # Consolidate anchors
+                self.memory.consolidate_anchors()
+                
+                job_idx += len(wave_jobs)
 
         except KeyboardInterrupt:
-            logger.info("Interrupted — committing partial results")
-            if pending:
-                total += self._flush(pending, prune_players)
+            logger.info("Interrupted — partial results already committed")
             raise
 
-        if pending:
-            total += self._flush(pending, prune_players)
-
-        return total
-
-    def _flush(self, results: List[JobResult], prune_players: Set[int]) -> int:
-        """Commit results and adapt batch size."""
-        self._round_id += 1
-        transitions = self._commit(results, prune_players)
-        merges = self.memory.consolidate_anchors()
-        self._adapt_batch_size(merges, len(results))
-        return transitions
-
-    def _adapt_batch_size(self, merges: int, games: int) -> None:
-        self._games_since_merge += games
-
-        if merges > 0:
-            self._games_since_merge = 0
-            self._batch_size = max(self.num_workers, self._batch_size // 2)
-        elif self._games_since_merge > self._batch_size * 3:
-            self._batch_size = min(200, self._batch_size + self.num_workers)
+        return total_transitions
 
     def _make_jobs(
         self,
@@ -198,9 +194,15 @@ class SimulationRunner:
             for i in range(count)
         ]
 
-    def _commit(self, results: List[JobResult], prune_players: Set[int]) -> int:
+    def _commit(self, results: List[JobResult]) -> Tuple[int, int]:
+        """
+        Commit game results to memory.
+        
+        Returns:
+            (transitions_written, transitions_swapped)
+        """
         if not results:
-            return 0
+            return 0, 0
 
         stacks = []
         for result in results:
@@ -213,4 +215,7 @@ class SimulationRunner:
                     outcome,
                 ))
 
-        return self.memory.record_round(results[0].game_class, stacks) if stacks else 0
+        if not stacks:
+            return 0, 0
+        
+        return self.memory.record_round(results[0].game_class, stacks)

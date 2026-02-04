@@ -84,6 +84,7 @@ class MarkovMemory(GameMemory):
         )
 
     def _commit_outcomes(self, transitions: Dict[Tuple[str, str], List[int]], cur: sqlite3.Cursor) -> Tuple[List, Dict]:
+        """Commit outcomes and return keys/deltas for anchor manager."""
         # Aggregate by destination state
         state_updates: Dict[str, List[int]] = defaultdict(lambda: [0, 0, 0])
         for (_, to_hash), counts in transitions.items():

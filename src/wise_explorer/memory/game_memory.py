@@ -230,8 +230,14 @@ class GameMemory(ABC):
     # Recording
     # -------------------------------------------------------------------------
 
-    def record_round(self, game_class: type, stacks: List[Tuple[List[Tuple[Any, np.ndarray, int]], "State"]]) -> int:
-        """Record outcomes from a batch of games."""
+    def record_round(self, game_class: type, stacks: List[Tuple[List[Tuple[Any, np.ndarray, int]], "State"]]) -> Tuple[int, int]:
+        """
+        Record outcomes from a batch of games.
+        
+        Returns:
+            (transitions_written, transitions_swapped) — swap count is the
+            core learning signal indicating how many beliefs changed.
+        """
         if self.read_only:
             raise RuntimeError("Cannot record in read-only mode")
 
@@ -252,19 +258,25 @@ class GameMemory(ABC):
                 to_hash = hash_board(game.get_state().board)
                 transitions[(from_hash, to_hash)][outcome_idx] += 1
 
-        self._commit(transitions)
-        return len(transitions)
+        swaps = self._commit(transitions)
+        return len(transitions), swaps
 
-    def _commit(self, transitions: Dict[Tuple[str, str], List[int]]) -> None:
-        """Write transitions to database with incremental anchor updates."""
+    def _commit(self, transitions: Dict[Tuple[str, str], List[int]]) -> int:
+        """
+        Write transitions to database with incremental anchor updates.
+        
+        Returns:
+            Number of transitions that swapped anchors (beliefs changed).
+        """
         if not transitions:
-            return
+            return 0
 
         cur = self.conn.cursor()
         keys, deltas = self._commit_outcomes(transitions, cur)
-        self._anchors.update(keys, deltas, cur)
+        swaps = self._anchors.update(keys, deltas, cur)
         self.conn.commit()
         self._clear_caches()
+        return swaps
 
     def _clear_caches(self) -> None:
         """Clear all caches."""

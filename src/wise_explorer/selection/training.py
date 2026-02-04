@@ -20,12 +20,13 @@ import numpy as np
 
 from wise_explorer.core.types import Stats
 
-
 def _exploration_weight(stats: Stats, pick_best: bool) -> float:
     """
     Calculate exploration weight for a move/anchor.
     
-    weight = promise
+    The intuition is the higher the score of the move we're looking at, the less we need to
+    try it again (because we're confident about its outcome). So we explore.
+    The same intuition applies for the pruning phase (bad outcome = confident, so explore).
     
     Args:
         stats: Move statistics
@@ -36,35 +37,21 @@ def _exploration_weight(stats: Stats, pick_best: bool) -> float:
     return promise
 
 
-def select_anchor(anchor_stats: Dict[int, Stats], pick_best: bool) -> int:
-    """
-    Probabilistic weighted selection of anchor.
-    
-    Weights combine uncertainty (explore) with promise (exploit/prune).
-    
-    Args:
-        anchor_stats: Dict mapping anchor IDs to their Stats
-        pick_best: If True, favor high scores; if False, favor low scores
-        
-    Returns:
-        Selected anchor ID
-    """
+def select_anchor_deterministic(anchor_stats: Dict[int, Stats], pick_best: bool) -> int:
+    """Deterministic selection of best/worst anchor by mean_score."""
     if not anchor_stats:
         raise ValueError("No anchors provided")
-    if len(anchor_stats) == 1:
-        return next(iter(anchor_stats.keys()))
-    
-    aids = list(anchor_stats.keys())
-    weights = [_exploration_weight(anchor_stats[a], pick_best) for a in aids]
-    return random.choices(aids, weights=weights, k=1)[0]
 
+    if pick_best:
+        return max(anchor_stats.keys(), key=lambda a: anchor_stats[a].mean_score)
+    else:
+        return min(anchor_stats.keys(), key=lambda a: anchor_stats[a].mean_score)
 
-def select_move(moves: List[Tuple[np.ndarray, Stats]], pick_best: bool) -> np.ndarray:
+def select_move_random(moves: List[Tuple[np.ndarray, Stats]], pick_best: bool) -> np.ndarray:
     """
-    Probabilistic weighted selection within anchor.
+    Random selection within anchor.
     
-    All moves in an anchor are statistically equivalent, but we still
-    use weighted selection for diversity.
+    All moves in an anchor are statistically equivalent.
     
     Args:
         moves: List of (move, stats) tuples
@@ -76,5 +63,4 @@ def select_move(moves: List[Tuple[np.ndarray, Stats]], pick_best: bool) -> np.nd
     if len(moves) == 1:
         return moves[0][0]
     
-    weights = [_exploration_weight(stats, pick_best) for _, stats in moves]
-    return random.choices(moves, weights=weights, k=1)[0][0]
+    return random.choice(moves)[0]
