@@ -111,10 +111,17 @@ class AnchorManager:
     # Incremental Update
     # -------------------------------------------------------------------------
 
-    def update(self, keys: List, deltas: Dict, cur: sqlite3.Cursor) -> None:
-        """Update anchor assignments and stats incrementally."""
+    def update(self, keys: List, deltas: Dict, cur: sqlite3.Cursor) -> int:
+        """
+        Update anchor assignments and stats incrementally.
+        
+        Returns:
+            Number of transitions that swapped anchors (beliefs changed).
+            This is the core learning signal — a swap means our classification
+            of that move's "meaning" has changed based on new evidence.
+        """
         if not keys:
-            return
+            return 0
 
         self.ensure_initialized()
 
@@ -129,12 +136,13 @@ class AnchorManager:
                 }
 
         if not changed:
-            return
+            return 0
 
         anchors = self._load_anchors(cur)
         max_id = max(anchors.keys(), default=-1)
         existing = self._mem._batch_get_anchor_ids(list(changed.keys()), cur)
 
+        swaps = 0
         for key, data in changed.items():
             old_aid = existing.get(key)
             counts, delta = data["counts"], data["delta"]
@@ -158,8 +166,12 @@ class AnchorManager:
 
             # Update membership
             if old_aid is None:
+                # New transition — first assignment, not a swap
                 self._update_anchor_stats(new_aid, counts, anchors, cur)
             else:
+                # SWAP: transition moved from old_aid to new_aid
+                # This is actual learning — beliefs about this move changed
+                swaps += 1
                 self._update_anchor_stats(old_aid, _neg_counts(old_stats), anchors, cur)
                 self._update_anchor_stats(new_aid, counts, anchors, cur)
 
@@ -169,6 +181,8 @@ class AnchorManager:
         for aid in [a for a, anc in anchors.items() if anc.total <= 0]:
             cur.execute("DELETE FROM anchors WHERE anchor_id=?", (aid,))
             del anchors[aid]
+
+        return swaps
 
     def _update_anchor_stats(self, aid: int, delta: Counts, anchors: Dict[int, Anchor], cur: sqlite3.Cursor) -> None:
         """Update anchor stats in DB and cache."""

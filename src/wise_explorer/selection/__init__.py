@@ -109,13 +109,13 @@ def select_move_for_training(
     pick_best = not is_prune
 
     # Probabilistic weighted selection
-    selected_anchor = training.select_anchor(anchor_stats, pick_best)
+    last_game_best_anchor = training.select_anchor_deterministic(anchor_stats, pick_best)
+    exploration_weight = training._exploration_weight(anchor_stats[last_game_best_anchor], pick_best)
 
-    probability_explore = anchor_stats[selected_anchor].mean_score if pick_best else (1 - anchor_stats[selected_anchor].mean_score)
-    if random.random() < probability_explore:
+    if random.random() < exploration_weight:
         selected_move = random.choice(valid_moves)
     else:
-        selected_move = training.select_move(anchors_with_moves[selected_anchor], pick_best)
+        selected_move = training.select_move_random(anchors_with_moves[last_game_best_anchor], pick_best)
 
     if debug:
         memory.debug_move_selection(game, valid_moves, selected_move)

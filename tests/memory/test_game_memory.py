@@ -175,9 +175,9 @@ class TestRecordRound:
         move = any_game.valid_moves()[0]
 
         stacks = [([(move, board_before, 1)], State.WIN)]
-        count = transition_memory.record_round(type(any_game), stacks)
+        count_transitions, _count_swaps = transition_memory.record_round(type(any_game), stacks)
 
-        assert count == 1
+        assert count_transitions == 1
         assert transition_memory.get_info()["transitions"] == 1
 
     def test_markov_records(self, markov_memory, any_game):
@@ -186,9 +186,9 @@ class TestRecordRound:
         move = any_game.valid_moves()[0]
 
         stacks = [([(move, board_before, 1)], State.WIN)]
-        count = markov_memory.record_round(type(any_game), stacks)
+        count_transitions, _count_swaps = markov_memory.record_round(type(any_game), stacks)
 
-        assert count == 1
+        assert count_transitions == 1
         assert markov_memory.get_info()["unique_states"] >= 1
 
     def test_transition_updates_existing(self, transition_memory, any_game):
@@ -220,9 +220,9 @@ class TestRecordRound:
         move = any_game.valid_moves()[0]
 
         stacks = [([(move, board_before, 1)], State.NEUTRAL)]
-        count = any_memory.record_round(type(any_game), stacks)
+        count_states, _count_swaps = any_memory.record_round(type(any_game), stacks)
 
-        assert count == 0
+        assert count_states == 0
 
 
 # =============================================================================
