@@ -8,6 +8,7 @@ authors:
 repository-code: "https://github.com/MatheweB/WiseExplorer"
 preferred-citation:
   type: thesis
+  thesis-type: "Undergraduate honors thesis"
   title: "General Game Playing as a Bandit-Arms Problem: A Multiagent Monte-Carlo Solution Exploiting Nash Equilibria"
   authors:
     - family-names: "Banda"
