@@ -21,6 +21,20 @@ Wise Explorer takes a unique approach to Monte Carlo Tree Search (MCTS) by delib
 
 This project is a re-imagining and re-implementation of my Honors thesis. Many strides have been made in efficiency and applicability that I wasn't able to achieve in 2019, and new concepts such as "anchors" and probability distribution sampling are the result of my independent learning and research.
 
+## Citation
+
+If you use Wise Explorer in your research, please cite my thesis:
+
+```bibtex
+@misc{wise_explorer,
+  author = {Brandon Mathewe Banda},
+  title  = {{General Game Playing as a Bandit-Arms Problem: A Multiagent Monte-Carlo Solution Exploiting Nash Equilibria}},
+  year   = {2019},
+  note   = {Undergraduate honors thesis, Oberlin College},
+  url    = {https://digitalcommons.oberlin.edu/honors/116/}
+}
+```
+
 ## Installation
 
 ```bash
@@ -341,20 +355,6 @@ Performance scales well with multiprocessing for independent game simulations.
 ## License
 
 This project is licensed under the Apache License 2.0. See the [LICENSE](LICENSE) file for details.
-
-## Citation
-
-If you use Wise Explorer in your research, please cite my thesis:
-
-```bibtex
-@misc{wise_explorer,
-  author = {Brandon Mathewe Banda},
-  title  = {{General Game Playing as a Bandit-Arms Problem: A Multiagent Monte-Carlo Solution Exploiting Nash Equilibria}},
-  year   = {2019},
-  note   = {Undergraduate honors thesis, Oberlin College},
-  url    = {https://digitalcommons.oberlin.edu/honors/116/}
-}
-```
 
 ## Contributing
 
