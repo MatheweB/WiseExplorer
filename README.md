@@ -347,12 +347,12 @@ This project is licensed under the Apache License 2.0. See the [LICENSE](LICENSE
 If you use Wise Explorer in your research, please cite my thesis:
 
 ```bibtex
-@thesis{wise_explorer,
-  title={General Game Playing as a Bandit-Arms Problem: A Multiagent Monte-Carlo Solution Exploiting Nash Equilibria},
-  author={Brandon Mathewe Banda},
-  year={2019},
-  school={Oberlin College},
-  url={https://digitalcommons.oberlin.edu/honors/116/}
+@misc{wise_explorer,
+  author = {Brandon Mathewe Banda},
+  title  = {{General Game Playing as a Bandit-Arms Problem: A Multiagent Monte-Carlo Solution Exploiting Nash Equilibria}},
+  year   = {2019},
+  note   = {Undergraduate honors thesis, Oberlin College},
+  url    = {https://digitalcommons.oberlin.edu/honors/116/}
 }
 ```
 
