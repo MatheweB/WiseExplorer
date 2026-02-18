@@ -6,8 +6,7 @@ Tests anchor clustering system for grouping similar moves.
 
 import pytest
 
-from wise_explorer.core.types import Stats
-from wise_explorer.memory.anchor_manager import Anchor, AnchorManager, _sub_counts
+from wise_explorer.memory.anchor_manager import Anchor, _sub_counts
 from wise_explorer.memory import TransitionMemory, MarkovMemory
 
 

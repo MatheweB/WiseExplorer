@@ -37,7 +37,7 @@ import re
 import time
 import functools
 from contextlib import contextmanager
-from typing import Optional, Callable, Dict, Set, Any
+from typing import Optional, Callable, Dict
 from dataclasses import dataclass
 
 from wise_explorer.core.hashing import hash_board
@@ -331,7 +331,7 @@ def quick_diagnostic(
     
     print_timing_summary()
     
-    print(f"\nProjected times:")
+    print("\nProjected times:")
     for target in [100, 500, 1000, 5000]:
         projected = (total / num_sims) * target
         print(f"  {target:>5} sims: {projected:>6.1f}s ({target/projected:.0f} sims/sec)")
@@ -489,8 +489,6 @@ def profile_single_game(game, memory, max_turns: int = 50):
     for _ in range(max_turns):
         if test_game.is_over():
             break
-        
-        pid = test_game.current_player()
         
         with timed("1.valid_moves"):
             valid = test_game.valid_moves()

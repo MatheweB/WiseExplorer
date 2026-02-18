@@ -3,6 +3,19 @@ __pycache__/
 *.pyc
 *.pyo
 
+# Build / packaging
+*.egg-info/
+dist/
+build/
+
+# Virtual environments
+.venv/
+venv/
+
+# Tool caches
+.ruff_cache/
+.pytest_cache/
+
 # Local settings
 settings.json
 

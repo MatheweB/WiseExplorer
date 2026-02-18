@@ -1,7 +1,8 @@
 """
-State-based memory: learns state_hash values only.
+State-based (Markov) memory: learns state_hash values only.
 
-Path-independent - only cares about destination state.
+Assumes the Markov property — a state's value depends only on the
+current position, not the path taken to reach it:  V(s) = f(s).
 Faster convergence but loses contextual information.
 """
 

@@ -5,7 +5,6 @@ Tests Agent dataclass and State enum.
 """
 
 import numpy as np
-import pytest
 
 from wise_explorer.agent.agent import Agent, State
 

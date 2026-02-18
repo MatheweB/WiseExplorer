@@ -5,7 +5,6 @@ Tests board hashing utilities for game state identification.
 """
 
 import numpy as np
-import pytest
 
 from wise_explorer.core.hashing import hash_board
 

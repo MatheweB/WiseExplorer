@@ -7,7 +7,6 @@ Tests deterministic move selection for competitive play.
 from typing import Dict, List, Tuple
 
 import numpy as np
-import pytest
 
 from wise_explorer.core.types import Stats
 from wise_explorer.selection.inference import best_anchor, best_move, random_move

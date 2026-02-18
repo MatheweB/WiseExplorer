@@ -159,49 +159,55 @@ By systematically exploring both extremes, Wise Explorer builds a comprehensive 
 
 ```
 src/wise_explorer/
-├── cli.py                 # Command-line interface
-├── api.py                 # Public API (start_simulations)
+├── cli.py                    # Command-line interface
+├── api.py                    # Public API (start_simulations)
 │
 ├── agent/
-│   └── __init__.py        # Agent class and State enum
+│   └── agent.py              # Agent class and State enum
 │
 ├── core/
-│   ├── types.py           # Stats, scoring constants
-│   ├── hashing.py         # Board state hashing
-│   └── bayes.py           # Bayes factor clustering
+│   ├── types.py              # Stats, Counts, scoring constants
+│   ├── hashing.py            # Board state hashing
+│   └── bayes.py              # Bayes factor clustering
 │
 ├── games/
-│   ├── game_base.py       # Abstract game interface
-│   ├── game_state.py      # GameState container
-│   ├── game_rules.py      # Board utilities
-│   ├── tic_tac_toe.py     # Tic-Tac-Toe implementation
-│   └── minichess.py       # Mini Chess implementation
+│   ├── game_base.py          # Abstract game interface
+│   ├── game_state.py         # GameState container
+│   ├── game_rules.py         # Board utilities
+│   ├── tic_tac_toe.py        # Tic-Tac-Toe implementation
+│   └── minichess.py          # Mini Chess implementation
 │
 ├── memory/
-│   ├── schema.py          # Database schema
-│   ├── anchor_manager.py  # Anchor logic class
-│   └── game_memory.py     # GameMemory class
+│   ├── schema.py             # Database schema
+│   ├── anchor_manager.py     # Anchor clustering algorithm
+│   ├── game_memory.py        # GameMemory base class
+│   ├── transition_memory.py  # Path-dependent (from→to) memory
+│   └── markov_memory.py      # Path-independent (state) memory
 │
 ├── selection/
-│   ├── training.py        # Probabilistic selection (exploration)
-│   └── inference.py       # Deterministic selection (exploitation)
+│   ├── training.py           # Probabilistic selection (exploration)
+│   └── inference.py          # Deterministic selection (exploitation)
 │
 ├── simulation/
-│   ├── jobs.py            # Job data structures
-│   ├── worker.py          # Parallel worker logic
-│   ├── runner.py          # SimulationRunner
-│   └── training.py        # Training orchestration
+│   ├── jobs.py               # Job data structures
+│   ├── worker.py             # Parallel worker logic
+│   ├── runner.py             # SimulationRunner
+│   └── training.py           # Training orchestration
 │
 ├── utils/
-│   ├── config.py          # Game registry and Config class
-│   └── factory.py         # Factory functions
+│   ├── config.py             # Game registry and Config class
+│   └── factory.py            # Factory functions
 │
-├── data/memory/           # SQLite databases (auto-created)
+├── debug/
+│   ├── viz.py                # Terminal visualization
+│   └── profiler.py           # Performance profiling tools
 │
-└── debug/
-    └── viz.py             # Terminal visualization
+├── scripts/
+│   └── benchmarks.py         # Benchmark runner
+│
+└── data/memory/              # SQLite databases (auto-created)
 
-tests/                     # Test suite (mirrors src structure)
+tests/                        # Test suite (mirrors src structure)
 
 ```
 
@@ -249,7 +255,9 @@ memory = GameMemory.for_game(game, markov=False)
 memory = GameMemory.for_game(game, markov=True)
 ```
 
-**Markov mode** treats positions as equivalent regardless of how they were reached. **Non-Markov mode** considers the path taken, useful for games where move history affects optimal play.
+**Markov mode** assumes the [Markov property](https://en.wikipedia.org/wiki/Markov_property): a state's value depends only on the current position, not the sequence of moves that led to it. Formally, *V(s) = f(s)* — the evaluation is conditionally independent of history given the present state. This yields faster convergence but discards path context.
+
+**Non-Markov mode** (default) treats each *(from, to)* transition as a distinct unit. The same destination reached via different paths can have different evaluations, which is useful for games where move order affects optimal play (e.g., castling rights in chess).
 
 ## Implementing a Custom Game
 

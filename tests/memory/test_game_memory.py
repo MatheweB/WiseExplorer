@@ -4,15 +4,11 @@ Tests for wise_explorer.memory
 Tests TransitionMemory and MarkovMemory classes for storing game data.
 """
 
-from pathlib import Path
-
-import numpy as np
 import pytest
 
 from wise_explorer.agent.agent import State
 from wise_explorer.core.types import Stats
-from wise_explorer.games.game_base import GameBase
-from wise_explorer.memory import TransitionMemory, MarkovMemory, GameMemory, for_game
+from wise_explorer.memory import TransitionMemory, MarkovMemory, for_game
 
 
 # =============================================================================

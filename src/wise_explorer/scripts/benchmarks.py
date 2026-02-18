@@ -123,7 +123,7 @@ from pathlib import Path
 
 from wise_explorer.utils.config import GAMES, MEMORY_DIR
 from wise_explorer.utils.factory import create_game, create_agent_swarms
-from wise_explorer.memory import for_game, TransitionMemory, MarkovMemory
+from wise_explorer.memory import for_game
 from wise_explorer.simulation.runner import SimulationRunner
 from wise_explorer.debug.profiler import (
     profile_simulations,

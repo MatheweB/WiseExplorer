@@ -1,7 +1,8 @@
 """
-Transition-based memory: learns (from_hash, to_hash) pairs.
+Transition-based (non-Markov) memory: learns (from_hash, to_hash) pairs.
 
-Path-dependent - captures context of how you reached a state.
+Does NOT assume the Markov property — the same destination reached
+via different paths can carry different values:  V(s) = f(s_prev, s).
 More precise but requires more data to converge.
 """
 

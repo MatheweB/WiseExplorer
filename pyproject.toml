@@ -34,7 +34,8 @@ wise-explorer = "wise_explorer.cli:main"
 [tool.hatch.build.targets.wheel]
 packages = ["src/wise_explorer"]
 
+[tool.ruff.lint]
+ignore = ["E741"]  # w, t, l for wins/ties/losses is a deliberate convention
+
 [tool.pytest.ini_options]
 testpaths = ["./tests"]
-
-

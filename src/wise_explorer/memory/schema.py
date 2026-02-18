@@ -5,12 +5,12 @@ Two separate modes with no shared state:
 
 Non-Markov Mode (transition-based):
     - Unit of learning: (from_hash, to_hash) pairs
-    - Captures path-dependent information
+    - Path-dependent: V(s) = f(s_prev, s)
     - Tables: transitions, anchors
 
 Markov Mode (state-based):
     - Unit of learning: state_hash (destination only)
-    - Path-independent, position evaluation
+    - Assumes the Markov property: V(s) = f(s)
     - Tables: states, anchors
 
 Each mode has its own database file for isolation.
