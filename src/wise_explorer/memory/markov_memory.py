@@ -11,11 +11,9 @@ import sqlite3
 from collections import defaultdict
 from typing import Any, Dict, List, Optional, Tuple
 
-from wise_explorer.core.types import Stats
+from wise_explorer.core.types import Stats, Counts
 from wise_explorer.memory.game_memory import GameMemory
 from wise_explorer.memory.schema import SCHEMA_MARKOV
-
-Counts = Tuple[int, int, int]
 
 
 class MarkovMemory(GameMemory):

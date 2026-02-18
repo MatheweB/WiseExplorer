@@ -49,8 +49,8 @@ def select_move(
     valid_moves = game.valid_moves()
     evaluation = memory.evaluate_moves(game, valid_moves)
 
-    anchors_with_moves = evaluation.get("anchors_with_moves", {})
-    anchor_stats = evaluation.get("anchor_stats", {})
+    anchors_with_moves = evaluation.anchors_with_moves
+    anchor_stats = evaluation.anchor_stats
 
     if not anchors_with_moves:
         return np.asarray(random.choice(valid_moves))
@@ -67,7 +67,8 @@ def select_move(
         selected_move = inference.best_move(anchors_with_moves[best_anchor_id], pick_best)
 
     if debug:
-        memory.debug_move_selection(game, valid_moves, selected_move)
+        from wise_explorer.debug.viz import debug_move_selection
+        debug_move_selection(memory, game, valid_moves, selected_move)
 
     return np.asarray(selected_move)
 
@@ -100,8 +101,8 @@ def select_move_for_training(
     valid_moves = game.valid_moves()
     evaluation = memory.evaluate_moves(game, valid_moves)
 
-    anchors_with_moves = evaluation.get("anchors_with_moves", {})
-    anchor_stats = evaluation.get("anchor_stats", {})
+    anchors_with_moves = evaluation.anchors_with_moves
+    anchor_stats = evaluation.anchor_stats
 
     if not anchors_with_moves:
         return np.asarray(random.choice(valid_moves))
@@ -118,7 +119,8 @@ def select_move_for_training(
         selected_move = training.select_move_random(anchors_with_moves[last_game_best_anchor], pick_best)
 
     if debug:
-        memory.debug_move_selection(game, valid_moves, selected_move)
+        from wise_explorer.debug.viz import debug_move_selection
+        debug_move_selection(memory, game, valid_moves, selected_move)
 
     return np.asarray(selected_move)
 

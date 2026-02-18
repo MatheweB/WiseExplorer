@@ -14,6 +14,8 @@ import numpy as np
 
 from wise_explorer.agent.agent import State
 
+Counts = Tuple[int, int, int]
+
 
 # ╔═════════════════════════════════════════════════════════════════════════════╗
 # ║                    CONFIGURABLE OUTCOME WEIGHTS                             ║

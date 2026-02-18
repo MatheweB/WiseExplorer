@@ -13,7 +13,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from wise_explorer.memory.game_memory import GameMemory
+from wise_explorer.memory.game_memory import GameMemory, MoveEvaluation
 from wise_explorer.memory.transition_memory import TransitionMemory
 from wise_explorer.memory.markov_memory import MarkovMemory
 
@@ -64,6 +64,7 @@ def open_readonly(db_path: str | Path, is_markov: bool = False) -> GameMemory:
 
 __all__ = [
     "GameMemory",
+    "MoveEvaluation",
     "TransitionMemory",
     "MarkovMemory",
     "for_game",

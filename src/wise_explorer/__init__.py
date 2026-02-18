@@ -5,7 +5,7 @@ This package provides tools for training game-playing agents through
 parallel simulations with Bayes factor clustering.
 
 Quick Start:
-    from game_ai import start_simulations, GameMemory
+    from wise_explorer import start_simulations, GameMemory
     
     game = YourGame()
     memory = GameMemory.for_game(game)

@@ -12,11 +12,11 @@ import sqlite3
 from abc import ABC, abstractmethod
 from collections import defaultdict
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
+from typing import Any, Dict, List, NamedTuple, Optional, Tuple, TYPE_CHECKING
 
 import numpy as np
 
-from wise_explorer.core.types import Stats, OUTCOME_INDEX
+from wise_explorer.core.types import Stats, Counts, OUTCOME_INDEX
 from wise_explorer.core.hashing import hash_board
 from wise_explorer.core.bayes import compatible
 from wise_explorer.memory.anchor_manager import AnchorManager
@@ -24,9 +24,14 @@ from wise_explorer.memory.anchor_manager import AnchorManager
 if TYPE_CHECKING:
     from wise_explorer.agent.agent import State
     from wise_explorer.games.game_base import GameBase
-
-Counts = Tuple[int, int, int]
 UNEXPLORED_ANCHOR_ID = -999
+
+
+class MoveEvaluation(NamedTuple):
+    """Result of evaluate_moves: moves grouped by anchor with anchor stats."""
+    anchors_with_moves: Dict[int, List[Tuple[np.ndarray, Stats]]]
+    anchor_stats: Dict[int, Stats]
+
 
 class GameMemory(ABC):
     """Abstract base for game memory implementations."""
@@ -188,7 +193,7 @@ class GameMemory(ABC):
     # Move Evaluation
     # -------------------------------------------------------------------------
 
-    def evaluate_moves(self, game: "GameBase", valid_moves: List[np.ndarray]) -> Dict[str, Any]:
+    def evaluate_moves(self, game: "GameBase", valid_moves: List[np.ndarray]) -> MoveEvaluation:
         """Evaluate all valid moves and group by anchor."""
         from_hash = hash_board(game.get_state().board)
 
@@ -209,7 +214,7 @@ class GameMemory(ABC):
                 anchors_with_moves[UNEXPLORED_ANCHOR_ID].append((move, Stats()))
                 anchor_stats[UNEXPLORED_ANCHOR_ID] = Stats()
 
-        return {"anchors_with_moves": dict(anchors_with_moves), "anchor_stats": anchor_stats}
+        return MoveEvaluation(anchors_with_moves=dict(anchors_with_moves), anchor_stats=anchor_stats)
 
     def _compute_move_hashes(self, game: "GameBase", valid_moves: List[np.ndarray]) -> List[Tuple[np.ndarray, str]]:
         """Generate (move, destination_hash) pairs.
@@ -282,80 +287,6 @@ class GameMemory(ABC):
         """Clear all caches."""
         self._anchor_stats_cache.clear()
         self._anchor_id_cache.clear()
-
-    # -------------------------------------------------------------------------
-    # Debug
-    # -------------------------------------------------------------------------
-
-    def debug_move_selection(self, game: "GameBase", valid_moves: List[np.ndarray], chosen_move: Optional[np.ndarray] = None) -> None:
-        """Display debug visualization for move selection."""
-        try:
-            from wise_explorer.debug.viz import render_debug
-        except ImportError:
-            print("debug.viz not available")
-            return
-
-        state = game.get_state()
-        from_hash = hash_board(state.board)
-
-        # Get chosen move's destination hash
-        chosen_to_hash = None
-        if chosen_move is not None:
-            clone = game.deep_clone()
-            try:
-                clone.apply_move(chosen_move, validated=True)
-                chosen_to_hash = hash_board(clone.get_state().board)
-            except:
-                pass
-
-        debug_rows = []
-        for move, to_hash in self._compute_move_hashes(game, valid_moves):
-            clone = game.deep_clone()
-            clone.apply_move(move, validated=True)
-
-            diff = [
-                (i, state.board[i], clone.get_state().board[i])
-                for i in np.ndindex(state.board.shape)
-                if state.board[i] != clone.get_state().board[i]
-            ]
-
-            direct = self.get_move_stats(from_hash, to_hash)
-
-            if direct.total > 0:
-                anchor_id = self.get_anchor_id(from_hash, to_hash)
-                anchor = self.get_anchor_stats(from_hash, to_hash)
-                debug_rows.append({
-                    "diff": diff,
-                    "move": move,
-                    "is_selected": to_hash == chosen_to_hash,
-                    "direct_total": direct.total,
-                    "direct_W": direct.wins, "direct_T": direct.ties, "direct_L": direct.losses,
-                    "direct_score": direct.mean_score,
-                    "anchor_id": anchor_id,
-                    "anchor_total": anchor.total,
-                    "anchor_W": anchor.wins, "anchor_T": anchor.ties, "anchor_L": anchor.losses,
-                    "anchor_score": anchor.mean_score,
-                })
-            else:
-                prior = Stats()  # (0,0,0) — prior score via pseudocounts
-                debug_rows.append({
-                    "diff": diff,
-                    "move": move,
-                    "is_selected": to_hash == chosen_to_hash,
-                    "direct_total": 0,
-                    "direct_W": 0, "direct_T": 0, "direct_L": 0,
-                    "direct_score": prior.mean_score,
-                    "anchor_id": None,
-                    "anchor_total": 0,
-                    "anchor_W": 0, "anchor_T": 0, "anchor_L": 0,
-                    "anchor_score": prior.mean_score,
-                    "unexplored": True,
-                })
-
-        if debug_rows:
-            render_debug(state.board, debug_rows, cell_strings=game.get_cell_strings())
-        else:
-            print("No candidates")
 
     # -------------------------------------------------------------------------
     # Lifecycle

@@ -6,6 +6,7 @@ This module provides the building blocks used throughout the game AI system.
 
 from wise_explorer.core.types import (
     Stats,
+    Counts,
     W_WEIGHT,
     T_WEIGHT,
     L_WEIGHT,
@@ -20,6 +21,7 @@ from wise_explorer.core.bayes import compatible, similarity
 __all__ = [
     # Types
     "Stats",
+    "Counts",
     # Constants
     "W_WEIGHT",
     "T_WEIGHT",

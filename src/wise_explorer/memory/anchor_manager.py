@@ -15,11 +15,10 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple, TYPE_CHECKING
 
 from wise_explorer.core.bayes import compatible, similarity
+from wise_explorer.core.types import Counts
 
 if TYPE_CHECKING:
     from wise_explorer.memory.game_memory import GameMemory
-
-Counts = Tuple[int, int, int]
 
 
 @dataclass

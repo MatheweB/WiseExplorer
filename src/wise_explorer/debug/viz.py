@@ -13,7 +13,11 @@ from __future__ import annotations
 
 import re
 from collections import defaultdict
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from wise_explorer.memory.game_memory import GameMemory
+    from wise_explorer.games.game_base import GameBase
 
 import numpy as np
 
@@ -590,3 +594,88 @@ def render_debug(
     output = "\n".join(out_lines)
     print(output)
     return output
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Debug move selection (main function to be called externally)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def debug_move_selection(
+    memory: "GameMemory",
+    game: "GameBase",
+    valid_moves: List[np.ndarray],
+    chosen_move: Optional[np.ndarray] = None,
+) -> None:
+    """Display debug visualization for move selection.
+
+    Gathers per-move statistics from memory and renders
+    a full analysis (tables + board).
+    """
+    from wise_explorer.core.hashing import hash_board
+    from wise_explorer.core.types import Stats
+
+    state = game.get_state()
+    from_hash = hash_board(state.board)
+
+    # Get chosen move's destination hash
+    chosen_to_hash = None
+    if chosen_move is not None:
+        clone = game.deep_clone()
+        try:
+            clone.apply_move(chosen_move, validated=True)
+            chosen_to_hash = hash_board(clone.get_state().board)
+        except Exception:
+            pass
+
+    debug_rows = []
+    for move in valid_moves:
+        clone = game.deep_clone()
+        try:
+            clone.apply_move(move, validated=True)
+            to_hash = hash_board(clone.get_state().board)
+        except (ValueError, IndexError):
+            continue
+
+        diff = [
+            (i, state.board[i], clone.get_state().board[i])
+            for i in np.ndindex(state.board.shape)
+            if state.board[i] != clone.get_state().board[i]
+        ]
+
+        direct = memory.get_move_stats(from_hash, to_hash)
+
+        if direct.total > 0:
+            anchor_id = memory.get_anchor_id(from_hash, to_hash)
+            anchor = memory.get_anchor_stats(from_hash, to_hash)
+            debug_rows.append({
+                "diff": diff,
+                "move": move,
+                "is_selected": to_hash == chosen_to_hash,
+                "direct_total": direct.total,
+                "direct_W": direct.wins, "direct_T": direct.ties, "direct_L": direct.losses,
+                "direct_score": direct.mean_score,
+                "anchor_id": anchor_id,
+                "anchor_total": anchor.total,
+                "anchor_W": anchor.wins, "anchor_T": anchor.ties, "anchor_L": anchor.losses,
+                "anchor_score": anchor.mean_score,
+            })
+        else:
+            prior = Stats()
+            debug_rows.append({
+                "diff": diff,
+                "move": move,
+                "is_selected": to_hash == chosen_to_hash,
+                "direct_total": 0,
+                "direct_W": 0, "direct_T": 0, "direct_L": 0,
+                "direct_score": prior.mean_score,
+                "anchor_id": None,
+                "anchor_total": 0,
+                "anchor_W": 0, "anchor_T": 0, "anchor_L": 0,
+                "anchor_score": prior.mean_score,
+                "unexplored": True,
+            })
+
+    if debug_rows:
+        render_debug(state.board, debug_rows, cell_strings=game.get_cell_strings())
+    else:
+        print("No candidates")

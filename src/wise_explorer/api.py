@@ -2,7 +2,7 @@
 Public API for game AI training and play.
 
 Usage:
-    from game_ai import start_simulations, GameMemory
+    from wise_explorer import start_simulations, GameMemory
     
     game = TicTacToe()
     memory = GameMemory.for_game(game, base_dir="data/memory")
