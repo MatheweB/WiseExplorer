@@ -57,7 +57,7 @@ class GameMemory(ABC):
             self.conn.executescript(self._schema())
             self.conn.commit()
 
-        self._anchors = AnchorManager(self)
+        self.anchors = AnchorManager(self.conn, self.main_table, self.read_only)
 
     # -------------------------------------------------------------------------
     # Abstract Methods (subclasses must implement)
@@ -74,7 +74,7 @@ class GameMemory(ABC):
         pass
 
     @abstractmethod
-    def _get_stats_by_key(self, key) -> Stats:
+    def get_stats_by_key(self, key) -> Stats:
         """Get stats by native key type (for anchor manager)."""
         pass
 
@@ -89,27 +89,27 @@ class GameMemory(ABC):
         pass
 
     @abstractmethod
-    def _batch_get_anchor_ids(self, keys: List, cur: sqlite3.Cursor) -> Dict:
+    def batch_get_anchor_ids(self, keys: List, cur: sqlite3.Cursor) -> Dict:
         """Batch fetch anchor IDs for keys."""
         pass
 
     @abstractmethod
-    def _set_anchor_id(self, key, anchor_id: int, cur: sqlite3.Cursor) -> None:
+    def set_anchor_id(self, key, anchor_id: int, cur: sqlite3.Cursor) -> None:
         """Set anchor_id for a key in the main table."""
         pass
 
     @abstractmethod
-    def _key_to_repr(self, key) -> str:
+    def key_to_repr(self, key) -> str:
         """Convert a key to string representation for debugging."""
         pass
 
     @abstractmethod
-    def _collect_units(self) -> List[Tuple]:
+    def collect_units(self) -> List[Tuple]:
         """Collect all units as (key, counts) tuples for rebuild."""
         pass
 
     @abstractmethod
-    def _write_anchor_ids(self, membership: Dict, cur: sqlite3.Cursor) -> None:
+    def write_anchor_ids(self, membership: Dict, cur: sqlite3.Cursor) -> None:
         """Batch write anchor IDs after rebuild."""
         pass
 
@@ -170,15 +170,32 @@ class GameMemory(ABC):
 
     def get_anchor_details(self) -> List[Dict[str, Any]]:
         """Get detailed information about all anchors."""
-        return self._anchors.get_details()
+        return self.anchors.get_details()
 
     def rebuild_anchors(self) -> int:
         """Full rebuild of anchor clustering."""
-        return self._anchors.rebuild()
+        if self.read_only:
+            raise RuntimeError("Cannot rebuild anchors in read-only mode")
+
+        units = self.collect_units()
+        if not units:
+            return 0
+
+        self.conn.commit()
+        cur = self.conn.cursor()
+        cur.execute("BEGIN IMMEDIATE")
+        try:
+            num, membership = self.anchors.rebuild(units, self.key_to_repr, cur)
+            self.write_anchor_ids(membership, cur)
+            cur.execute("COMMIT")
+        except Exception:
+            cur.execute("ROLLBACK")
+            raise
+        return num
 
     def consolidate_anchors(self) -> int:
         """Merge compatible anchors."""
-        return self._anchors.consolidate()
+        return self.anchors.consolidate()
 
     # -------------------------------------------------------------------------
     # Info
@@ -238,7 +255,7 @@ class GameMemory(ABC):
     def record_round(self, game_class: type, stacks: List[Tuple[List[Tuple[Any, np.ndarray, int]], "State"]]) -> Tuple[int, int]:
         """
         Record outcomes from a batch of games.
-        
+
         Returns:
             (transitions_written, transitions_swapped) — swap count is the
             core learning signal indicating how many beliefs changed.
@@ -269,7 +286,7 @@ class GameMemory(ABC):
     def _commit(self, transitions: Dict[Tuple[str, str], List[int]]) -> int:
         """
         Write transitions to database with incremental anchor updates.
-        
+
         Returns:
             Number of transitions that swapped anchors (beliefs changed).
         """
@@ -278,7 +295,31 @@ class GameMemory(ABC):
 
         cur = self.conn.cursor()
         keys, deltas = self._commit_outcomes(transitions, cur)
-        swaps = self._anchors.update(keys, deltas, cur)
+
+        # Handle initialization if needed
+        if self.anchors.needs_initialization():
+            units = self.collect_units()
+            if units:
+                _, membership = self.anchors.rebuild(units, self.key_to_repr, cur)
+                self.write_anchor_ids(membership, cur)
+
+        # Gather current stats for changed keys
+        changed_stats: Dict[Any, Counts] = {}
+        for key in keys:
+            stats = self.get_stats_by_key(key)
+            if stats.total > 0:
+                changed_stats[key] = stats.as_tuple()
+
+        if changed_stats:
+            existing_aids = self.batch_get_anchor_ids(list(changed_stats.keys()), cur)
+            assignments, swaps = self.anchors.update(
+                changed_stats, deltas, existing_aids,
+                key_to_repr=self.key_to_repr, cur=cur)
+            for key, aid in assignments.items():
+                self.set_anchor_id(key, aid, cur)
+        else:
+            swaps = 0
+
         self.conn.commit()
         self._clear_caches()
         return swaps

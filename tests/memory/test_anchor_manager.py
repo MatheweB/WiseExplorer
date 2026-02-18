@@ -103,7 +103,7 @@ class TestTransitionAnchorQueries:
 
     def test_get_details(self, memory_with_anchors):
         """get_details returns anchor information."""
-        details = memory_with_anchors._anchors.get_details()
+        details = memory_with_anchors.anchors.get_details()
         assert len(details) == 2
 
         a1 = next(d for d in details if d["anchor_id"] == 1)
@@ -116,7 +116,7 @@ class TestTransitionAnchorRebuild:
 
     def test_rebuild_empty_returns_zero(self, transition_memory):
         """Rebuild on empty database returns 0."""
-        assert transition_memory._anchors.rebuild() == 0
+        assert transition_memory.rebuild_anchors() == 0
 
     def test_rebuild_creates_anchors(self, transition_memory):
         """Rebuild creates anchors from existing data."""
@@ -126,7 +126,7 @@ class TestTransitionAnchorRebuild:
         )
         transition_memory.conn.commit()
 
-        num = transition_memory._anchors.rebuild()
+        num = transition_memory.rebuild_anchors()
         assert num > 0
 
     def test_rebuild_read_only_raises(self, temp_db_path):
@@ -140,7 +140,7 @@ class TestTransitionAnchorRebuild:
 
         mem_ro = TransitionMemory(temp_db_path, read_only=True)
         with pytest.raises(RuntimeError, match="read-only"):
-            mem_ro._anchors.rebuild()
+            mem_ro.rebuild_anchors()
         mem_ro.close()
 
 
@@ -159,7 +159,7 @@ class TestTransitionAnchorConsolidate:
         )
         transition_memory.conn.commit()
 
-        transition_memory._anchors.consolidate()
+        transition_memory.anchors.consolidate()
 
         count = transition_memory.conn.execute("SELECT COUNT(*) FROM anchors").fetchone()[0]
         assert count == 2
@@ -172,7 +172,7 @@ class TestTransitionAnchorConsolidate:
         mem.close()
 
         mem_ro = TransitionMemory(temp_db_path, read_only=True)
-        assert mem_ro._anchors.consolidate() == 0
+        assert mem_ro.anchors.consolidate() == 0
         mem_ro.close()
 
 
@@ -188,7 +188,7 @@ class TestTransitionClustering:
             )
         transition_memory.conn.commit()
 
-        num = transition_memory._anchors.rebuild()
+        num = transition_memory.rebuild_anchors()
         assert num == 1
 
     def test_different_distributions_separate(self, transition_memory):
@@ -203,7 +203,7 @@ class TestTransitionClustering:
         )
         transition_memory.conn.commit()
 
-        num = transition_memory._anchors.rebuild()
+        num = transition_memory.rebuild_anchors()
         assert num == 2
 
 
@@ -255,7 +255,7 @@ class TestMarkovAnchorQueries:
 
     def test_get_details(self, memory_with_anchors):
         """get_details returns anchor information."""
-        details = memory_with_anchors._anchors.get_details()
+        details = memory_with_anchors.anchors.get_details()
         assert len(details) == 2
 
         a1 = next(d for d in details if d["anchor_id"] == 1)
@@ -268,7 +268,7 @@ class TestMarkovAnchorRebuild:
 
     def test_rebuild_empty_returns_zero(self, markov_memory):
         """Rebuild on empty database returns 0."""
-        assert markov_memory._anchors.rebuild() == 0
+        assert markov_memory.rebuild_anchors() == 0
 
     def test_rebuild_creates_anchors(self, markov_memory):
         """Rebuild creates anchors from existing data."""
@@ -277,7 +277,7 @@ class TestMarkovAnchorRebuild:
         )
         markov_memory.conn.commit()
 
-        num = markov_memory._anchors.rebuild()
+        num = markov_memory.rebuild_anchors()
         assert num > 0
 
     def test_rebuild_read_only_raises(self, temp_db_path):
@@ -291,7 +291,7 @@ class TestMarkovAnchorRebuild:
 
         mem_ro = MarkovMemory(temp_db_path, read_only=True)
         with pytest.raises(RuntimeError, match="read-only"):
-            mem_ro._anchors.rebuild()
+            mem_ro.rebuild_anchors()
         mem_ro.close()
 
 
@@ -310,7 +310,7 @@ class TestMarkovAnchorConsolidate:
         )
         markov_memory.conn.commit()
 
-        markov_memory._anchors.consolidate()
+        markov_memory.anchors.consolidate()
 
         count = markov_memory.conn.execute("SELECT COUNT(*) FROM anchors").fetchone()[0]
         assert count == 2
@@ -323,7 +323,7 @@ class TestMarkovAnchorConsolidate:
         mem.close()
 
         mem_ro = MarkovMemory(temp_db_path, read_only=True)
-        assert mem_ro._anchors.consolidate() == 0
+        assert mem_ro.anchors.consolidate() == 0
         mem_ro.close()
 
 
@@ -339,7 +339,7 @@ class TestMarkovClustering:
             )
         markov_memory.conn.commit()
 
-        num = markov_memory._anchors.rebuild()
+        num = markov_memory.rebuild_anchors()
         assert num == 1
 
     def test_different_distributions_separate(self, markov_memory):
@@ -352,5 +352,5 @@ class TestMarkovClustering:
         )
         markov_memory.conn.commit()
 
-        num = markov_memory._anchors.rebuild()
+        num = markov_memory.rebuild_anchors()
         assert num == 2

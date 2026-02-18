@@ -4,7 +4,8 @@ Anchor clustering manager for game memory.
 Anchors group statistically similar units together, allowing pooled
 statistics for faster convergence via Bayes factor clustering.
 
-Generic over key type - works with both TransitionMemory and MarkovMemory.
+Fully decoupled from GameMemory — receives data as parameters and
+returns results. The caller (GameMemory) orchestrates fetch/apply.
 """
 
 from __future__ import annotations
@@ -12,13 +13,10 @@ from __future__ import annotations
 import math
 import sqlite3
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple, TYPE_CHECKING
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from wise_explorer.core.bayes import compatible, similarity
 from wise_explorer.core.types import Counts
-
-if TYPE_CHECKING:
-    from wise_explorer.memory.game_memory import GameMemory
 
 
 @dataclass
@@ -50,15 +48,17 @@ def _neg_counts(c: Counts) -> Counts:
 
 
 class AnchorManager:
-    """Manages anchor clustering with O(1) incremental updates."""
+    """Manages anchor clustering with O(1) incremental updates.
 
-    def __init__(self, memory: "GameMemory"):
-        self._mem = memory
+    Takes conn, main_table, and read_only directly.
+    Methods receive pre-fetched data and return results for the caller to apply.
+    """
+
+    def __init__(self, conn: sqlite3.Connection, main_table: str, read_only: bool = False):
+        self._conn = conn
+        self._main_table = main_table
+        self._read_only = read_only
         self._dirty = True
-
-    @property
-    def _conn(self) -> sqlite3.Connection:
-        return self._mem.conn
 
     # -------------------------------------------------------------------------
     # Queries
@@ -66,12 +66,11 @@ class AnchorManager:
 
     def get_details(self) -> List[dict]:
         """Get detailed information about all anchors."""
-        main_table = self._mem.main_table
         rows = self._conn.execute(
             f"""SELECT a.anchor_id, a.repr_key, a.wins, a.ties, a.losses,
                        COUNT(t.anchor_id)
                 FROM anchors a
-                LEFT JOIN {main_table} t ON a.anchor_id = t.anchor_id
+                LEFT JOIN {self._main_table} t ON a.anchor_id = t.anchor_id
                 GROUP BY a.anchor_id
                 ORDER BY a.wins + a.ties + a.losses DESC"""
         ).fetchall()
@@ -89,62 +88,64 @@ class AnchorManager:
     # Initialization
     # -------------------------------------------------------------------------
 
-    def ensure_initialized(self) -> None:
-        """Ensure anchors are initialized if data exists."""
+    def needs_initialization(self) -> bool:
+        """Check if anchors need to be built from existing data.
+
+        Returns True at most once (on first call when data exists but
+        no anchors do). Caller is responsible for triggering rebuild.
+        """
         if not self._dirty:
-            return
+            return False
         self._dirty = False
 
-        if self._mem.read_only:
-            return
+        if self._read_only:
+            return False
 
         anchor_count = self._conn.execute("SELECT COUNT(*) FROM anchors").fetchone()[0]
         if anchor_count == 0:
             has_data = self._conn.execute(
-                f"SELECT COUNT(*) FROM {self._mem.main_table}"
+                f"SELECT COUNT(*) FROM {self._main_table}"
             ).fetchone()[0] > 0
-            if has_data:
-                self.rebuild()
+            return has_data
+        return False
 
     # -------------------------------------------------------------------------
     # Incremental Update
     # -------------------------------------------------------------------------
 
-    def update(self, keys: List, deltas: Dict, cur: sqlite3.Cursor) -> int:
+    def update(
+        self,
+        changed_stats: Dict[Any, Counts],
+        deltas: Dict[Any, Counts],
+        existing_aids: Dict[Any, Optional[int]],
+        key_to_repr: Callable[[Any], str],
+        cur: sqlite3.Cursor,
+    ) -> Tuple[Dict[Any, int], int]:
         """
         Update anchor assignments and stats incrementally.
-        
+
+        Args:
+            changed_stats: key -> current (w,t,l) for each changed unit
+            deltas: key -> delta (dw,dt,dl) from this commit
+            existing_aids: key -> current anchor_id (or None)
+            key_to_repr: converts a key to a display string
+            cur: database cursor for writes
+
         Returns:
-            Number of transitions that swapped anchors (beliefs changed).
-            This is the core learning signal — a swap means our classification
-            of that move's "meaning" has changed based on new evidence.
+            (assignments, swap_count) where assignments maps key -> new_aid
+            for units that were reassigned. Caller writes these to the main table.
         """
-        if not keys:
-            return 0
-
-        self.ensure_initialized()
-
-        # Gather current stats for changed keys
-        changed = {}
-        for key in keys:
-            stats = self._mem._get_stats_by_key(key)
-            if stats.total > 0:
-                changed[key] = {
-                    "counts": stats.as_tuple(),
-                    "delta": deltas.get(key, (0, 0, 0)),
-                }
-
-        if not changed:
-            return 0
+        if not changed_stats:
+            return {}, 0
 
         anchors = self._load_anchors(cur)
         max_id = max(anchors.keys(), default=-1)
-        existing = self._mem._batch_get_anchor_ids(list(changed.keys()), cur)
 
+        assignments: Dict[Any, int] = {}
         swaps = 0
-        for key, data in changed.items():
-            old_aid = existing.get(key)
-            counts, delta = data["counts"], data["delta"]
+        for key, counts in changed_stats.items():
+            old_aid = existing_aids.get(key)
+            delta = deltas.get(key, (0, 0, 0))
             old_stats = _sub_counts(counts, delta)
 
             # Check if still compatible with current anchor (excluding self)
@@ -159,29 +160,29 @@ class AnchorManager:
             if new_aid is None:
                 max_id += 1
                 new_aid = max_id
-                repr_key = self._mem._key_to_repr(key)
+                repr_key = key_to_repr(key)
                 cur.execute("INSERT INTO anchors VALUES (?,?,0,0,0)", (new_aid, repr_key))
                 anchors[new_aid] = Anchor((0, 0, 0), repr_key)
 
             # Update membership
             if old_aid is None:
-                # New transition — first assignment, not a swap
+                # New unit — first assignment, not a swap
                 self._update_anchor_stats(new_aid, counts, anchors, cur)
             else:
-                # SWAP: transition moved from old_aid to new_aid
+                # SWAP: unit moved from old_aid to new_aid
                 # This is actual learning — beliefs about this move changed
                 swaps += 1
                 self._update_anchor_stats(old_aid, _neg_counts(old_stats), anchors, cur)
                 self._update_anchor_stats(new_aid, counts, anchors, cur)
 
-            self._mem._set_anchor_id(key, new_aid, cur)
+            assignments[key] = new_aid
 
         # Cleanup empty anchors
         for aid in [a for a, anc in anchors.items() if anc.total <= 0]:
             cur.execute("DELETE FROM anchors WHERE anchor_id=?", (aid,))
             del anchors[aid]
 
-        return swaps
+        return assignments, swaps
 
     def _update_anchor_stats(self, aid: int, delta: Counts, anchors: Dict[int, Anchor], cur: sqlite3.Cursor) -> None:
         """Update anchor stats in DB and cache."""
@@ -234,7 +235,7 @@ class AnchorManager:
 
     def consolidate(self) -> int:
         """Merge anchors that have become statistically compatible."""
-        if self._mem.read_only:
+        if self._read_only:
             return 0
 
         self._conn.commit()
@@ -274,7 +275,7 @@ class AnchorManager:
         survivor, absorbed = (aid1, aid2) if anchors[aid1].total >= anchors[aid2].total else (aid2, aid1)
 
         cur.execute(
-            f"UPDATE {self._mem.main_table} SET anchor_id=? WHERE anchor_id=?",
+            f"UPDATE {self._main_table} SET anchor_id=? WHERE anchor_id=?",
             (survivor, absorbed)
         )
         self._update_anchor_stats(survivor, anchors[absorbed].counts, anchors, cur)
@@ -285,39 +286,47 @@ class AnchorManager:
     # Full Rebuild
     # -------------------------------------------------------------------------
 
-    def rebuild(self) -> int:
-        """Full rebuild of anchor clustering."""
-        if self._mem.read_only:
-            raise RuntimeError("Cannot rebuild anchors in read-only mode")
+    def rebuild(
+        self,
+        units: List[Tuple[Any, Counts]],
+        key_to_repr: Callable[[Any], str],
+        cur: sqlite3.Cursor,
+    ) -> Tuple[int, Dict[Any, int]]:
+        """
+        Full rebuild of anchor clustering.
 
-        units = self._mem._collect_units()
-        if not units:
-            return 0
+        Args:
+            units: list of (key, counts) tuples to cluster
+            key_to_repr: converts a key to a display string
+            cur: database cursor (caller manages transaction)
 
+        Returns:
+            (num_anchors, membership) where membership maps key -> anchor_index.
+            Caller writes membership to the main table.
+        """
         def entropy(counts: Counts) -> float:
             total = sum(counts)
             return -sum((c / total) * math.log(c / total + 1e-12) for c in counts)
 
         units.sort(key=lambda u: entropy(u[1]))
-        anchors, membership = self._cluster_units(units)
+        anchor_list, membership = self._cluster_units(units, key_to_repr)
 
-        self._conn.commit()
-        cur = self._conn.cursor()
-        cur.execute("BEGIN IMMEDIATE")
+        cur.execute("DELETE FROM anchors")
+        cur.executemany(
+            "INSERT INTO anchors VALUES (?,?,?,?,?)",
+            [(i, a.repr_key, *a.counts) for i, a in enumerate(anchor_list)]
+        )
 
-        try:
-            self._write_anchors(anchors, membership, cur)
-            cur.execute("COMMIT")
-        except Exception:
-            cur.execute("ROLLBACK")
-            raise
+        return len(anchor_list), membership
 
-        return len(anchors)
-
-    def _cluster_units(self, units: List[Tuple]) -> Tuple[List[Anchor], Dict]:
+    def _cluster_units(
+        self,
+        units: List[Tuple[Any, Counts]],
+        key_to_repr: Callable[[Any], str],
+    ) -> Tuple[List[Anchor], Dict[Any, int]]:
         """Cluster units into anchors."""
         anchors: List[Anchor] = []
-        membership = {}
+        membership: Dict[Any, int] = {}
 
         for key, counts in units:
             best_idx = None
@@ -333,15 +342,6 @@ class AnchorManager:
                 membership[key] = best_idx
             else:
                 membership[key] = len(anchors)
-                anchors.append(Anchor(counts, self._mem._key_to_repr(key)))
+                anchors.append(Anchor(counts, key_to_repr(key)))
 
         return anchors, membership
-
-    def _write_anchors(self, anchors: List[Anchor], membership: Dict, cur: sqlite3.Cursor) -> None:
-        """Write anchors to database and update main table references."""
-        cur.execute("DELETE FROM anchors")
-        cur.executemany(
-            "INSERT INTO anchors VALUES (?,?,?,?,?)",
-            [(i, a.repr_key, *a.counts) for i, a in enumerate(anchors)]
-        )
-        self._mem._write_anchor_ids(membership, cur)

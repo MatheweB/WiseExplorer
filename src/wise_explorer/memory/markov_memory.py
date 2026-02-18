@@ -37,7 +37,7 @@ class MarkovMemory(GameMemory):
         ).fetchone()
         return Stats(*row) if row else Stats()
 
-    def _get_stats_by_key(self, key: str) -> Stats:
+    def get_stats_by_key(self, key: str) -> Stats:
         return self.get_state_stats(key)
 
     def _cache_key(self, from_hash: str, to_hash: str) -> str:
@@ -50,7 +50,7 @@ class MarkovMemory(GameMemory):
         ).fetchone()
         return row[0] if row else None
 
-    def _batch_get_anchor_ids(self, keys: List[str], cur: sqlite3.Cursor) -> Dict[str, Optional[int]]:
+    def batch_get_anchor_ids(self, keys: List[str], cur: sqlite3.Cursor) -> Dict[str, Optional[int]]:
         if not keys:
             return {}
         placeholders = ','.join('?' * len(keys))
@@ -60,22 +60,22 @@ class MarkovMemory(GameMemory):
         ).fetchall()
         return {row[0]: row[1] for row in rows}
 
-    def _set_anchor_id(self, key: str, anchor_id: int, cur: sqlite3.Cursor) -> None:
+    def set_anchor_id(self, key: str, anchor_id: int, cur: sqlite3.Cursor) -> None:
         cur.execute(
             "UPDATE states SET anchor_id=? WHERE state_hash=?",
             (anchor_id, key)
         )
 
-    def _key_to_repr(self, key: str) -> str:
+    def key_to_repr(self, key: str) -> str:
         return key[:16]
 
-    def _collect_units(self) -> List[Tuple[str, Counts]]:
+    def collect_units(self) -> List[Tuple[str, Counts]]:
         rows = self.conn.execute(
             "SELECT state_hash, wins, ties, losses FROM states WHERE wins+ties+losses > 0"
         ).fetchall()
         return [(h, (w, t, l)) for h, w, t, l in rows]
 
-    def _write_anchor_ids(self, membership: Dict[str, int], cur: sqlite3.Cursor) -> None:
+    def write_anchor_ids(self, membership: Dict[str, int], cur: sqlite3.Cursor) -> None:
         cur.executemany(
             "UPDATE states SET anchor_id=? WHERE state_hash=?",
             [(aid, key) for key, aid in membership.items()]

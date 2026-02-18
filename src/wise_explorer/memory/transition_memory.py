@@ -32,7 +32,7 @@ class TransitionMemory(GameMemory):
         ).fetchone()
         return Stats(*row) if row else Stats()
 
-    def _get_stats_by_key(self, key: Tuple[str, str]) -> Stats:
+    def get_stats_by_key(self, key: Tuple[str, str]) -> Stats:
         return self.get_move_stats(key[0], key[1])
 
     def _cache_key(self, from_hash: str, to_hash: str) -> Tuple[str, str]:
@@ -45,7 +45,7 @@ class TransitionMemory(GameMemory):
         ).fetchone()
         return row[0] if row else None
 
-    def _batch_get_anchor_ids(self, keys: List[Tuple[str, str]], cur: sqlite3.Cursor) -> Dict[Tuple[str, str], Optional[int]]:
+    def batch_get_anchor_ids(self, keys: List[Tuple[str, str]], cur: sqlite3.Cursor) -> Dict[Tuple[str, str], Optional[int]]:
         result = {}
         for from_hash, to_hash in keys:
             row = cur.execute(
@@ -55,22 +55,22 @@ class TransitionMemory(GameMemory):
             result[(from_hash, to_hash)] = row[0] if row else None
         return result
 
-    def _set_anchor_id(self, key: Tuple[str, str], anchor_id: int, cur: sqlite3.Cursor) -> None:
+    def set_anchor_id(self, key: Tuple[str, str], anchor_id: int, cur: sqlite3.Cursor) -> None:
         cur.execute(
             "UPDATE transitions SET anchor_id=? WHERE from_hash=? AND to_hash=?",
             (anchor_id, key[0], key[1])
         )
 
-    def _key_to_repr(self, key: Tuple[str, str]) -> str:
+    def key_to_repr(self, key: Tuple[str, str]) -> str:
         return f"{key[0][:8]}→{key[1][:8]}"
 
-    def _collect_units(self) -> List[Tuple[Tuple[str, str], Counts]]:
+    def collect_units(self) -> List[Tuple[Tuple[str, str], Counts]]:
         rows = self.conn.execute(
             "SELECT from_hash, to_hash, wins, ties, losses FROM transitions WHERE wins+ties+losses > 0"
         ).fetchall()
         return [((fh, th), (w, t, l)) for fh, th, w, t, l in rows]
 
-    def _write_anchor_ids(self, membership: Dict[Tuple[str, str], int], cur: sqlite3.Cursor) -> None:
+    def write_anchor_ids(self, membership: Dict[Tuple[str, str], int], cur: sqlite3.Cursor) -> None:
         cur.executemany(
             "UPDATE transitions SET anchor_id=? WHERE from_hash=? AND to_hash=?",
             [(aid, key[0], key[1]) for key, aid in membership.items()]
