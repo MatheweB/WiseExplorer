@@ -51,10 +51,14 @@ def _effective_score(
     anchor_score: float,
     pick_best: bool,
 ) -> float:
-    """Combine Bell and anchor into a single effective score via max (or min for prune)."""
+    """Conservative combination: min(bell, anchor) for pick_best, max for prune.
+
+    Only trust a move is good if both signals agree (min).
+    Only trust a move is bad if both signals agree (max).
+    """
     if bell is None:
         return anchor_score
-    return max(bell, anchor_score) if pick_best else min(bell, anchor_score)
+    return min(bell, anchor_score) if pick_best else max(bell, anchor_score)
 
 
 # ---------------------------------------------------------------------------
@@ -71,9 +75,10 @@ def select_move(
     """
     Select move for inference (competitive play).
 
-    Each move's effective score is max(bell, anchor_score):
-    - Bell dominates when Bellman has converged (e.g. Nim: 0.98 vs 0.02)
-    - Anchor dominates when Bell hasn't differentiated (e.g. TTT: all 0.50)
+    Each move's effective score is min(bell, anchor) — conservative:
+    - Nim: min(0.98, 0.50)=0.50 still beats min(0.02, 0.50)=0.02
+    - TTT: all Bell=0.50, ties broken by anchor then solo
+    - Forced losses: Bell-LOW drags effective down, can't be overridden
 
     Returns:
         Selected move as numpy array
@@ -129,8 +134,8 @@ def select_move_for_training(
     """
     Select move for training (probabilistic).
 
-    Uses max(bell, anchor_score) to find the best anchor, then
-    probabilistically explores or exploits within it.
+    Uses min(bell, anchor) to find the best anchor conservatively,
+    then probabilistically explores or exploits within it.
 
     Returns:
         Selected move as numpy array
@@ -196,7 +201,7 @@ def _best_anchor_effective(
     bell_scores: Dict[tuple, Optional[float]],
     pick_best: bool,
 ) -> int:
-    """Pick the best anchor using max(bell, anchor_score) per move, then max across anchors."""
+    """Pick the best anchor using conservative effective scores per move."""
     anchor_effective: Dict[int, float] = {}
 
     for aid, moves in anchors_with_moves.items():
