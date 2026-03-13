@@ -82,14 +82,14 @@ class MarkovMemory(GameMemory):
             [(aid, key) for key, aid in membership.items()]
         )
 
-    def _commit_outcomes(self, transitions: Dict[Tuple[str, str], List[int]], cur: sqlite3.Cursor) -> Tuple[List, Dict]:
+    def _commit_outcomes(self, transitions: Dict[Tuple[str, str], List[float]], cur: sqlite3.Cursor) -> Tuple[List, Dict]:
         """Commit outcomes and return keys/deltas for anchor manager."""
         # Aggregate by destination state
-        state_updates: Dict[str, List[int]] = defaultdict(lambda: [0, 0, 0])
+        state_updates: Dict[str, List[float]] = defaultdict(lambda: [0.0, 0.0, 0.0])
         for (_, to_hash), counts in transitions.items():
-            state_updates[to_hash][0] += int(counts[0])
-            state_updates[to_hash][1] += int(counts[1])
-            state_updates[to_hash][2] += int(counts[2])
+            state_updates[to_hash][0] += counts[0]
+            state_updates[to_hash][1] += counts[1]
+            state_updates[to_hash][2] += counts[2]
 
         cur.executemany(
             """INSERT INTO states (state_hash, wins, ties, losses)

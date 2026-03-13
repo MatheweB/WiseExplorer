@@ -21,9 +21,10 @@ SCHEMA_TRANSITIONS = """
 CREATE TABLE IF NOT EXISTS transitions (
     from_hash TEXT NOT NULL,
     to_hash TEXT NOT NULL,
-    wins INTEGER DEFAULT 0,
-    ties INTEGER DEFAULT 0,
-    losses INTEGER DEFAULT 0,
+    wins REAL DEFAULT 0.0,
+    ties REAL DEFAULT 0.0,
+    losses REAL DEFAULT 0.0,
+    propagated_score REAL DEFAULT NULL,
     anchor_id INTEGER,
     PRIMARY KEY (from_hash, to_hash)
 );
@@ -33,9 +34,9 @@ CREATE INDEX IF NOT EXISTS idx_trans_anchor ON transitions(anchor_id);
 CREATE TABLE IF NOT EXISTS anchors (
     anchor_id INTEGER PRIMARY KEY,
     repr_key TEXT,
-    wins INTEGER DEFAULT 0,
-    ties INTEGER DEFAULT 0,
-    losses INTEGER DEFAULT 0
+    wins REAL DEFAULT 0.0,
+    ties REAL DEFAULT 0.0,
+    losses REAL DEFAULT 0.0
 );
 
 CREATE TABLE IF NOT EXISTS metadata (
@@ -47,9 +48,9 @@ CREATE TABLE IF NOT EXISTS metadata (
 SCHEMA_MARKOV = """
 CREATE TABLE IF NOT EXISTS states (
     state_hash TEXT PRIMARY KEY,
-    wins INTEGER DEFAULT 0,
-    ties INTEGER DEFAULT 0,
-    losses INTEGER DEFAULT 0,
+    wins REAL DEFAULT 0.0,
+    ties REAL DEFAULT 0.0,
+    losses REAL DEFAULT 0.0,
     anchor_id INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_state_anchor ON states(anchor_id);
@@ -57,9 +58,9 @@ CREATE INDEX IF NOT EXISTS idx_state_anchor ON states(anchor_id);
 CREATE TABLE IF NOT EXISTS anchors (
     anchor_id INTEGER PRIMARY KEY,
     repr_key TEXT,
-    wins INTEGER DEFAULT 0,
-    ties INTEGER DEFAULT 0,
-    losses INTEGER DEFAULT 0
+    wins REAL DEFAULT 0.0,
+    ties REAL DEFAULT 0.0,
+    losses REAL DEFAULT 0.0
 );
 
 CREATE TABLE IF NOT EXISTS metadata (

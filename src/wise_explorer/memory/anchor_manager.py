@@ -26,7 +26,7 @@ class Anchor:
     repr_key: str
 
     @property
-    def total(self) -> int:
+    def total(self) -> float:
         return sum(self.counts)
 
     def add(self, delta: Counts) -> None:
@@ -145,7 +145,7 @@ class AnchorManager:
         swaps = 0
         for key, counts in changed_stats.items():
             old_aid = existing_aids.get(key)
-            delta = deltas.get(key, (0, 0, 0))
+            delta = deltas.get(key, (0.0, 0.0, 0.0))
             old_stats = _sub_counts(counts, delta)
 
             # Check if still compatible with current anchor (excluding self)
@@ -161,8 +161,8 @@ class AnchorManager:
                 max_id += 1
                 new_aid = max_id
                 repr_key = key_to_repr(key)
-                cur.execute("INSERT INTO anchors VALUES (?,?,0,0,0)", (new_aid, repr_key))
-                anchors[new_aid] = Anchor((0, 0, 0), repr_key)
+                cur.execute("INSERT INTO anchors VALUES (?,?,0.0,0.0,0.0)", (new_aid, repr_key))
+                anchors[new_aid] = Anchor((0.0, 0.0, 0.0), repr_key)
 
             # Update membership
             if old_aid is None:

@@ -39,10 +39,13 @@ class GameMemory(ABC):
     main_table: str  # Subclasses define: "transitions" or "states"
     is_markov: bool  # Subclasses define: False for Transition, True for Markov
 
-    def __init__(self, db_path: str | Path, read_only: bool = False):
+    def __init__(self, db_path: str | Path, read_only: bool = False,
+                 gamma: float = 1.0, max_ply: Optional[int] = None):
         self.db_path = Path(db_path).resolve()
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.read_only = read_only
+        self.gamma = gamma
+        self.max_ply = max_ply
         self._closed = False
 
         self._anchor_stats_cache: Dict[int, Stats] = {}
@@ -114,7 +117,7 @@ class GameMemory(ABC):
         pass
 
     @abstractmethod
-    def _commit_outcomes(self, transitions: Dict[Tuple[str, str], List[int]], cur: sqlite3.Cursor) -> Tuple[List, Dict]:
+    def _commit_outcomes(self, transitions: Dict[Tuple[str, str], List[float]], cur: sqlite3.Cursor) -> Tuple[List, Dict]:
         """Commit outcomes and return (keys, deltas) for anchor update."""
         pass
 
@@ -254,7 +257,18 @@ class GameMemory(ABC):
 
     def record_round(self, game_class: type, stacks: List[Tuple[List[Tuple[Any, np.ndarray, int]], "State"]]) -> Tuple[int, int]:
         """
-        Record outcomes from a batch of games.
+        Record outcomes from a batch of games with reverse n-ply credit.
+
+        Each move in a player's stack receives geometrically decaying credit
+        based on its distance from the terminal state:
+
+            weight = gamma ^ depth_from_end
+
+        where depth_from_end = (stack_length - 1 - position). The last move
+        always receives full credit (gamma^0 = 1). Earlier moves receive
+        exponentially less, filtering noise from causally distant decisions.
+
+        With gamma=1.0 (default), this reproduces the original flat credit.
 
         Returns:
             (transitions_written, transitions_swapped) — swap count is the
@@ -265,25 +279,46 @@ class GameMemory(ABC):
 
         from wise_explorer.games.game_state import GameState
 
-        transitions: Dict[Tuple[str, str], List[int]] = defaultdict(lambda: [0, 0, 0])
+        gamma = self.gamma
+        max_ply = self.max_ply
+        transitions: Dict[Tuple[str, str], List[float]] = defaultdict(lambda: [0.0, 0.0, 0.0])
+        trajectory_keys: List[List[Tuple[str, str]]] = []
 
         for moves, outcome in stacks:
             outcome_idx = OUTCOME_INDEX.get(outcome, -1)
             if outcome_idx < 0:
                 continue
 
+            k = len(moves)
             game = game_class()
-            for move, board, player in moves:
+            stack_keys: List[Tuple[str, str]] = []
+            for i, (move, board, player) in enumerate(moves):
+                depth_from_end = k - 1 - i
+
                 from_hash = hash_board(board)
                 game.set_state(GameState(board.copy(), player))
                 game.apply_move(move, validated=True)
                 to_hash = hash_board(game.get_state().board)
-                transitions[(from_hash, to_hash)][outcome_idx] += 1
+
+                stack_keys.append((from_hash, to_hash))
+
+                if max_ply is not None and depth_from_end >= max_ply:
+                    continue  # Skip moves beyond ply cap for credit
+
+                weight = gamma ** depth_from_end
+                transitions[(from_hash, to_hash)][outcome_idx] += weight
+
+            trajectory_keys.append(stack_keys)
 
         swaps = self._commit(transitions)
+        self._propagate_bellman(trajectory_keys)
         return len(transitions), swaps
 
-    def _commit(self, transitions: Dict[Tuple[str, str], List[int]]) -> int:
+    def _propagate_bellman(self, trajectory_keys: List[List[Tuple[str, str]]]) -> None:
+        """Hook for Bellman propagation. No-op for Markov memory."""
+        pass
+
+    def _commit(self, transitions: Dict[Tuple[str, str], List[float]]) -> int:
         """
         Write transitions to database with incremental anchor updates.
 

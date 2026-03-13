@@ -14,40 +14,22 @@ import numpy as np
 
 from wise_explorer.agent.agent import State
 
-Counts = Tuple[int, int, int]
+Counts = Tuple[float, float, float]
 
 
-# ╔═════════════════════════════════════════════════════════════════════════════╗
-# ║                    CONFIGURABLE OUTCOME WEIGHTS                             ║
-# ║                                                                             ║
-# ║  Modify these to experiment with different scoring strategies:              ║
-# ║                                                                             ║
-# ║  Loss-averse:            W=1.0, T=0.5, L=-1.5  → ties are half-wins         ║
-# ║  Symmetric:              W=1.0, T=0.0, L=-1.0  → pure win/loss              ║
-# ║  Win-focused:            W=1.0, T=0.0, L=-0.5  → losses hurt less           ║
-# ║  Tie-positive:           W=1.0, T=0.8, L=-1.0  → ties nearly as good        ║
-# ╚═════════════════════════════════════════════════════════════════════════════╝
+# ---------------------------------------------------------------------------
+# Outcome Weights — maps [LOSS, TIE, WIN] → [0, 0.5, 1]
+# ---------------------------------------------------------------------------
 
+L_WEIGHT = 0.0   # Utility for a LOSS
+T_WEIGHT = 0.5   # Utility for a TIE
 W_WEIGHT = 1.0   # Utility for a WIN
-T_WEIGHT = 0.0   # Utility for a TIE
-L_WEIGHT = -1.0  # Utility for a LOSS
 
-EPSILON = 0.01   # Tie-breaking margin
+WEIGHTS = (W_WEIGHT, T_WEIGHT, L_WEIGHT)
 
-SCORE_MIN = min(W_WEIGHT, T_WEIGHT, L_WEIGHT)
-SCORE_MAX = max(W_WEIGHT, T_WEIGHT, L_WEIGHT)
-SCORE_RANGE = SCORE_MAX - SCORE_MIN
-
-# Standard: Uses the raw weights defined above
-WEIGHTS_STANDARD = (W_WEIGHT, T_WEIGHT, L_WEIGHT)
-
-# Loss Averse (Tie-Optimistic):
-# Treats Ties as "Near-Max" outcomes to encourage safety/exploration.
-# Logic: Take the absolute best possible score (SCORE_MAX) and subtract epsilon.
-# The max() check ensures we never inadvertently lower the value of a Tie
-# if the Tie was already the best outcome.
-_TIE_BOOSTED = max(T_WEIGHT, SCORE_MAX - EPSILON)
-WEIGHTS_LOSS_AVERSE = (W_WEIGHT, _TIE_BOOSTED, L_WEIGHT)
+SCORE_MIN = L_WEIGHT   # 0.0
+SCORE_MAX = W_WEIGHT   # 1.0
+SCORE_RANGE = SCORE_MAX - SCORE_MIN  # 1.0
 
 OUTCOME_INDEX = {State.WIN: 0, State.TIE: 1, State.LOSS: 2}
 
@@ -59,15 +41,15 @@ OUTCOME_INDEX = {State.WIN: 0, State.TIE: 1, State.LOSS: 2}
 class Stats(NamedTuple):
     """Outcome counts with Bayesian scoring via pseudocounts."""
 
-    wins: int = 0
-    ties: int = 0
-    losses: int = 0
+    wins: float = 0
+    ties: float = 0
+    losses: float = 0
 
-    def as_tuple(self) -> Tuple[int, int, int]:
+    def as_tuple(self) -> Tuple[float, float, float]:
         return (self.wins, self.ties, self.losses)
 
     @property
-    def total(self) -> int:
+    def total(self) -> float:
         return self.wins + self.ties + self.losses
 
     @property
@@ -77,64 +59,37 @@ class Stats(NamedTuple):
             return (0.0, 0.0, 0.0)
         return (self.wins / t, self.ties / t, self.losses / t)
 
-    def _moments(self, weights: Tuple[float, float, float]) -> Tuple[float, float]:
+    def _moments(self) -> Tuple[float, float]:
         """
-        Helper to calculate Bayesian mean and variance using pseudocounts (α=1).
-        
-        Args:
-            w_val, t_val, l_val: The utility weights to use for calculation.
-            
-        Returns: 
-            (raw_mean, raw_variance)
+        Bayesian mean and variance using pseudocounts (α=1).
+
+        Returns:
+            (mean, variance) in the [0, 1] utility space.
         """
         w, t, l = self.wins + 1, self.ties + 1, self.losses + 1
         n = w + t + l
-        w_val, t_val, l_val = weights
 
-        # First moment (Mean)
-        mean = (w * w_val + t * t_val + l * l_val) / n
-
-        # Second moment (Mean of squares) used for variance calculation
-        # Var(X) = E[X^2] - (E[X])^2
-        mean_sq = (w * w_val**2 + t * t_val**2 + l * l_val**2) / n
+        mean = (w * W_WEIGHT + t * T_WEIGHT + l * L_WEIGHT) / n
+        mean_sq = (w * W_WEIGHT**2 + t * T_WEIGHT**2 + l * L_WEIGHT**2) / n
 
         return mean, mean_sq - mean**2
 
     @property
-    def mean_standard(self) -> float:
-        """Normalized ([0, 1]) mean using standard weights."""
-        if SCORE_RANGE == 0:
-            return 0.0
-        mean, _ = self._moments(WEIGHTS_STANDARD)
-        return (mean - SCORE_MIN) / SCORE_RANGE
-
-    @property
-    def mean_loss_averse(self) -> float:
-        """Normalized ([0, 1]) mean using tie-optimistic weights."""
-        if SCORE_RANGE == 0:
-            return 0.0
-        mean, _ = self._moments(WEIGHTS_LOSS_AVERSE)
-        return (mean - SCORE_MIN) / SCORE_RANGE
-
-    @property
     def mean_score(self) -> float:
-        """Optimistic envelope: max of both strategies."""
-        return max(self.mean_standard, self.mean_loss_averse)
+        """Bayesian mean score in [0, 1]."""
+        mean, _ = self._moments()
+        return mean
 
     @property
     def std_error(self) -> float:
         """Standard error from pseudocount posterior."""
-        weights = WEIGHTS_LOSS_AVERSE if self.mean_loss_averse > self.mean_standard else WEIGHTS_STANDARD
-        _, variance = self._moments(weights)
-
+        _, variance = self._moments()
         n = self.total + 3
-        raw_se = math.sqrt(max(0, variance / n))
-
-        return raw_se / SCORE_RANGE if SCORE_RANGE > 0 else 0.0
+        return math.sqrt(max(0, variance / n))
 
     @property
     def utility(self) -> float:
-        """Raw expected value (not normalized)."""
+        """Raw expected value (not normalized), no pseudocounts."""
         if self.total == 0:
             return 0.0
         return (self.wins * W_WEIGHT + self.ties * T_WEIGHT + self.losses * L_WEIGHT) / self.total
@@ -149,7 +104,6 @@ class Stats(NamedTuple):
         if method == 'dirichlet':
             alpha = [self.wins + 1, self.ties + 1, self.losses + 1]
             probs = np.random.dirichlet(alpha)
-            utility = probs[0] * W_WEIGHT + probs[1] * T_WEIGHT + probs[2] * L_WEIGHT
-            return (utility - SCORE_MIN) / SCORE_RANGE
+            return probs[0] * W_WEIGHT + probs[1] * T_WEIGHT + probs[2] * L_WEIGHT
 
         raise ValueError(f"Unknown method: {method}")

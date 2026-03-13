@@ -36,7 +36,7 @@ def _lgamma(x: float) -> float:
 
 
 @njit
-def _log_dm_marginal(counts: Tuple[int, int, int], prior: float = 1.0) -> float:
+def _log_dm_marginal(counts: Tuple[float, float, float], prior: float = 1.0) -> float:
     """
     Log marginal likelihood under Dirichlet-Multinomial model.
     
@@ -60,8 +60,8 @@ def _log_dm_marginal(counts: Tuple[int, int, int], prior: float = 1.0) -> float:
 
 @njit
 def _log_bayes_factor_impl(
-    a0: int, a1: int, a2: int,
-    b0: int, b1: int, b2: int,
+    a0: float, a1: float, a2: float,
+    b0: float, b1: float, b2: float,
     prior: float = 1.0
 ) -> float:
     """
@@ -84,8 +84,8 @@ def _log_bayes_factor_impl(
 
 @njit
 def _compatible_impl(
-    a0: int, a1: int, a2: int,
-    b0: int, b1: int, b2: int
+    a0: float, a1: float, a2: float,
+    b0: float, b1: float, b2: float
 ) -> bool:
     """
     Check if two distributions are statistically compatible.
@@ -120,8 +120,8 @@ def _compatible_impl(
 
 @njit
 def _similarity_impl(
-    a0: int, a1: int, a2: int,
-    b0: int, b1: int, b2: int
+    a0: float, a1: float, a2: float,
+    b0: float, b1: float, b2: float
 ) -> float:
     """
     Similarity score between two distributions.
@@ -148,7 +148,7 @@ def _similarity_impl(
 # Public API (tuple-based wrappers)
 # =============================================================================
 
-def log_bayes_factor(a: Tuple[int, int, int], b: Tuple[int, int, int], prior: float = 1.0) -> float:
+def log_bayes_factor(a: Tuple[float, float, float], b: Tuple[float, float, float], prior: float = 1.0) -> float:
     """
     Log Bayes factor for "same distribution" vs "different distributions".
     
@@ -158,7 +158,7 @@ def log_bayes_factor(a: Tuple[int, int, int], b: Tuple[int, int, int], prior: fl
     return _log_bayes_factor_impl(a[0], a[1], a[2], b[0], b[1], b[2], prior)
 
 
-def compatible(a: Tuple[int, int, int], b: Tuple[int, int, int]) -> bool:
+def compatible(a: Tuple[float, float, float], b: Tuple[float, float, float]) -> bool:
     """
     Check if two distributions are statistically compatible.
     
@@ -167,7 +167,7 @@ def compatible(a: Tuple[int, int, int], b: Tuple[int, int, int]) -> bool:
     return _compatible_impl(a[0], a[1], a[2], b[0], b[1], b[2])
 
 
-def similarity(a: Tuple[int, int, int], b: Tuple[int, int, int]) -> float:
+def similarity(a: Tuple[float, float, float], b: Tuple[float, float, float]) -> float:
     """
     Similarity score between two distributions.
     
@@ -184,8 +184,8 @@ def _warmup():
     """Pre-compile JIT functions on module load."""
     if NUMBA_AVAILABLE:
         # Call each function once to trigger compilation
-        _compatible_impl(10, 5, 5, 10, 5, 5)
-        _log_bayes_factor_impl(10, 5, 5, 10, 5, 5, 1.0)
-        _similarity_impl(10, 5, 5, 10, 5, 5)
+        _compatible_impl(10.0, 5.0, 5.0, 10.0, 5.0, 5.0)
+        _log_bayes_factor_impl(10.0, 5.0, 5.0, 10.0, 5.0, 5.0, 1.0)
+        _similarity_impl(10.0, 5.0, 5.0, 10.0, 5.0, 5.0)
 
 _warmup()

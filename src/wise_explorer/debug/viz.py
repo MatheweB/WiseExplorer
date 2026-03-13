@@ -305,8 +305,12 @@ def pos_str(pos: Sequence) -> str:
     return ",".join(str(int(x)) for x in p)
 
 
-def get_move_str(row: Dict, cell_strings: Dict[int, str]) -> str:
+def get_move_str(row: Dict, cell_strings: Dict[int, str], game: Optional["GameBase"] = None) -> str:
     move = row.get("move")
+    if move is not None and game is not None:
+        custom = game.move_str(move)
+        if custom is not None:
+            return custom
     diff = row.get("diff", [])
     if move is not None:
         return move_str_from_array(move, diff, cell_strings)
@@ -369,7 +373,7 @@ def get_move_desc(row: Dict, cell_strings: Dict[int, str]) -> str:
 H, V = "─", "│"
 CORNERS = {"tl": "┌", "tr": "┐", "bl": "└", "br": "┘"}
 TEES = {"lt": "├", "rt": "┤", "tt": "┬", "bt": "┴", "x": "┼"}
-TABLE_W = 70
+TABLE_W = 78
 
 
 def hline(left: str, right: str, style: str = "") -> str:
@@ -391,7 +395,7 @@ def wlt_bar(win_pct: float, loss_pct: float, width: int = 10) -> str:
     return f"{FG['green']}{'█' * w}{FG['red']}{'█' * l}{FG['yellow']}{'█' * t}{RESET}"
 
 
-def render_table(rows: List[Dict], rank: int, cell_strings: Dict[int, str]) -> List[str]:
+def render_table(rows: List[Dict], rank: int, cell_strings: Dict[int, str], game: Optional["GameBase"] = None) -> List[str]:
     """Render one anchor group as a table (compact, readable)."""
     first = rows[0]
     aid = first.get("anchor_id")
@@ -413,7 +417,7 @@ def render_table(rows: List[Dict], rank: int, cell_strings: Dict[int, str]) -> L
     lines.append(trow(f"{left}{' ' * (TABLE_W - visible_len(left) - visible_len(right))}{right}", style))
 
     stats = (
-        f" n={total:<5}  "
+        f" n={total:<.0f}  "
         f"{FG['green']}W:{wp:5.1f}%{RESET}  "
         f"{FG['red']}L:{lp:5.1f}%{RESET}  "
         f"{FG['yellow']}T:{tp:5.1f}%{RESET}  "
@@ -422,18 +426,24 @@ def render_table(rows: List[Dict], rank: int, cell_strings: Dict[int, str]) -> L
     lines.append(trow(stats, style))
     lines.append(hline(TEES["lt"], TEES["rt"], style))
 
+    # Check if any row has propagated scores
+    has_prop = any(r.get("propagated_score") is not None for r in rows)
+
     hdr = (
         f"{DIM} {pad('Move', 16)}{V}"
         f"{pad('W%', 6, 'right')}{pad('L%', 7, 'right')}{pad('T%', 7, 'right')}"
         f"{pad('(n)', 8, 'right')}{V}"
-        f"{pad('Solo', 7, 'right')}{V}{pad('Pool', 7, 'right')}{V}     {RESET}"
+        f"{pad('Solo', 7, 'right')}{V}{pad('Pool', 7, 'right')}{V}"
     )
+    if has_prop:
+        hdr += f"{pad('Bell', 7, 'right')}{V}"
+    hdr += f"     {RESET}"
     lines.append(trow(hdr, style))
     lines.append(hline(TEES["lt"], TEES["rt"], style))
 
-    sorted_rows = sorted(rows, key=lambda r: r.get("direct_score", 0), reverse=True)
+    sorted_rows = sorted(rows, key=lambda r: r.get("propagated_score") or r.get("direct_score", 0), reverse=True)
     for i, row in enumerate(sorted_rows):
-        mv = get_move_str(row, cell_strings)
+        mv = get_move_str(row, cell_strings, game)
         n = row.get("direct_total", 0)
         ds, ps = row.get("direct_score", 0), row.get("anchor_score", 0)
         w = (row.get("direct_W", 0) / n * 100) if n else 0
@@ -447,7 +457,7 @@ def render_table(rows: List[Dict], rank: int, cell_strings: Dict[int, str]) -> L
         w_colored = FG["green"] + f"{w:.1f}" + RESET
         l_colored = FG["red"] + f"{l:.1f}" + RESET
         t_colored = FG["yellow"] + f"{t:.1f}" + RESET
-        n_colored = DIM + f"{n}" + RESET
+        n_colored = DIM + f"{n:.0f}" + RESET
         ds_colored = score_color(ds) + f"{ds:.3f}" + RESET
         ps_colored = score_color(ps) + f"{ps:.3f}" + RESET
 
@@ -459,8 +469,15 @@ def render_table(rows: List[Dict], rank: int, cell_strings: Dict[int, str]) -> L
             f"{pad(n_colored, 8, 'right')}{V}"
             f"{pad(ds_colored, 7, 'right')}{V}"
             f"{pad(ps_colored, 7, 'right')}{V}"
-            f"{rlbl} {sel}"
         )
+        if has_prop:
+            prop = row.get("propagated_score")
+            if prop is not None:
+                bp_colored = score_color(prop) + f"{prop:.3f}" + RESET
+            else:
+                bp_colored = FG["gray"] + "  —  " + RESET
+            data += f"{pad(bp_colored, 7, 'right')}{V}"
+        data += f"{rlbl} {sel}"
         lines.append(trow(data, style))
 
     lines.append(hline(CORNERS["bl"], CORNERS["br"], style))
@@ -560,6 +577,7 @@ def render_debug(
     debug_rows: List[Dict[str, Any]],
     cell_strings: Dict[int, str],
     show_board: bool = True,
+    game: Optional["GameBase"] = None,
 ) -> str:
     """
     Render the full move analysis output (tables + optional board).
@@ -582,7 +600,7 @@ def render_debug(
     out_lines: List[str] = ["", f"  {BOLD}MOVE ANALYSIS{RESET}", f"  {'─' * 13}"]
     for rank, group in enumerate(sorted_groups):
         out_lines.append("")
-        out_lines.extend(render_table(group, rank, cell_strings))
+        out_lines.extend(render_table(group, rank, cell_strings, game))
 
     out_lines.append("")
     out_lines.append(f"  {DIM}Solo = this move │ Pool = anchor cluster │ ◀ = selected{RESET}")
@@ -644,6 +662,11 @@ def debug_move_selection(
 
         direct = memory.get_move_stats(from_hash, to_hash)
 
+        # Get propagated score if available (transition memory only)
+        prop_score = None
+        if hasattr(memory, 'get_propagated_score'):
+            prop_score = memory.get_propagated_score(from_hash, to_hash)
+
         if direct.total > 0:
             anchor_id = memory.get_anchor_id(from_hash, to_hash)
             anchor = memory.get_anchor_stats(from_hash, to_hash)
@@ -658,6 +681,7 @@ def debug_move_selection(
                 "anchor_total": anchor.total,
                 "anchor_W": anchor.wins, "anchor_T": anchor.ties, "anchor_L": anchor.losses,
                 "anchor_score": anchor.mean_score,
+                "propagated_score": prop_score,
             })
         else:
             prior = Stats()
@@ -672,10 +696,11 @@ def debug_move_selection(
                 "anchor_total": 0,
                 "anchor_W": 0, "anchor_T": 0, "anchor_L": 0,
                 "anchor_score": prior.mean_score,
+                "propagated_score": prop_score,
                 "unexplored": True,
             })
 
     if debug_rows:
-        render_debug(state.board, debug_rows, cell_strings=game.get_cell_strings())
+        render_debug(state.board, debug_rows, cell_strings=game.get_cell_strings(), game=game)
     else:
         print("No candidates")

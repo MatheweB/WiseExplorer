@@ -9,16 +9,57 @@ Provides the main entry points:
 from __future__ import annotations
 
 import random
-from typing import TYPE_CHECKING
+from typing import Dict, List, Optional, Tuple, TYPE_CHECKING
 
 import numpy as np
 
-from wise_explorer.selection import training, inference
+from wise_explorer.core.types import Stats
+from wise_explorer.selection import training
 
 if TYPE_CHECKING:
     from wise_explorer.games.game_base import GameBase
     from wise_explorer.memory.game_memory import GameMemory
 
+
+# ---------------------------------------------------------------------------
+# Shared: Bell-aware effective scoring
+# ---------------------------------------------------------------------------
+
+def _collect_bell_scores(
+    game: "GameBase",
+    memory: "GameMemory",
+    valid_moves: List[np.ndarray],
+) -> Dict[tuple, Optional[float]]:
+    """Collect propagated (Bellman) scores for all valid moves. Returns empty dict if unavailable."""
+    if memory.is_markov or not hasattr(memory, 'get_propagated_score'):
+        return {}
+
+    from wise_explorer.core.hashing import hash_board
+    from_hash = hash_board(game.get_state().board)
+
+    scores: Dict[tuple, Optional[float]] = {}
+    for move in valid_moves:
+        clone = game.deep_clone()
+        clone.apply_move(move, validated=True)
+        to_hash = hash_board(clone.get_state().board)
+        scores[tuple(move)] = memory.get_propagated_score(from_hash, to_hash)
+    return scores
+
+
+def _effective_score(
+    bell: Optional[float],
+    anchor_score: float,
+    pick_best: bool,
+) -> float:
+    """Combine Bell and anchor into a single effective score via max (or min for prune)."""
+    if bell is None:
+        return anchor_score
+    return max(bell, anchor_score) if pick_best else min(bell, anchor_score)
+
+
+# ---------------------------------------------------------------------------
+# Inference
+# ---------------------------------------------------------------------------
 
 def select_move(
     game: "GameBase",
@@ -30,41 +71,43 @@ def select_move(
     """
     Select move for inference (competitive play).
 
-    Pure exploitation:
-    - Anchor: deterministic best by mean_score
-    - Move: random (default, all equivalent) or deterministic best
-    - Unexplored moves compete via Stats() prior
-
-    Args:
-        game: Current game state
-        memory: GameMemory instance
-        is_prune: If True, prefer worst moves (for adversarial play)
-        random_in_anchor: If True, random among anchor's moves (they're equivalent).
-                        If False, pick best by mean_score.
-        debug: If True, show debug visualization
+    Each move's effective score is max(bell, anchor_score):
+    - Bell dominates when Bellman has converged (e.g. Nim: 0.98 vs 0.02)
+    - Anchor dominates when Bell hasn't differentiated (e.g. TTT: all 0.50)
 
     Returns:
         Selected move as numpy array
     """
     valid_moves = game.valid_moves()
-    evaluation = memory.evaluate_moves(game, valid_moves)
+    if len(valid_moves) == 0:
+        raise ValueError("No valid moves")
 
+    pick_best = not is_prune
+
+    evaluation = memory.evaluate_moves(game, valid_moves)
     anchors_with_moves = evaluation.anchors_with_moves
     anchor_stats = evaluation.anchor_stats
 
     if not anchors_with_moves:
         return np.asarray(random.choice(valid_moves))
 
-    pick_best = not is_prune
+    bell_scores = _collect_bell_scores(game, memory, valid_moves)
 
-    # Pick best anchor — unexplored compete on their prior score
-    best_anchor_id = inference.best_anchor(anchor_stats, pick_best)
+    # Score each move: (effective, bell, solo) — tiebreak chain
+    move_scored: list[tuple[np.ndarray, float, float, float]] = []
+    for aid, moves in anchors_with_moves.items():
+        a_score = anchor_stats[aid].mean_score if aid in anchor_stats else 0.5
+        for move, stats in moves:
+            bell = bell_scores.get(tuple(move))
+            effective = _effective_score(bell, a_score, pick_best)
+            solo = stats.mean_score
+            move_scored.append((move, effective, bell if bell is not None else a_score, solo))
 
-    # Move selection within anchor
-    if random_in_anchor:
-        selected_move = inference.random_move(anchors_with_moves[best_anchor_id])
+    # Sort by (effective, bell, solo) — best first
+    if pick_best:
+        selected_move = max(move_scored, key=lambda m: (m[1], m[2], m[3]))[0]
     else:
-        selected_move = inference.best_move(anchors_with_moves[best_anchor_id], pick_best)
+        selected_move = min(move_scored, key=lambda m: (m[1], m[2], m[3]))[0]
 
     if debug:
         from wise_explorer.debug.viz import debug_move_selection
@@ -72,6 +115,10 @@ def select_move(
 
     return np.asarray(selected_move)
 
+
+# ---------------------------------------------------------------------------
+# Training
+# ---------------------------------------------------------------------------
 
 def select_move_for_training(
     game: "GameBase",
@@ -80,20 +127,10 @@ def select_move_for_training(
     debug: bool = False,
 ) -> np.ndarray:
     """
-    Select move for training.
+    Select move for training (probabilistic).
 
-    Probabilistic weighted by promise
-
-    - High uncertainty → explored
-    - Low uncertainty → score dominates
-
-    Args:
-        game: Current game state
-        memory: GameMemory instance
-        is_prune:   If True, promise = 1 - mean_score (find bad lines)
-                    If False, promise = mean_score (reinforce good lines)
-
-        debug:  If True, show debug visualization
+    Uses max(bell, anchor_score) to find the best anchor, then
+    probabilistically explores or exploits within it.
 
     Returns:
         Selected move as numpy array
@@ -108,21 +145,75 @@ def select_move_for_training(
         return np.asarray(random.choice(valid_moves))
 
     pick_best = not is_prune
+    bell_scores = _collect_bell_scores(game, memory, valid_moves)
 
-    # Probabilistic weighted selection
-    last_game_best_anchor = training.select_anchor_deterministic(anchor_stats, pick_best)
-    exploration_weight = training._exploration_weight(anchor_stats[last_game_best_anchor], pick_best)
+    # Find best anchor using effective scores (bell-aware)
+    best_anchor_id = _best_anchor_effective(
+        anchors_with_moves, anchor_stats, bell_scores, pick_best,
+    )
+
+    # Probabilistic: explore or exploit within the best anchor
+    exploration_weight = training._exploration_weight(anchor_stats[best_anchor_id], pick_best)
 
     if random.random() < exploration_weight:
         selected_move = random.choice(valid_moves)
     else:
-        selected_move = training.select_move_random(anchors_with_moves[last_game_best_anchor], pick_best)
+        selected_move = _select_within_anchor_bell(
+            anchors_with_moves[best_anchor_id], bell_scores, pick_best,
+        )
 
     if debug:
         from wise_explorer.debug.viz import debug_move_selection
         debug_move_selection(memory, game, valid_moves, selected_move)
 
     return np.asarray(selected_move)
+
+
+def _select_within_anchor_bell(
+    moves: List[Tuple[np.ndarray, Stats]],
+    bell_scores: Dict[tuple, Optional[float]],
+    pick_best: bool,
+) -> np.ndarray:
+    """Pick best move by (bell, solo) within anchor. Random among full ties."""
+    scored = []
+    for move, stats in moves:
+        bell = bell_scores.get(tuple(move))
+        scored.append((move, bell if bell is not None else 0.5, stats.mean_score))
+
+    if pick_best:
+        best_key = max(scored, key=lambda s: (s[1], s[2]))[1:]
+        ties = [m for m, b, s in scored if (b, s) == best_key]
+    else:
+        best_key = min(scored, key=lambda s: (s[1], s[2]))[1:]
+        ties = [m for m, b, s in scored if (b, s) == best_key]
+
+    return random.choice(ties)
+
+
+def _best_anchor_effective(
+    anchors_with_moves: Dict[int, List[Tuple[np.ndarray, Stats]]],
+    anchor_stats: Dict[int, Stats],
+    bell_scores: Dict[tuple, Optional[float]],
+    pick_best: bool,
+) -> int:
+    """Pick the best anchor using max(bell, anchor_score) per move, then max across anchors."""
+    anchor_effective: Dict[int, float] = {}
+
+    for aid, moves in anchors_with_moves.items():
+        a_score = anchor_stats[aid].mean_score if aid in anchor_stats else 0.5
+        best_in_anchor = a_score
+        for move, _stats in moves:
+            bell = bell_scores.get(tuple(move))
+            eff = _effective_score(bell, a_score, pick_best)
+            if pick_best:
+                best_in_anchor = max(best_in_anchor, eff)
+            else:
+                best_in_anchor = min(best_in_anchor, eff)
+        anchor_effective[aid] = best_in_anchor
+
+    if pick_best:
+        return max(anchor_effective, key=anchor_effective.get)  # type: ignore
+    return min(anchor_effective, key=anchor_effective.get)  # type: ignore
 
 
 __all__ = [

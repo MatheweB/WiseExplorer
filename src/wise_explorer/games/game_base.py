@@ -3,7 +3,7 @@ GameBase - abstract base class for all board games.
 """
 
 from abc import ABC, abstractmethod
-from typing import List
+from typing import List, Optional
 
 from numpy.typing import NDArray
 
@@ -108,3 +108,7 @@ class GameBase(ABC):
     def state_string(self) -> str:
         """Pretty string representation of the state."""
         pass
+
+    def move_str(self, move: NDArray) -> Optional[str]:
+        """Optional human-readable move string. Return None to use default formatting."""
+        return None

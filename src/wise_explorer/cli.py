@@ -59,6 +59,18 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Uses Markov states in favor of transitions",
     )
+    parser.add_argument(
+        "--gamma",
+        type=float,
+        default=1.0,
+        help="Reverse n-ply decay rate (default: 1.0 = flat credit). Lower values discount early moves more.",
+    )
+    parser.add_argument(
+        "--max-ply",
+        type=int,
+        default=None,
+        help="Max plies from end to credit (default: None = all moves).",
+    )
     return parser.parse_args()
 
 def parse_human_players(players_str: str | None, num_players: int, game_id: str, self_play: bool) -> list[int]:
@@ -107,7 +119,10 @@ def main() -> None:
     agent_swarms = create_agent_swarms(players, config.num_agents)
     
     # Set up memory
-    memory = Memory.for_game(game, base_dir=MEMORY_DIR, markov=args.markov)
+    memory = Memory.for_game(
+        game, base_dir=MEMORY_DIR, markov=args.markov,
+        gamma=args.gamma, max_ply=args.max_ply,
+    )
     
     # Determine human players
     human_players = parse_human_players(args.players, game.num_players(), game.game_id(), args.self_play)

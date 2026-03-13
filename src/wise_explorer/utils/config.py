@@ -4,10 +4,11 @@ Configuration and game registry.
 
 import math
 from pathlib import Path
+from typing import Optional
 
 import numpy as np
 
-from wise_explorer.games import TicTacToe, MiniChess
+from wise_explorer.games import TicTacToe, MiniChess, Nim
 from wise_explorer.games.game_state import GameState
 from wise_explorer.simulation import DEFAULT_WORKER_COUNT
 
@@ -28,6 +29,7 @@ MEMORY_DIR = DATA_DIR / "memory"
 GAMES = {
     "tic_tac_toe": TicTacToe,
     "minichess": MiniChess,
+    "nim": Nim,
 }
 
 # Initial states use int8 encoding (0 = empty)
@@ -38,6 +40,10 @@ INITIAL_STATES = {
     ),
     "minichess": GameState(
         MiniChess._initial_board(),  # Static method
+        current_player=1,
+    ),
+    "nim": GameState(
+        Nim._initial_heaps(4),
         current_player=1,
     ),
 }
@@ -62,10 +68,14 @@ class Config:
         epochs: int = 100,
         turn_depth: int = 40,
         num_workers: int = DEFAULT_WORKER_COUNT,
+        gamma: float = 1.0,
+        max_ply: Optional[int] = None,
     ):
         self.game_name = game_name
         self.turn_depth = turn_depth
         self.num_workers = num_workers
+        self.gamma = gamma
+        self.max_ply = max_ply
 
         # Derive dependent values
         game_class = GAMES[game_name]
