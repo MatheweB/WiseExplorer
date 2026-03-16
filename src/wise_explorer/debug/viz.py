@@ -62,6 +62,15 @@ def score_color(score: float) -> str:
     return FG["red"]
 
 
+def alpha_color(alpha: float) -> str:
+    """Color for alignment factor: gray at 0, cyan/green as it rises."""
+    if alpha <= 0.01:
+        return FG["gray"]
+    if alpha >= 0.4:
+        return FG["green"]
+    return FG["cyan"]
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # Text utilities
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -426,8 +435,9 @@ def render_table(rows: List[Dict], rank: int, cell_strings: Dict[int, str], game
     lines.append(trow(stats, style))
     lines.append(hline(TEES["lt"], TEES["rt"], style))
 
-    # Check if any row has propagated scores
+    # Check if any row has propagated scores or alpha values
     has_prop = any(r.get("propagated_score") is not None for r in rows)
+    has_alpha = any(r.get("alpha") is not None for r in rows)
 
     hdr = (
         f"{DIM} {pad('Move', 16)}{V}"
@@ -437,6 +447,9 @@ def render_table(rows: List[Dict], rank: int, cell_strings: Dict[int, str], game
     )
     if has_prop:
         hdr += f"{pad('Bell', 7, 'right')}{V}"
+    if has_alpha:
+        _alpha_sym = "\u03b1"
+        hdr += f"{pad(_alpha_sym, 5, 'right')}{V}"
     hdr += f"     {RESET}"
     lines.append(trow(hdr, style))
     lines.append(hline(TEES["lt"], TEES["rt"], style))
@@ -451,7 +464,7 @@ def render_table(rows: List[Dict], rank: int, cell_strings: Dict[int, str], game
         t = (row.get("direct_T", 0) / n * 100) if n else 0
 
         rlbl = f"{FG['yellow']}1st{RESET}" if i == 0 else f"{FG['gray']}#{i+1}{RESET}"
-        sel = f"{FG['green']}◀{RESET}" if row.get("is_selected") else " "
+        sel = f"{FG['green']}\u25c0{RESET}" if row.get("is_selected") else " "
 
         # Build colored & padded pieces safely
         w_colored = FG["green"] + f"{w:.1f}" + RESET
@@ -475,8 +488,15 @@ def render_table(rows: List[Dict], rank: int, cell_strings: Dict[int, str], game
             if prop is not None:
                 bp_colored = score_color(prop) + f"{prop:.3f}" + RESET
             else:
-                bp_colored = FG["gray"] + "  —  " + RESET
+                bp_colored = FG["gray"] + "  \u2014  " + RESET
             data += f"{pad(bp_colored, 7, 'right')}{V}"
+        if has_alpha:
+            a = row.get("alpha")
+            if a is not None:
+                a_colored = alpha_color(a) + f"{a:.2f}" + RESET
+            else:
+                a_colored = FG["gray"] + " \u2014 " + RESET
+            data += f"{pad(a_colored, 5, 'right')}{V}"
         data += f"{rlbl} {sel}"
         lines.append(trow(data, style))
 
@@ -603,7 +623,7 @@ def render_debug(
         out_lines.extend(render_table(group, rank, cell_strings, game))
 
     out_lines.append("")
-    out_lines.append(f"  {DIM}Solo = this move │ Pool = anchor cluster │ ◀ = selected{RESET}")
+    out_lines.append(f"  {DIM}Solo = this move │ Pool = anchor cluster │ \u03b1 = alignment │ \u25c0 = selected{RESET}")
 
     if show_board:
         out_lines.extend(render_board(board, debug_rows, cell_strings))
@@ -662,10 +682,13 @@ def debug_move_selection(
 
         direct = memory.get_move_stats(from_hash, to_hash)
 
-        # Get propagated score if available (transition memory only)
+        # Get propagated score and alpha if available (transition memory only)
         prop_score = None
+        move_alpha = None
         if hasattr(memory, 'get_propagated_score'):
             prop_score = memory.get_propagated_score(from_hash, to_hash)
+        if hasattr(memory, 'get_alpha'):
+            move_alpha = memory.get_alpha(from_hash, to_hash)
 
         if direct.total > 0:
             anchor_id = memory.get_anchor_id(from_hash, to_hash)
@@ -682,6 +705,7 @@ def debug_move_selection(
                 "anchor_W": anchor.wins, "anchor_T": anchor.ties, "anchor_L": anchor.losses,
                 "anchor_score": anchor.mean_score,
                 "propagated_score": prop_score,
+                "alpha": move_alpha,
             })
         else:
             prior = Stats()
@@ -697,6 +721,7 @@ def debug_move_selection(
                 "anchor_W": 0, "anchor_T": 0, "anchor_L": 0,
                 "anchor_score": prior.mean_score,
                 "propagated_score": prop_score,
+                "alpha": move_alpha,
                 "unexplored": True,
             })
 

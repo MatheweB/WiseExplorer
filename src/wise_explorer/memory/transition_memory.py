@@ -93,6 +93,22 @@ class TransitionMemory(GameMemory):
         deltas = {k: (c[0], c[1], c[2]) for k, c in transitions.items()}
         return keys, deltas
 
+    def _record_cross_scores(self, cross_scores: Dict) -> None:
+        """Write accumulated cross-scores to the database."""
+        if not cross_scores:
+            return
+        cur = self.conn.cursor()
+        cur.executemany(
+            """INSERT INTO cross_scores (from_hash, to_hash, observer_role, score_sum, score_count)
+            VALUES (?,?,?,?,?)
+            ON CONFLICT(from_hash, to_hash, observer_role) DO UPDATE SET
+                score_sum = score_sum + excluded.score_sum,
+                score_count = score_count + excluded.score_count""",
+            [(fh, th, obs, vals[0], vals[1])
+             for (fh, th, obs), vals in cross_scores.items()],
+        )
+        self.conn.commit()
+
     def _propagate_bellman(self, trajectory_keys: List[List[Tuple[str, str]]]) -> None:
         """Run Bellman backward sweep along each played trajectory."""
         for stack_keys in trajectory_keys:
@@ -149,15 +165,87 @@ class TransitionMemory(GameMemory):
             return row[0]
         return Stats(row[1], row[2], row[3]).mean_score
 
+    def _compute_alpha(self, child_from: str, child_to: str) -> float:
+        """
+        Compute the alignment factor α for a child transition.
+
+        Uses the excess formula: α = max(0, μ_cross + μ_mover - 1)
+        where μ_cross is the average observer score and μ_mover is
+        the empirical mean score of the child transition.
+
+        Returns 0.0 (adversarial default) when cross-score data is
+        insufficient, recovering standard zero-sum minimax.
+        """
+        # Get observer cross-scores (averaged across all observer roles)
+        rows = self.conn.execute(
+            "SELECT score_sum, score_count FROM cross_scores "
+            "WHERE from_hash=? AND to_hash=?",
+            (child_from, child_to)
+        ).fetchall()
+
+        if not rows:
+            return 0.0
+
+        total_sum = sum(r[0] for r in rows)
+        total_count = sum(r[1] for r in rows)
+        if total_count < 1.0:
+            return 0.0
+
+        mu_cross = total_sum / total_count
+
+        # Get mover's empirical mean score
+        row = self.conn.execute(
+            "SELECT wins, ties, losses FROM transitions "
+            "WHERE from_hash=? AND to_hash=?",
+            (child_from, child_to)
+        ).fetchone()
+        if row is None:
+            return 0.0
+        mu_mover = Stats(*row).mean_score
+
+        return max(0.0, mu_cross + mu_mover - 1.0)
+
+    def get_alpha(self, from_hash: str, to_hash: str) -> Optional[float]:
+        """
+        Get the α that would be used when propagating a transition.
+
+        Returns the α from the best child of to_hash, or None if
+        to_hash has no children (terminal state).
+        """
+        children = self.conn.execute(
+            "SELECT to_hash, propagated_score, wins, ties, losses "
+            "FROM transitions WHERE from_hash=?",
+            (to_hash,)
+        ).fetchall()
+
+        if not children:
+            return None
+
+        best_score = -1.0
+        best_child_to = None
+        for child_to, prop_score, w, t, l in children:
+            v = prop_score if prop_score is not None else Stats(w, t, l).mean_score
+            if v > best_score:
+                best_score = v
+                best_child_to = child_to
+
+        if best_child_to is None:
+            return None
+
+        return self._compute_alpha(to_hash, best_child_to)
+
     def propagate_bellman(self, trajectory_keys: List[Tuple[str, str]]) -> None:
         """
         Backward Bellman sweep along a played trajectory.
 
         For each transition (from_hash, to_hash) processed deepest-first:
           - If to_hash has no children in DB: P = mean_score(from, to)
-          - Else: P = 1 - max(V̂(to_hash, child)) over all children
+          - Else: P = α · V_next + (1 − α) · (1 − V_next)
+            where V_next = max(V̂(to_hash, child)) and α is the learned
+            alignment factor from cross-scores at the best child.
 
-        This is the core of amortized Bellman propagation (Section 3 of design doc).
+        When α = 0 (no cross-score data or adversarial game), this
+        recovers the standard 1 − max minimax formula.
         """
         if not trajectory_keys:
             return
@@ -178,14 +266,18 @@ class TransitionMemory(GameMemory):
                 ).fetchone()
                 prop = Stats(*row).mean_score if row else Stats().mean_score
             else:
-                # Non-terminal: negamax over children
-                child_scores = []
+                # Find best child and its V̂
+                best_score = -1.0
+                best_child_to = None
                 for child_to, prop_score, w, t, l in children:
-                    if prop_score is not None:
-                        child_scores.append(prop_score)
-                    else:
-                        child_scores.append(Stats(w, t, l).mean_score)
-                prop = 1.0 - max(child_scores)
+                    v = prop_score if prop_score is not None else Stats(w, t, l).mean_score
+                    if v > best_score:
+                        best_score = v
+                        best_child_to = child_to
+
+                v_next = best_score
+                alpha = self._compute_alpha(to_hash, best_child_to)
+                prop = alpha * v_next + (1.0 - alpha) * (1.0 - v_next)
 
             cur.execute(
                 "UPDATE transitions SET propagated_score=? WHERE from_hash=? AND to_hash=?",

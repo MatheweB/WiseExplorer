@@ -39,6 +39,15 @@ CREATE TABLE IF NOT EXISTS anchors (
     losses REAL DEFAULT 0.0
 );
 
+CREATE TABLE IF NOT EXISTS cross_scores (
+    from_hash TEXT NOT NULL,
+    to_hash TEXT NOT NULL,
+    observer_role INTEGER NOT NULL,
+    score_sum REAL DEFAULT 0,
+    score_count REAL DEFAULT 0,
+    PRIMARY KEY (from_hash, to_hash, observer_role)
+);
+
 CREATE TABLE IF NOT EXISTS metadata (
     key TEXT PRIMARY KEY,
     value TEXT

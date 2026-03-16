@@ -213,6 +213,7 @@ class SimulationRunner:
                 stacks.append((
                     [(m.move, m.board_before, m.player) for m in moves],
                     outcome,
+                    result.outcomes,
                 ))
 
         if not stacks:

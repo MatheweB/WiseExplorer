@@ -32,6 +32,7 @@ SCORE_MAX = W_WEIGHT   # 1.0
 SCORE_RANGE = SCORE_MAX - SCORE_MIN  # 1.0
 
 OUTCOME_INDEX = {State.WIN: 0, State.TIE: 1, State.LOSS: 2}
+OUTCOME_SCORE = {State.WIN: W_WEIGHT, State.TIE: T_WEIGHT, State.LOSS: L_WEIGHT}
 
 
 # ---------------------------------------------------------------------------

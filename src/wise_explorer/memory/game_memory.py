@@ -16,7 +16,7 @@ from typing import Any, Dict, List, NamedTuple, Optional, Tuple, TYPE_CHECKING
 
 import numpy as np
 
-from wise_explorer.core.types import Stats, Counts, OUTCOME_INDEX
+from wise_explorer.core.types import Stats, Counts, OUTCOME_INDEX, OUTCOME_SCORE
 from wise_explorer.core.hashing import hash_board
 from wise_explorer.core.bayes import compatible
 from wise_explorer.memory.anchor_manager import AnchorManager
@@ -255,7 +255,7 @@ class GameMemory(ABC):
     # Recording
     # -------------------------------------------------------------------------
 
-    def record_round(self, game_class: type, stacks: List[Tuple[List[Tuple[Any, np.ndarray, int]], "State"]]) -> Tuple[int, int]:
+    def record_round(self, game_class: type, stacks: List[Tuple]) -> Tuple[int, int]:
         """
         Record outcomes from a batch of games with reverse n-ply credit.
 
@@ -270,6 +270,11 @@ class GameMemory(ABC):
 
         With gamma=1.0 (default), this reproduces the original flat credit.
 
+        Stacks may be 2-tuples (moves, outcome) or 3-tuples
+        (moves, outcome, all_outcomes) where all_outcomes is a dict mapping
+        every player ID to their State for that game. The 3-tuple form
+        enables cross-score recording for the alignment factor α.
+
         Returns:
             (transitions_written, transitions_swapped) — swap count is the
             core learning signal indicating how many beliefs changed.
@@ -283,8 +288,13 @@ class GameMemory(ABC):
         max_ply = self.max_ply
         transitions: Dict[Tuple[str, str], List[float]] = defaultdict(lambda: [0.0, 0.0, 0.0])
         trajectory_keys: List[List[Tuple[str, str]]] = []
+        # Cross-score accumulator: (from_hash, to_hash, observer_role) -> [score_sum, count]
+        cross_scores: Dict[Tuple[str, str, int], List[float]] = defaultdict(lambda: [0.0, 0.0])
 
-        for moves, outcome in stacks:
+        for stack_entry in stacks:
+            moves, outcome = stack_entry[0], stack_entry[1]
+            all_outcomes = stack_entry[2] if len(stack_entry) > 2 else None
+
             outcome_idx = OUTCOME_INDEX.get(outcome, -1)
             if outcome_idx < 0:
                 continue
@@ -308,11 +318,25 @@ class GameMemory(ABC):
                 weight = gamma ** depth_from_end
                 transitions[(from_hash, to_hash)][outcome_idx] += weight
 
+                # Accumulate cross-scores: each non-mover's outcome
+                if all_outcomes is not None:
+                    for obs_pid, obs_outcome in all_outcomes.items():
+                        if obs_pid == player:
+                            continue  # Skip mover's own outcome
+                        obs_score = OUTCOME_SCORE.get(obs_outcome, 0.5)
+                        cross_scores[(from_hash, to_hash, obs_pid)][0] += weight * obs_score
+                        cross_scores[(from_hash, to_hash, obs_pid)][1] += weight
+
             trajectory_keys.append(stack_keys)
 
         swaps = self._commit(transitions)
+        self._record_cross_scores(cross_scores)
         self._propagate_bellman(trajectory_keys)
         return len(transitions), swaps
+
+    def _record_cross_scores(self, cross_scores: Dict) -> None:
+        """Hook for recording cross-scores. No-op for Markov memory."""
+        pass
 
     def _propagate_bellman(self, trajectory_keys: List[List[Tuple[str, str]]]) -> None:
         """Hook for Bellman propagation. No-op for Markov memory."""
