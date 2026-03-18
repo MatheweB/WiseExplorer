@@ -473,7 +473,12 @@ class GameMemory(ABC):
         except Exception:
             pass
 
-        # Group transitions by from_hash with all three signals
+        # Group transitions by from_hash with all four signals
+        # (bell, anchor, solo, pred). Pred comes from the predicate library —
+        # if predicates have learned structural patterns that discriminate
+        # better than raw scores, they win the variance ranking and guide
+        # mining toward better splits. Bell eventually overrides as it
+        # converges, so any wrong predicates self-correct.
         from_groups: Dict[str, list] = {}
         for from_hash, to_hash, w, t, l, bell, anchor_id in rows:
             if to_hash not in boards or from_hash not in boards:
@@ -483,33 +488,49 @@ class GameMemory(ABC):
                 continue
             solo_mean = s.mean_score
             anchor_mean = anchor_stats.get(anchor_id, solo_mean) if anchor_id is not None else solo_mean
+
+            # Predicate score: structural prior from the predicate library
+            pred_score = None
+            if self.predicate_library.count > 0:
+                to_2d = boards[to_hash] if boards[to_hash].ndim == 2 else boards[to_hash].reshape(1, -1)
+                from_2d = boards[from_hash] if boards[from_hash].ndim == 2 else boards[from_hash].reshape(1, -1)
+                pred_stats = self.predicate_library.match(to_2d, from_2d)
+                if pred_stats is not None:
+                    pred_score = pred_stats.mean_score
+
             if from_hash not in from_groups:
                 from_groups[from_hash] = []
-            from_groups[from_hash].append((to_hash, (w, t, l), bell, anchor_mean, solo_mean))
+            from_groups[from_hash].append((to_hash, (w, t, l), bell, anchor_mean, solo_mean, pred_score))
 
-        # Per-from-board: rank bell, anchor, solo by variance (matches selection)
+        # Per-from-board: rank all 4 signals by variance (matches selection)
         trans_scores: Dict[Tuple[str, str], Tuple[Counts, float]] = {}
         for from_hash, transitions in from_groups.items():
             bell_vals = [t[2] for t in transitions if t[2] is not None]
             anchor_vals = [t[3] for t in transitions]
             solo_vals = [t[4] for t in transitions]
+            pred_vals = [t[5] for t in transitions if t[5] is not None]
 
             variances = {
                 "bell": float(_np.var(bell_vals)) if len(bell_vals) >= 2 else 0.0,
                 "anchor": float(_np.var(anchor_vals)) if len(anchor_vals) >= 2 else 0.0,
                 "solo": float(_np.var(solo_vals)) if len(solo_vals) >= 2 else 0.0,
+                "pred": float(_np.var(pred_vals)) if len(pred_vals) >= 2 else 0.0,
             }
-            # Bell needs sufficient coverage
+            # Signals need sufficient coverage
             if len(bell_vals) <= len(transitions) * 0.5:
                 variances["bell"] = 0.0
+            if len(pred_vals) <= len(transitions) * 0.5:
+                variances["pred"] = 0.0
 
             best_signal = max(variances, key=variances.get)
 
-            for to_hash, counts, bell, anchor_mean, solo_mean in transitions:
+            for to_hash, counts, bell, anchor_mean, solo_mean, pred_score in transitions:
                 if best_signal == "bell" and bell is not None:
                     score = bell
                 elif best_signal == "anchor":
                     score = anchor_mean
+                elif best_signal == "pred" and pred_score is not None:
+                    score = pred_score
                 else:
                     score = solo_mean
                 trans_scores[(from_hash, to_hash)] = (counts, score)

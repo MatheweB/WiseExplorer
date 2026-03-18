@@ -46,15 +46,44 @@ def _collect_bell_scores(
     return scores
 
 
+def _collect_predicate_scores(
+    game: "GameBase",
+    memory: "GameMemory",
+    valid_moves: List[np.ndarray],
+) -> Dict[tuple, Optional[float]]:
+    """Collect predicate-matched scores for all valid moves.
+
+    Checks each destination board against the predicate library. Returns
+    the predicate's mean_score if a match is found, None otherwise.
+    """
+    if not hasattr(memory, 'predicate_library') or memory.predicate_library.count == 0:
+        return {}
+
+    current_board = game.get_state().board
+    from_board_2d = current_board if current_board.ndim == 2 else current_board.reshape(1, -1)
+
+    scores: Dict[tuple, Optional[float]] = {}
+    for move in valid_moves:
+        clone = game.deep_clone()
+        clone.apply_move(move, validated=True)
+        to_board = clone.get_state().board
+        to_board_2d = to_board if to_board.ndim == 2 else to_board.reshape(1, -1)
+
+        pred_stats = memory.predicate_library.match(to_board_2d, from_board_2d)
+        scores[tuple(move)] = pred_stats.mean_score if pred_stats is not None else None
+    return scores
+
+
 def _rank_signals(
     bell_scores: Dict[tuple, Optional[float]],
     anchor_scores: Dict[tuple, float],
     solo_scores: Dict[tuple, float],
-) -> Tuple[str, str, str]:
-    """Rank the three signals by variance — most informative first.
+    pred_scores: Optional[Dict[tuple, Optional[float]]] = None,
+) -> Tuple[str, ...]:
+    """Rank signals by variance — most informative first.
 
-    Compares variance of bell, anchor, and solo scores across all moves.
-    Returns a tuple of signal names ordered by descending variance.
+    Compares variance of bell, anchor, solo, and predicate scores across
+    all moves. Returns signal names ordered by descending variance.
     """
     bells = [b for b in bell_scores.values() if b is not None]
     anchors = list(anchor_scores.values())
@@ -66,24 +95,31 @@ def _rank_signals(
         "solo": np.var(solos) if len(solos) >= 2 else 0.0,
     }
 
+    if pred_scores:
+        preds = [p for p in pred_scores.values() if p is not None]
+        variances["pred"] = np.var(preds) if len(preds) >= 2 else 0.0
+
     ranked = sorted(variances, key=variances.get, reverse=True)  # type: ignore
-    return (ranked[0], ranked[1], ranked[2])
+    return tuple(ranked)
 
 
 def _score_move(
     bell: Optional[float],
     anchor_score: float,
     solo_score: float,
-    signal_order: Tuple[str, str, str],
-) -> Tuple[float, float, float]:
-    """Score a move as (primary, tiebreak1, tiebreak2) based on signal ranking.
+    signal_order: Tuple[str, ...],
+    pred_score: Optional[float] = None,
+) -> Tuple[float, ...]:
+    """Score a move as a tuple based on signal ranking.
 
-    signal_order is a tuple of ("bell", "anchor", "solo") ranked by variance.
-    The move is scored using the most informative signal first.
+    signal_order is ranked by variance (most informative first).
+    The move is scored using the most informative signal first,
+    with remaining signals as tiebreakers.
     """
     b = bell if bell is not None else anchor_score
-    values = {"bell": b, "anchor": anchor_score, "solo": solo_score}
-    return (values[signal_order[0]], values[signal_order[1]], values[signal_order[2]])
+    p = pred_score if pred_score is not None else anchor_score
+    values = {"bell": b, "anchor": anchor_score, "solo": solo_score, "pred": p}
+    return tuple(values[s] for s in signal_order)
 
 
 # ---------------------------------------------------------------------------
@@ -124,6 +160,7 @@ def select_move(
         return np.asarray(random.choice(valid_moves))
 
     bell_scores = _collect_bell_scores(game, memory, valid_moves)
+    pred_scores = _collect_predicate_scores(game, memory, valid_moves)
 
     # Collect anchor and solo scores per move for signal comparison
     anchor_scores: Dict[tuple, float] = {}
@@ -135,15 +172,17 @@ def select_move(
             anchor_scores[mk] = a_score
             solo_scores[mk] = stats.mean_score
 
-    signal_order = _rank_signals(bell_scores, anchor_scores, solo_scores)
+    signal_order = _rank_signals(bell_scores, anchor_scores, solo_scores, pred_scores)
 
     # Score each move using the ranked signal order
-    move_scored: list[tuple[np.ndarray, Tuple[float, float, float]]] = []
+    move_scored: list[tuple[np.ndarray, Tuple[float, ...]]] = []
     for aid, moves in anchors_with_moves.items():
         a_score = anchor_stats[aid].mean_score if aid in anchor_stats else 0.5
         for move, stats in moves:
-            bell = bell_scores.get(tuple(move))
-            key = _score_move(bell, a_score, stats.mean_score, signal_order)
+            mk = tuple(move)
+            bell = bell_scores.get(mk)
+            pred = pred_scores.get(mk) if pred_scores else None
+            key = _score_move(bell, a_score, stats.mean_score, signal_order, pred)
             move_scored.append((move, key))
 
     if pick_best:
@@ -188,6 +227,7 @@ def select_move_for_training(
 
     pick_best = not is_prune
     bell_scores = _collect_bell_scores(game, memory, valid_moves)
+    pred_scores = _collect_predicate_scores(game, memory, valid_moves)
 
     # Collect anchor and solo scores for signal ranking
     anchor_scores: Dict[tuple, float] = {}
@@ -199,11 +239,12 @@ def select_move_for_training(
             anchor_scores[mk] = a_score
             solo_scores[mk] = stats.mean_score
 
-    signal_order = _rank_signals(bell_scores, anchor_scores, solo_scores)
+    signal_order = _rank_signals(bell_scores, anchor_scores, solo_scores, pred_scores)
 
     # Find best anchor using ranked signals
     best_anchor_id = _best_anchor_by_signal(
         anchors_with_moves, anchor_stats, bell_scores, signal_order, pick_best,
+        pred_scores,
     )
 
     # Probabilistic: explore or exploit within the best anchor
@@ -214,6 +255,7 @@ def select_move_for_training(
     else:
         selected_move = _select_within_anchor(
             anchors_with_moves[best_anchor_id], bell_scores, signal_order, pick_best,
+            pred_scores,
         )
 
     if debug:
@@ -226,14 +268,17 @@ def select_move_for_training(
 def _select_within_anchor(
     moves: List[Tuple[np.ndarray, Stats]],
     bell_scores: Dict[tuple, Optional[float]],
-    signal_order: Tuple[str, str, str],
+    signal_order: Tuple[str, ...],
     pick_best: bool,
+    pred_scores: Optional[Dict[tuple, Optional[float]]] = None,
 ) -> np.ndarray:
     """Pick best move within anchor using ranked signals. Random among full ties."""
     scored = []
     for move, stats in moves:
-        bell = bell_scores.get(tuple(move))
-        key = _score_move(bell, stats.mean_score, stats.mean_score, signal_order)
+        mk = tuple(move)
+        bell = bell_scores.get(mk)
+        pred = pred_scores.get(mk) if pred_scores else None
+        key = _score_move(bell, stats.mean_score, stats.mean_score, signal_order, pred)
         scored.append((move, key))
 
     if pick_best:
@@ -250,18 +295,21 @@ def _best_anchor_by_signal(
     anchors_with_moves: Dict[int, List[Tuple[np.ndarray, Stats]]],
     anchor_stats: Dict[int, Stats],
     bell_scores: Dict[tuple, Optional[float]],
-    signal_order: Tuple[str, str, str],
+    signal_order: Tuple[str, ...],
     pick_best: bool,
+    pred_scores: Optional[Dict[tuple, Optional[float]]] = None,
 ) -> int:
     """Pick the best anchor using ranked signals."""
-    anchor_best: Dict[int, Tuple[float, float, float]] = {}
+    anchor_best: Dict[int, Tuple[float, ...]] = {}
 
     for aid, moves in anchors_with_moves.items():
         a_score = anchor_stats[aid].mean_score if aid in anchor_stats else 0.5
         best_key = _score_move(None, a_score, a_score, signal_order)
         for move, stats in moves:
-            bell = bell_scores.get(tuple(move))
-            key = _score_move(bell, a_score, stats.mean_score, signal_order)
+            mk = tuple(move)
+            bell = bell_scores.get(mk)
+            pred = pred_scores.get(mk) if pred_scores else None
+            key = _score_move(bell, a_score, stats.mean_score, signal_order, pred)
             if pick_best:
                 best_key = max(best_key, key)
             else:
