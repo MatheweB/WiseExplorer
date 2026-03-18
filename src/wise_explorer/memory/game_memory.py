@@ -20,11 +20,15 @@ from wise_explorer.core.types import Stats, Counts, OUTCOME_INDEX, OUTCOME_SCORE
 from wise_explorer.core.hashing import hash_board
 from wise_explorer.core.bayes import compatible
 from wise_explorer.memory.anchor_manager import AnchorManager
+from wise_explorer.memory.predicates import PredicateLibrary, TORCH_AVAILABLE
+from wise_explorer.memory.iti_miner import ITIMiner
+from wise_explorer.memory.tree_miner import TreeMiner
 
 if TYPE_CHECKING:
     from wise_explorer.agent.agent import State
     from wise_explorer.games.game_base import GameBase
 UNEXPLORED_ANCHOR_ID = -999
+PREDICATE_ANCHOR_ID = -998
 
 
 class MoveEvaluation(NamedTuple):
@@ -61,6 +65,9 @@ class GameMemory(ABC):
             self.conn.commit()
 
         self.anchors = AnchorManager(self.conn, self.main_table, self.read_only)
+        self.predicate_library = PredicateLibrary(self.conn, self.read_only)
+        self._batch_miner = TreeMiner()   # batch CART for end-of-training
+        self._iti_miner = ITIMiner()       # incremental for per-wave updates
 
     # -------------------------------------------------------------------------
     # Abstract Methods (subclasses must implement)
@@ -120,6 +127,19 @@ class GameMemory(ABC):
     def _commit_outcomes(self, transitions: Dict[Tuple[str, str], List[float]], cur: sqlite3.Cursor) -> Tuple[List, Dict]:
         """Commit outcomes and return (keys, deltas) for anchor update."""
         pass
+
+    @abstractmethod
+    def _aggregate_destination_scores(self) -> Dict[str, Counts]:
+        """Aggregate scores per destination board hash for predicate mining."""
+        pass
+
+    def _get_destination_bellman_scores(self) -> Dict[str, float]:
+        """Get average Bellman score per destination hash. Override in subclasses with Bellman."""
+        return {}
+
+    def _get_transition_from_hashes(self) -> Dict[str, str]:
+        """Get the most common from_hash for each to_hash. Override in subclasses."""
+        return {}
 
     @abstractmethod
     def _get_mode_specific_info(self) -> Dict[str, Any]:
@@ -207,7 +227,11 @@ class GameMemory(ABC):
     def get_info(self) -> Dict[str, Any]:
         """Get summary statistics."""
         anchors = self.conn.execute("SELECT COUNT(*) FROM anchors").fetchone()[0]
-        return {"anchors": anchors, **self._get_mode_specific_info()}
+        return {
+            "anchors": anchors,
+            "predicates": self.predicate_library.count,
+            **self._get_mode_specific_info(),
+        }
 
     # -------------------------------------------------------------------------
     # Move Evaluation
@@ -215,12 +239,15 @@ class GameMemory(ABC):
 
     def evaluate_moves(self, game: "GameBase", valid_moves: List[np.ndarray]) -> MoveEvaluation:
         """Evaluate all valid moves and group by anchor."""
-        from_hash = hash_board(game.get_state().board)
+        current_board = game.get_state().board
+        from_hash = hash_board(current_board)
+        # Normalize from_board to 2D for predicate matching
+        from_board_2d = current_board if current_board.ndim == 2 else current_board.reshape(1, -1)
 
         anchors_with_moves: Dict[int, List[Tuple[np.ndarray, Stats]]] = defaultdict(list)
         anchor_stats: Dict[int, Stats] = {}
 
-        for move, to_hash in self._compute_move_hashes(game, valid_moves):
+        for move, to_hash, to_board in self._compute_move_hashes(game, valid_moves):
             direct_stats = self.get_move_stats(from_hash, to_hash)
 
             if direct_stats.total > 0:
@@ -231,13 +258,21 @@ class GameMemory(ABC):
                 if aid not in anchor_stats:
                     anchor_stats[aid] = self.get_anchor_stats_by_id(aid) if aid != UNEXPLORED_ANCHOR_ID else Stats()
             else:
-                anchors_with_moves[UNEXPLORED_ANCHOR_ID].append((move, Stats()))
-                anchor_stats[UNEXPLORED_ANCHOR_ID] = Stats()
+                # Unseen transition — check predicate library for a prior
+                board_2d = to_board if to_board.ndim == 2 else to_board.reshape(1, -1)
+                pred_stats = self.predicate_library.match(board_2d, from_board_2d)
+                if pred_stats is not None:
+                    anchors_with_moves[PREDICATE_ANCHOR_ID].append((move, pred_stats))
+                    if PREDICATE_ANCHOR_ID not in anchor_stats:
+                        anchor_stats[PREDICATE_ANCHOR_ID] = pred_stats
+                else:
+                    anchors_with_moves[UNEXPLORED_ANCHOR_ID].append((move, Stats()))
+                    anchor_stats[UNEXPLORED_ANCHOR_ID] = Stats()
 
         return MoveEvaluation(anchors_with_moves=dict(anchors_with_moves), anchor_stats=anchor_stats)
 
-    def _compute_move_hashes(self, game: "GameBase", valid_moves: List[np.ndarray]) -> List[Tuple[np.ndarray, str]]:
-        """Generate (move, destination_hash) pairs.
+    def _compute_move_hashes(self, game: "GameBase", valid_moves: List[np.ndarray]) -> List[Tuple[np.ndarray, str, np.ndarray]]:
+        """Generate (move, destination_hash, destination_board) triples.
 
         Moves come from valid_moves() so validation is skipped.
         """
@@ -246,7 +281,8 @@ class GameMemory(ABC):
             clone = game.deep_clone()
             try:
                 clone.apply_move(move, validated=True)
-                results.append((move, hash_board(clone.get_state().board)))
+                dest_board = clone.get_state().board
+                results.append((move, hash_board(dest_board), dest_board))
             except (ValueError, IndexError):
                 continue
         return results
@@ -290,6 +326,8 @@ class GameMemory(ABC):
         trajectory_keys: List[List[Tuple[str, str]]] = []
         # Cross-score accumulator: (from_hash, to_hash, observer_role) -> [score_sum, count]
         cross_scores: Dict[Tuple[str, str, int], List[float]] = defaultdict(lambda: [0.0, 0.0])
+        # Board storage: hash -> (board_bytes, rows, cols) for predicate mining
+        boards_to_store: Dict[str, Tuple[bytes, int, int]] = {}
 
         for stack_entry in stacks:
             moves, outcome = stack_entry[0], stack_entry[1]
@@ -308,7 +346,16 @@ class GameMemory(ABC):
                 from_hash = hash_board(board)
                 game.set_state(GameState(board.copy(), player))
                 game.apply_move(move, validated=True)
-                to_hash = hash_board(game.get_state().board)
+                dest_board = game.get_state().board
+                to_hash = hash_board(dest_board)
+
+                # Store both boards for predicate mining (normalize to 2D)
+                if from_hash not in boards_to_store:
+                    fb = board if board.ndim == 2 else board.reshape(1, -1)
+                    boards_to_store[from_hash] = (fb.tobytes(), fb.shape[0], fb.shape[1])
+                if to_hash not in boards_to_store:
+                    b = dest_board if dest_board.ndim == 2 else dest_board.reshape(1, -1)
+                    boards_to_store[to_hash] = (b.tobytes(), b.shape[0], b.shape[1])
 
                 stack_keys.append((from_hash, to_hash))
 
@@ -329,10 +376,116 @@ class GameMemory(ABC):
 
             trajectory_keys.append(stack_keys)
 
+        self._store_boards(boards_to_store)
         swaps = self._commit(transitions)
         self._record_cross_scores(cross_scores)
         self._propagate_bellman(trajectory_keys)
         return len(transitions), swaps
+
+    def _store_boards(self, boards: Dict[str, Tuple[bytes, int, int]]) -> None:
+        """Store board arrays for predicate mining."""
+        if not boards:
+            return
+        cur = self.conn.cursor()
+        cur.executemany(
+            "INSERT OR IGNORE INTO boards (board_hash, board_data, board_rows, board_cols) "
+            "VALUES (?,?,?,?)",
+            [(h, data, rows, cols) for h, (data, rows, cols) in boards.items()],
+        )
+        self.conn.commit()
+
+    def _load_boards(self) -> Dict[str, np.ndarray]:
+        """Load all stored boards from the database."""
+        rows = self.conn.execute(
+            "SELECT board_hash, board_data, board_rows, board_cols FROM boards"
+        ).fetchall()
+        result = {}
+        for h, data, nrows, ncols in rows:
+            board = np.frombuffer(data, dtype=np.int8).reshape(nrows, ncols).copy()
+            result[h] = board
+        return result
+
+    def _build_trans_scores(self) -> Tuple[Dict[str, np.ndarray], Dict[Tuple[str, str], Tuple[Counts, float]]]:
+        """Load transitions and build per-transition scores with per-from-board signal selection.
+
+        Returns (boards, trans_scores) or (empty, empty) if insufficient data.
+        """
+        boards = self._load_boards()
+        if not boards:
+            return {}, {}
+
+        try:
+            rows = self.conn.execute(
+                "SELECT from_hash, to_hash, wins, ties, losses, propagated_score "
+                "FROM transitions"
+            ).fetchall()
+        except Exception:
+            return {}, {}
+
+        if not rows:
+            return {}, {}
+
+        import numpy as _np
+
+        from_groups: Dict[str, list] = {}
+        for from_hash, to_hash, w, t, l, bell in rows:
+            if to_hash not in boards or from_hash not in boards:
+                continue
+            s = Stats(w, t, l)
+            if s.total <= 0:
+                continue
+            if from_hash not in from_groups:
+                from_groups[from_hash] = []
+            from_groups[from_hash].append((to_hash, (w, t, l), bell, s.mean_score))
+
+        trans_scores: Dict[Tuple[str, str], Tuple[Counts, float]] = {}
+        for from_hash, transitions in from_groups.items():
+            bell_vals = [t[2] for t in transitions if t[2] is not None]
+            mean_vals = [t[3] for t in transitions]
+            bell_var = float(_np.var(bell_vals)) if len(bell_vals) >= 2 else 0.0
+            mean_var = float(_np.var(mean_vals)) if len(mean_vals) >= 2 else 0.0
+            use_bell = bell_var > mean_var and len(bell_vals) > len(transitions) * 0.5
+
+            for to_hash, counts, bell, mean in transitions:
+                score = bell if (use_bell and bell is not None) else mean
+                trans_scores[(from_hash, to_hash)] = (counts, score)
+
+        return boards, trans_scores
+
+    def mine_predicates(self, incremental: bool = False) -> int:
+        """Discover structural predicates from stored transitions.
+
+        Args:
+            incremental: If True, use ITI for fast per-wave update (~0.5ms).
+                         If False, use batch CART for full rebuild (~8ms).
+
+        Mines per-transition (from→to pairs), preserving implicit player
+        identity. Signal selection (bell vs mean) is per-from-board,
+        matching how move selection works.
+
+        Returns:
+            Number of predicates discovered.
+        """
+        if self.read_only:
+            raise RuntimeError("Cannot mine predicates in read-only mode")
+
+        boards, trans_scores = self._build_trans_scores()
+        if not trans_scores:
+            return 0
+
+        if incremental:
+            # Per-wave: ITI with no pruning (full tree = finer priors)
+            predicates = self._iti_miner.mine(boards, trans_scores, prune=False)
+        else:
+            # End-of-training: ITI with pruning (compact output)
+            # Uses the already-built ITI tree, just extracts with pruning.
+            # Falls back to batch CART if ITI has no tree yet.
+            if self._iti_miner._root is not None:
+                predicates = self._iti_miner.mine(boards, trans_scores, prune=True)
+            else:
+                predicates = self._batch_miner.mine(boards, trans_scores)
+        self.predicate_library.save(predicates)
+        return len(predicates)
 
     def _record_cross_scores(self, cross_scores: Dict) -> None:
         """Hook for recording cross-scores. No-op for Markov memory."""

@@ -161,7 +161,10 @@ class SimulationRunner:
                 
                 # Consolidate anchors
                 self.memory.consolidate_anchors()
-                
+
+                # Incremental predicate update (ITI: ~0.5ms per wave)
+                self.memory.mine_predicates(incremental=True)
+
                 job_idx += len(wave_jobs)
 
         except KeyboardInterrupt:

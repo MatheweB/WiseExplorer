@@ -11,6 +11,8 @@ from __future__ import annotations
 import sqlite3
 from typing import Any, Dict, List, Optional, Tuple
 
+from collections import defaultdict
+
 from wise_explorer.core.types import Stats, Counts
 from wise_explorer.memory.game_memory import GameMemory
 from wise_explorer.memory.schema import SCHEMA_TRANSITIONS
@@ -76,6 +78,35 @@ class TransitionMemory(GameMemory):
             "UPDATE transitions SET anchor_id=? WHERE from_hash=? AND to_hash=?",
             [(aid, key[0], key[1]) for key, aid in membership.items()]
         )
+
+    def _get_transition_from_hashes(self) -> Dict[str, str]:
+        """Get the from_hash with the most samples for each to_hash."""
+        rows = self.conn.execute(
+            "SELECT to_hash, from_hash, wins+ties+losses as total "
+            "FROM transitions WHERE total > 0 "
+            "ORDER BY to_hash, total DESC"
+        ).fetchall()
+        result = {}
+        for to_hash, from_hash, _ in rows:
+            if to_hash not in result:
+                result[to_hash] = from_hash
+        return result
+
+    def _get_destination_bellman_scores(self) -> Dict[str, float]:
+        """Average Bellman propagated score per destination board hash."""
+        rows = self.conn.execute(
+            "SELECT to_hash, AVG(propagated_score) FROM transitions "
+            "WHERE propagated_score IS NOT NULL GROUP BY to_hash"
+        ).fetchall()
+        return {h: score for h, score in rows}
+
+    def _aggregate_destination_scores(self) -> Dict[str, Counts]:
+        """Aggregate scores per destination board hash across all transitions."""
+        rows = self.conn.execute(
+            "SELECT to_hash, SUM(wins), SUM(ties), SUM(losses) "
+            "FROM transitions GROUP BY to_hash HAVING SUM(wins+ties+losses) > 0"
+        ).fetchall()
+        return {h: (w, t, l) for h, w, t, l in rows}
 
     def _commit_outcomes(self, transitions: Dict[Tuple[str, str], List[float]], cur: sqlite3.Cursor) -> Tuple[List, Dict]:
         """Commit outcomes and return keys/deltas for anchor manager."""

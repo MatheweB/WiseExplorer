@@ -17,6 +17,26 @@ Each mode has its own database file for isolation.
 They cluster fundamentally different units and converge to different equilibria.
 """
 
+_SCHEMA_PREDICATES = """
+CREATE TABLE IF NOT EXISTS boards (
+    board_hash TEXT PRIMARY KEY,
+    board_data BLOB NOT NULL,
+    board_rows INTEGER NOT NULL,
+    board_cols INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS predicates (
+    predicate_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    atoms_json TEXT NOT NULL,
+    wins REAL DEFAULT 0.0,
+    ties REAL DEFAULT 0.0,
+    losses REAL DEFAULT 0.0,
+    support INTEGER DEFAULT 0,
+    score_variance REAL DEFAULT 1.0,
+    mining_score REAL DEFAULT NULL
+);
+"""
+
 SCHEMA_TRANSITIONS = """
 CREATE TABLE IF NOT EXISTS transitions (
     from_hash TEXT NOT NULL,
@@ -52,7 +72,7 @@ CREATE TABLE IF NOT EXISTS metadata (
     key TEXT PRIMARY KEY,
     value TEXT
 );
-"""
+""" + _SCHEMA_PREDICATES
 
 SCHEMA_MARKOV = """
 CREATE TABLE IF NOT EXISTS states (
@@ -76,4 +96,4 @@ CREATE TABLE IF NOT EXISTS metadata (
     key TEXT PRIMARY KEY,
     value TEXT
 );
-"""
+""" + _SCHEMA_PREDICATES

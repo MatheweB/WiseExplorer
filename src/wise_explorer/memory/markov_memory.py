@@ -82,6 +82,14 @@ class MarkovMemory(GameMemory):
             [(aid, key) for key, aid in membership.items()]
         )
 
+    def _aggregate_destination_scores(self) -> Dict[str, Counts]:
+        """Get scores per state hash (direct — state_hash is the board hash)."""
+        rows = self.conn.execute(
+            "SELECT state_hash, wins, ties, losses FROM states "
+            "WHERE wins+ties+losses > 0"
+        ).fetchall()
+        return {h: (w, t, l) for h, w, t, l in rows}
+
     def _commit_outcomes(self, transitions: Dict[Tuple[str, str], List[float]], cur: sqlite3.Cursor) -> Tuple[List, Dict]:
         """Commit outcomes and return keys/deltas for anchor manager."""
         # Aggregate by destination state
