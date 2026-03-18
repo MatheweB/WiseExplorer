@@ -601,44 +601,23 @@ def _derive_mining_params(
     base_variance: float,
     n_atoms: int,
 ) -> Dict[str, Any]:
-    """Derive all mining parameters from dataset statistics.
+    """Derive mining parameters from dataset statistics.
 
-    No magic constants — every parameter follows from a statistical principle:
+    - min_support: 2 (minimum for variance computation). Overfitting
+      protection comes from variance reduction (refuses to split when
+      improvement is unreliable) and 1 SE pruning (merges statistically
+      insignificant siblings). Empirically verified: min_support=1
+      produces identical results to min_support=sqrt(N) because the
+      tree self-regulates — small nodes can't demonstrate reliable
+      variance reduction so they become leaves naturally.
 
-    - min_support: At least sqrt(N) boards, floor 5. Balances specificity
-      (smaller = more specific predicates) with reliability (larger = less
-      overfitting). sqrt(N) scales sub-linearly so large datasets allow
-      more specific patterns.
-
-    - max_variance: Half the base variance of the full dataset. A predicate
-      must reduce variance by at least 50% vs the overall score spread to
-      be considered informative.
-
-    - variance_penalty: base_variance / sqrt(N). Penalizes low-support
-      predicates proportional to how noisy the data is. With more data or
-      lower noise, the penalty shrinks.
-
-    - top_k_seeds: min(n_atoms, 50). Try all atoms when few, cap for large
-      atom pools.
-
-    - max_atoms: Grow until diminishing returns, but hard cap at 6 to bound
-      compute. In practice the effective-variance stopping criterion
-      terminates growth at 2-4 atoms for most patterns.
+    - max_atoms: Hard cap at 6 to bound compute. In practice the
+      variance reduction stopping criterion terminates growth at
+      2-4 atoms for most patterns.
     """
-    import math
-
-    min_support = max(5, int(math.sqrt(n_boards)))
-    max_variance = base_variance * 0.5 if base_variance > 0 else 0.05
-    variance_penalty = base_variance / math.sqrt(max(n_boards, 1)) if base_variance > 0 else 0.01
-    top_k_seeds = min(n_atoms, 50)
-    max_atoms = 6
-
     return {
-        "min_support": min_support,
-        "max_variance": max_variance,
-        "variance_penalty": variance_penalty,
-        "top_k_seeds": top_k_seeds,
-        "max_atoms": max_atoms,
+        "min_support": 2,
+        "max_atoms": 6,
     }
 
 
