@@ -22,7 +22,7 @@ if TYPE_CHECKING:
 
 
 # ---------------------------------------------------------------------------
-# Shared: Bell-aware effective scoring
+# Shared: Bell-aware scoring via pick-best-signal
 # ---------------------------------------------------------------------------
 
 def _collect_bell_scores(
@@ -46,19 +46,44 @@ def _collect_bell_scores(
     return scores
 
 
-def _effective_score(
+def _rank_signals(
+    bell_scores: Dict[tuple, Optional[float]],
+    anchor_scores: Dict[tuple, float],
+    solo_scores: Dict[tuple, float],
+) -> Tuple[str, str, str]:
+    """Rank the three signals by variance — most informative first.
+
+    Compares variance of bell, anchor, and solo scores across all moves.
+    Returns a tuple of signal names ordered by descending variance.
+    """
+    bells = [b for b in bell_scores.values() if b is not None]
+    anchors = list(anchor_scores.values())
+    solos = list(solo_scores.values())
+
+    variances = {
+        "bell": np.var(bells) if len(bells) >= 2 else 0.0,
+        "anchor": np.var(anchors) if len(anchors) >= 2 else 0.0,
+        "solo": np.var(solos) if len(solos) >= 2 else 0.0,
+    }
+
+    ranked = sorted(variances, key=variances.get, reverse=True)  # type: ignore
+    return (ranked[0], ranked[1], ranked[2])
+
+
+def _score_move(
     bell: Optional[float],
     anchor_score: float,
-    pick_best: bool,
-) -> float:
-    """Conservative combination: min(bell, anchor) for pick_best, max for prune.
+    solo_score: float,
+    signal_order: Tuple[str, str, str],
+) -> Tuple[float, float, float]:
+    """Score a move as (primary, tiebreak1, tiebreak2) based on signal ranking.
 
-    Only trust a move is good if both signals agree (min).
-    Only trust a move is bad if both signals agree (max).
+    signal_order is a tuple of ("bell", "anchor", "solo") ranked by variance.
+    The move is scored using the most informative signal first.
     """
-    if bell is None:
-        return anchor_score
-    return min(bell, anchor_score) if pick_best else max(bell, anchor_score)
+    b = bell if bell is not None else anchor_score
+    values = {"bell": b, "anchor": anchor_score, "solo": solo_score}
+    return (values[signal_order[0]], values[signal_order[1]], values[signal_order[2]])
 
 
 # ---------------------------------------------------------------------------
@@ -75,10 +100,12 @@ def select_move(
     """
     Select move for inference (competitive play).
 
-    Each move's effective score is min(bell, anchor) — conservative:
-    - Nim: min(0.98, 0.50)=0.50 still beats min(0.02, 0.50)=0.02
-    - TTT: all Bell=0.50, ties broken by anchor then solo
-    - Forced losses: Bell-LOW drags effective down, can't be overridden
+    Uses pick-best-signal: compares variance of bell vs mean scores
+    across all moves and ranks by whichever signal is more informative.
+    The other signal serves as tiebreaker.
+
+    - Nim-like (bell varies): ranks by (bell, anchor, solo)
+    - TTT-like (bell flat):  ranks by (anchor, bell, solo)
 
     Returns:
         Selected move as numpy array
@@ -98,21 +125,31 @@ def select_move(
 
     bell_scores = _collect_bell_scores(game, memory, valid_moves)
 
-    # Score each move: (effective, bell, solo) — tiebreak chain
-    move_scored: list[tuple[np.ndarray, float, float, float]] = []
+    # Collect anchor and solo scores per move for signal comparison
+    anchor_scores: Dict[tuple, float] = {}
+    solo_scores: Dict[tuple, float] = {}
+    for aid, moves in anchors_with_moves.items():
+        a_score = anchor_stats[aid].mean_score if aid in anchor_stats else 0.5
+        for move, stats in moves:
+            mk = tuple(move)
+            anchor_scores[mk] = a_score
+            solo_scores[mk] = stats.mean_score
+
+    signal_order = _rank_signals(bell_scores, anchor_scores, solo_scores)
+
+    # Score each move using the ranked signal order
+    move_scored: list[tuple[np.ndarray, Tuple[float, float, float]]] = []
     for aid, moves in anchors_with_moves.items():
         a_score = anchor_stats[aid].mean_score if aid in anchor_stats else 0.5
         for move, stats in moves:
             bell = bell_scores.get(tuple(move))
-            effective = _effective_score(bell, a_score, pick_best)
-            solo = stats.mean_score
-            move_scored.append((move, effective, bell if bell is not None else a_score, solo))
+            key = _score_move(bell, a_score, stats.mean_score, signal_order)
+            move_scored.append((move, key))
 
-    # Sort by (effective, bell, solo) — best first
     if pick_best:
-        selected_move = max(move_scored, key=lambda m: (m[1], m[2], m[3]))[0]
+        selected_move = max(move_scored, key=lambda m: m[1])[0]
     else:
-        selected_move = min(move_scored, key=lambda m: (m[1], m[2], m[3]))[0]
+        selected_move = min(move_scored, key=lambda m: m[1])[0]
 
     if debug:
         from wise_explorer.debug.viz import debug_move_selection
@@ -134,8 +171,8 @@ def select_move_for_training(
     """
     Select move for training (probabilistic).
 
-    Uses min(bell, anchor) to find the best anchor conservatively,
-    then probabilistically explores or exploits within it.
+    Uses pick-best-signal to find the best anchor, then
+    probabilistically explores or exploits within it.
 
     Returns:
         Selected move as numpy array
@@ -152,9 +189,21 @@ def select_move_for_training(
     pick_best = not is_prune
     bell_scores = _collect_bell_scores(game, memory, valid_moves)
 
-    # Find best anchor using effective scores (bell-aware)
-    best_anchor_id = _best_anchor_effective(
-        anchors_with_moves, anchor_stats, bell_scores, pick_best,
+    # Collect anchor and solo scores for signal ranking
+    anchor_scores: Dict[tuple, float] = {}
+    solo_scores: Dict[tuple, float] = {}
+    for aid, moves in anchors_with_moves.items():
+        a_score = anchor_stats[aid].mean_score if aid in anchor_stats else 0.5
+        for move, stats in moves:
+            mk = tuple(move)
+            anchor_scores[mk] = a_score
+            solo_scores[mk] = stats.mean_score
+
+    signal_order = _rank_signals(bell_scores, anchor_scores, solo_scores)
+
+    # Find best anchor using ranked signals
+    best_anchor_id = _best_anchor_by_signal(
+        anchors_with_moves, anchor_stats, bell_scores, signal_order, pick_best,
     )
 
     # Probabilistic: explore or exploit within the best anchor
@@ -163,8 +212,8 @@ def select_move_for_training(
     if random.random() < exploration_weight:
         selected_move = random.choice(valid_moves)
     else:
-        selected_move = _select_within_anchor_bell(
-            anchors_with_moves[best_anchor_id], bell_scores, pick_best,
+        selected_move = _select_within_anchor(
+            anchors_with_moves[best_anchor_id], bell_scores, signal_order, pick_best,
         )
 
     if debug:
@@ -174,51 +223,54 @@ def select_move_for_training(
     return np.asarray(selected_move)
 
 
-def _select_within_anchor_bell(
+def _select_within_anchor(
     moves: List[Tuple[np.ndarray, Stats]],
     bell_scores: Dict[tuple, Optional[float]],
+    signal_order: Tuple[str, str, str],
     pick_best: bool,
 ) -> np.ndarray:
-    """Pick best move by (bell, solo) within anchor. Random among full ties."""
+    """Pick best move within anchor using ranked signals. Random among full ties."""
     scored = []
     for move, stats in moves:
         bell = bell_scores.get(tuple(move))
-        scored.append((move, bell if bell is not None else 0.5, stats.mean_score))
+        key = _score_move(bell, stats.mean_score, stats.mean_score, signal_order)
+        scored.append((move, key))
 
     if pick_best:
-        best_key = max(scored, key=lambda s: (s[1], s[2]))[1:]
-        ties = [m for m, b, s in scored if (b, s) == best_key]
+        best_key = max(scored, key=lambda s: s[1])[1]
+        ties = [m for m, k in scored if k == best_key]
     else:
-        best_key = min(scored, key=lambda s: (s[1], s[2]))[1:]
-        ties = [m for m, b, s in scored if (b, s) == best_key]
+        best_key = min(scored, key=lambda s: s[1])[1]
+        ties = [m for m, k in scored if k == best_key]
 
     return random.choice(ties)
 
 
-def _best_anchor_effective(
+def _best_anchor_by_signal(
     anchors_with_moves: Dict[int, List[Tuple[np.ndarray, Stats]]],
     anchor_stats: Dict[int, Stats],
     bell_scores: Dict[tuple, Optional[float]],
+    signal_order: Tuple[str, str, str],
     pick_best: bool,
 ) -> int:
-    """Pick the best anchor using conservative effective scores per move."""
-    anchor_effective: Dict[int, float] = {}
+    """Pick the best anchor using ranked signals."""
+    anchor_best: Dict[int, Tuple[float, float, float]] = {}
 
     for aid, moves in anchors_with_moves.items():
         a_score = anchor_stats[aid].mean_score if aid in anchor_stats else 0.5
-        best_in_anchor = a_score
-        for move, _stats in moves:
+        best_key = _score_move(None, a_score, a_score, signal_order)
+        for move, stats in moves:
             bell = bell_scores.get(tuple(move))
-            eff = _effective_score(bell, a_score, pick_best)
+            key = _score_move(bell, a_score, stats.mean_score, signal_order)
             if pick_best:
-                best_in_anchor = max(best_in_anchor, eff)
+                best_key = max(best_key, key)
             else:
-                best_in_anchor = min(best_in_anchor, eff)
-        anchor_effective[aid] = best_in_anchor
+                best_key = min(best_key, key)
+        anchor_best[aid] = best_key
 
     if pick_best:
-        return max(anchor_effective, key=anchor_effective.get)  # type: ignore
-    return min(anchor_effective, key=anchor_effective.get)  # type: ignore
+        return max(anchor_best, key=anchor_best.get)  # type: ignore
+    return min(anchor_best, key=anchor_best.get)  # type: ignore
 
 
 __all__ = [
