@@ -238,6 +238,8 @@ class ITIMiner:
         )
         new_scores = np.array([scores[k][1] for k in new_keys])
         self._scores = np.concatenate([self._scores, new_scores])
+        new_counts = np.array([scores[k][0] for k in new_keys])
+        self._counts = np.concatenate([self._counts, new_counts])
 
         for i, k in enumerate(new_keys):
             self._trans_key_to_idx[k] = old_n + i
@@ -270,6 +272,7 @@ class ITIMiner:
         )
         self._match_matrix = mm_torch.cpu().numpy()
         self._scores = np.array([scores[k][1] for k in trans_keys])
+        self._counts = np.array([scores[k][0] for k in trans_keys])  # (N, 3) wins/ties/losses
         self._n_atoms = len(self._atoms)
         self._n_samples = n
 
@@ -422,9 +425,17 @@ class ITIMiner:
                 continue
             seen.add(key)
 
+            # Aggregate real counts from all transitions in this node
+            if hasattr(self, '_counts') and self._counts is not None and node.trans_indices:
+                idx_list = list(node.trans_indices)
+                node_counts = self._counts[idx_list].sum(axis=0)
+                counts = (float(node_counts[0]), float(node_counts[1]), float(node_counts[2]))
+            else:
+                counts = (0.0, 0.0, 0.0)
+
             predicates.append(Predicate(
                 conjunction=conj,
-                counts=(0.0, 0.0, 0.0),
+                counts=counts,
                 support=node.total_count,
                 variance=node.parent_variance(),
                 mining_score=node.mean_score(),

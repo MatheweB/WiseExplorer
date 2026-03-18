@@ -449,7 +449,8 @@ class GameMemory(ABC):
 
         try:
             rows = self.conn.execute(
-                "SELECT from_hash, to_hash, wins, ties, losses, propagated_score "
+                "SELECT from_hash, to_hash, wins, ties, losses, "
+                "propagated_score, anchor_id "
                 "FROM transitions"
             ).fetchall()
         except Exception:
@@ -460,27 +461,57 @@ class GameMemory(ABC):
 
         import numpy as _np
 
+        # Load anchor stats for anchor_mean signal
+        anchor_stats: Dict[int, float] = {}
+        try:
+            anchor_rows = self.conn.execute(
+                "SELECT anchor_id, wins, ties, losses FROM anchors"
+            ).fetchall()
+            for aid, aw, at, al in anchor_rows:
+                s = Stats(aw, at, al)
+                anchor_stats[aid] = s.mean_score if s.total > 0 else 0.5
+        except Exception:
+            pass
+
+        # Group transitions by from_hash with all three signals
         from_groups: Dict[str, list] = {}
-        for from_hash, to_hash, w, t, l, bell in rows:
+        for from_hash, to_hash, w, t, l, bell, anchor_id in rows:
             if to_hash not in boards or from_hash not in boards:
                 continue
             s = Stats(w, t, l)
             if s.total <= 0:
                 continue
+            solo_mean = s.mean_score
+            anchor_mean = anchor_stats.get(anchor_id, solo_mean) if anchor_id is not None else solo_mean
             if from_hash not in from_groups:
                 from_groups[from_hash] = []
-            from_groups[from_hash].append((to_hash, (w, t, l), bell, s.mean_score))
+            from_groups[from_hash].append((to_hash, (w, t, l), bell, anchor_mean, solo_mean))
 
+        # Per-from-board: rank bell, anchor, solo by variance (matches selection)
         trans_scores: Dict[Tuple[str, str], Tuple[Counts, float]] = {}
         for from_hash, transitions in from_groups.items():
             bell_vals = [t[2] for t in transitions if t[2] is not None]
-            mean_vals = [t[3] for t in transitions]
-            bell_var = float(_np.var(bell_vals)) if len(bell_vals) >= 2 else 0.0
-            mean_var = float(_np.var(mean_vals)) if len(mean_vals) >= 2 else 0.0
-            use_bell = bell_var > mean_var and len(bell_vals) > len(transitions) * 0.5
+            anchor_vals = [t[3] for t in transitions]
+            solo_vals = [t[4] for t in transitions]
 
-            for to_hash, counts, bell, mean in transitions:
-                score = bell if (use_bell and bell is not None) else mean
+            variances = {
+                "bell": float(_np.var(bell_vals)) if len(bell_vals) >= 2 else 0.0,
+                "anchor": float(_np.var(anchor_vals)) if len(anchor_vals) >= 2 else 0.0,
+                "solo": float(_np.var(solo_vals)) if len(solo_vals) >= 2 else 0.0,
+            }
+            # Bell needs sufficient coverage
+            if len(bell_vals) <= len(transitions) * 0.5:
+                variances["bell"] = 0.0
+
+            best_signal = max(variances, key=variances.get)
+
+            for to_hash, counts, bell, anchor_mean, solo_mean in transitions:
+                if best_signal == "bell" and bell is not None:
+                    score = bell
+                elif best_signal == "anchor":
+                    score = anchor_mean
+                else:
+                    score = solo_mean
                 trans_scores[(from_hash, to_hash)] = (counts, score)
 
         return boards, trans_scores
