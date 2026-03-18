@@ -184,6 +184,22 @@ class TransitionMemory(GameMemory):
             return row[0]
         return None
 
+    def batch_get_moves_from(self, from_hash: str) -> Dict[str, Tuple[Stats, Optional[int], Optional[float]]]:
+        """Fetch stats, anchor_id, and bell score for ALL transitions from a position.
+
+        Returns {to_hash: (Stats, anchor_id, propagated_score)} in a single query.
+        Replaces 3 individual queries per move (get_move_stats + get_anchor_id + get_propagated_score).
+        """
+        rows = self.conn.execute(
+            "SELECT to_hash, wins, ties, losses, anchor_id, propagated_score "
+            "FROM transitions WHERE from_hash=?",
+            (from_hash,)
+        ).fetchall()
+        return {
+            r[0]: (Stats(r[1], r[2], r[3]), r[4], r[5])
+            for r in rows
+        }
+
     def _best_estimate(self, from_hash: str, to_hash: str) -> float:
         """Return propagated_score if available, else mean_score (Eq. 3 in design doc)."""
         row = self.conn.execute(

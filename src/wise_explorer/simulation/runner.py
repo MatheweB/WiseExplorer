@@ -97,7 +97,11 @@ class SimulationRunner:
         register_memory(memory)
 
     def __enter__(self):
-        self._ensure_pool()
+        if self.num_workers > 1:
+            self._ensure_pool()
+        else:
+            # Single worker: initialize worker memory in-process (skip pool)
+            worker_init(str(self.memory.db_path), self.memory.is_markov)
         return self
 
     def __exit__(self, exc_type, *_):
@@ -141,19 +145,26 @@ class SimulationRunner:
         if num_sims <= 0 or not swarms:
             return 0
 
-        pool = self._ensure_pool()
+        if self.num_workers > 1:
+            pool = self._ensure_pool()
         all_jobs = self._make_jobs(swarms, game, num_sims, max_turns, prune_players)
         
         total_transitions = 0
         job_idx = 0
 
+        # Skip pool overhead for single worker — run in-process
+        single_worker = self.num_workers == 1
+
         try:
             while job_idx < len(all_jobs):
                 # Get next wave of jobs (one per worker)
                 wave_jobs = all_jobs[job_idx : job_idx + self.num_workers]
-                
-                # Run wave in parallel, block until all complete
-                wave_results = pool.map(run_game, wave_jobs)
+
+                # Run wave: in-process for single worker, pool for multi
+                if single_worker:
+                    wave_results = [run_game(job) for job in wave_jobs]
+                else:
+                    wave_results = pool.map(run_game, wave_jobs)
                 
                 # Write results
                 transitions, _swaps = self._commit(wave_results)

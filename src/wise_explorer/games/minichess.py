@@ -94,6 +94,14 @@ class MiniChess(GameBase):
 
     def set_state(self, game_state: GameState) -> None:
         self.state = game_state
+        # Detect if a king is missing (state may come from mid-game)
+        board = game_state.board
+        if not np.any(board == KING):
+            self.winner = 2  # Player 2 captured Player 1's king
+        elif not np.any(board == -KING):
+            self.winner = 1  # Player 1 captured Player 2's king
+        else:
+            self.winner = 0
 
     def current_player(self) -> int:
         return self.state.current_player
@@ -289,13 +297,12 @@ class MiniChess(GameBase):
         self.state.current_player = 3 - self.state.current_player
 
     def is_over(self) -> bool:
+        # winner is set in apply_move on king capture — fast path
         if self.winner != 0:
             return True
         if self.move_count >= self.MAX_MOVES:
             return True
-        # Check if both kings exist
-        board = self.state.board
-        return not (np.any(board == KING) and np.any(board == -KING))
+        return False
 
     def get_result(self, agent_id: int) -> State:
         if self.winner == agent_id:

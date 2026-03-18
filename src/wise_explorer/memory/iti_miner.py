@@ -78,6 +78,25 @@ class _ITINode:
         self.miss_sum[~m] += score
         self.miss_sq[~m] += score * score
 
+    def populate_batch(self, indices: list, match_matrix: np.ndarray, scores: np.ndarray):
+        """Batch-populate stats from a set of transition indices. Vectorized."""
+        if not indices:
+            return
+        idx_arr = np.array(indices)
+        sc = scores[idx_arr]                        # (K,)
+        mm = match_matrix[:, idx_arr]               # (n_atoms, K) bool
+        self.total_count = len(indices)
+        self.total_sum = float(sc.sum())
+        self.total_sq = float((sc * sc).sum())
+        self.match_count = mm.sum(axis=1).astype(np.int32)       # (n_atoms,)
+        self.match_sum = (mm * sc[np.newaxis, :]).sum(axis=1)    # (n_atoms,)
+        self.match_sq = (mm * (sc * sc)[np.newaxis, :]).sum(axis=1)
+        nm = ~mm
+        self.miss_count = nm.sum(axis=1).astype(np.int32)
+        self.miss_sum = (nm * sc[np.newaxis, :]).sum(axis=1)
+        self.miss_sq = (nm * (sc * sc)[np.newaxis, :]).sum(axis=1)
+        self.trans_indices = set(indices)
+
     def parent_variance(self) -> float:
         if self.total_count < 2:
             return 0.0
@@ -153,6 +172,7 @@ class ITIMiner:
         self._trans_key_to_idx: Dict[Tuple[str, str], int] = {}
         self._min_leaf = 10
         self._max_depth = 6
+        self._counts: Optional[np.ndarray] = None
 
     def mine(
         self,
@@ -215,20 +235,8 @@ class ITIMiner:
             return self._extract_predicates()
 
         # Extend match matrix with new transitions
-        sample = boards[new_keys[0][1]]
-        rows, cols = sample.shape
-        device = torch.device(self._device_name)
-        to_tensor = torch.stack([
-            torch.from_numpy(boards[th].copy()) for _, th in new_keys
-        ]).to(device)
-        from_tensor = torch.stack([
-            torch.from_numpy(boards[fh].copy()) for fh, _ in new_keys
-        ]).to(device)
-
-        helper = TreeMiner(device=self._device_name)
-        new_mm = helper._build_match_matrix(
-            self._atoms, to_tensor, rows, cols, from_tensor,
-        ).cpu().numpy()
+        # For small batches, evaluate atoms directly in numpy (skip torch overhead)
+        new_mm = self._eval_atoms_numpy(boards, new_keys)
 
         # Extend arrays
         old_n = self._n_samples
@@ -252,6 +260,41 @@ class ITIMiner:
                           self._scores[tidx], set(), 0)
 
         return self._extract_predicates()
+
+    def _eval_atoms_numpy(self, boards, keys):
+        """Evaluate existing atoms on new transitions using pure numpy.
+
+        Much faster than torch for small batches (1-10 transitions) by
+        avoiding tensor creation, device transfer, and kernel launch overhead.
+        Returns (n_atoms, len(keys)) bool numpy array.
+        """
+        n = len(keys)
+        result = np.zeros((self._n_atoms, n), dtype=bool)
+        for i, (fh, th) in enumerate(keys):
+            to_b = boards[th]
+            from_b = boards[fh]
+            for j, atom in enumerate(self._atoms):
+                kind = atom[0]
+                r, c = atom[1], atom[2] if len(atom) > 2 else (0, 0)
+                if kind == "eq":
+                    result[j, i] = int(to_b[r, c]) == atom[3]
+                elif kind == "neq":
+                    result[j, i] = int(to_b[r, c]) != atom[3]
+                elif kind == "cells_eq":
+                    r2, c2 = atom[3], atom[4]
+                    result[j, i] = int(to_b[r, c]) == int(to_b[r2, c2])
+                elif kind == "from_eq":
+                    result[j, i] = int(from_b[r, c]) == atom[3]
+                elif kind == "from_neq":
+                    result[j, i] = int(from_b[r, c]) != atom[3]
+                elif kind == "changed":
+                    result[j, i] = int(to_b[r, c]) != int(from_b[r, c])
+                elif kind == "unchanged":
+                    result[j, i] = int(to_b[r, c]) == int(from_b[r, c])
+                elif kind == "cross_eq":
+                    r2, c2 = atom[3], atom[4]
+                    result[j, i] = int(to_b[r, c]) == int(from_b[r2, c2])
+        return result
 
     def _cold_start(self, boards, scores, trans_keys, rows, cols):
         """Build tree from scratch on first call or after major changes."""
@@ -320,15 +363,15 @@ class ITIMiner:
         node.left = _ITINode(self._n_atoms)
         node.right = _ITINode(self._n_atoms)
 
-        for tidx in node.trans_indices:
-            am = self._match_matrix[:, tidx]
-            sc = self._scores[tidx]
-            if am[split_atom]:
-                node.left.update_stats(am, sc)
-                node.left.trans_indices.add(tidx)
-            else:
-                node.right.update_stats(am, sc)
-                node.right.trans_indices.add(tidx)
+        # Vectorized: split indices by atom match
+        all_idx = list(node.trans_indices)
+        if all_idx:
+            idx_arr = np.array(all_idx)
+            mask = self._match_matrix[split_atom, idx_arr].astype(bool)
+            left_idx = idx_arr[mask].tolist()
+            right_idx = idx_arr[~mask].tolist()
+            node.left.populate_batch(left_idx, self._match_matrix, self._scores)
+            node.right.populate_batch(right_idx, self._match_matrix, self._scores)
 
     def _check_rotation(self, node: _ITINode, ancestors_used: set, depth: int):
         """Pull-up rotation with hysteresis."""
@@ -344,20 +387,19 @@ class ITIMiner:
         if best_red <= current_red + margin:
             return
 
-        # Commit rotation: rebuild subtree with new split
+        # Commit rotation: rebuild subtree with new split (vectorized)
         node.split_atom = best
         node.left = _ITINode(self._n_atoms)
         node.right = _ITINode(self._n_atoms)
 
-        for tidx in node.trans_indices:
-            am = self._match_matrix[:, tidx]
-            sc = self._scores[tidx]
-            if am[best]:
-                node.left.update_stats(am, sc)
-                node.left.trans_indices.add(tidx)
-            else:
-                node.right.update_stats(am, sc)
-                node.right.trans_indices.add(tidx)
+        all_idx = list(node.trans_indices)
+        if all_idx:
+            idx_arr = np.array(all_idx)
+            mask = self._match_matrix[best, idx_arr].astype(bool)
+            left_idx = idx_arr[mask].tolist()
+            right_idx = idx_arr[~mask].tolist()
+            node.left.populate_batch(left_idx, self._match_matrix, self._scores)
+            node.right.populate_batch(right_idx, self._match_matrix, self._scores)
 
         # Try splitting children (they have full stats from repartition)
         used = ancestors_used | {best}

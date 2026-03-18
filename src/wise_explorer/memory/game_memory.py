@@ -32,9 +32,15 @@ PREDICATE_ANCHOR_ID = -998
 
 
 class MoveEvaluation(NamedTuple):
-    """Result of evaluate_moves: moves grouped by anchor with anchor stats."""
+    """Result of evaluate_moves: moves grouped by anchor with anchor stats.
+
+    Also carries bell and predicate scores so selection doesn't need to
+    re-clone games and re-query the DB for the same information.
+    """
     anchors_with_moves: Dict[int, List[Tuple[np.ndarray, Stats]]]
     anchor_stats: Dict[int, Stats]
+    bell_scores: Dict[tuple, Optional[float]]  # move_key -> propagated_score
+    pred_scores: Dict[tuple, Optional[float]]  # move_key -> predicate mean_score
 
 
 class GameMemory(ABC):
@@ -241,38 +247,63 @@ class GameMemory(ABC):
     # -------------------------------------------------------------------------
 
     def evaluate_moves(self, game: "GameBase", valid_moves: List[np.ndarray]) -> MoveEvaluation:
-        """Evaluate all valid moves and group by anchor."""
+        """Evaluate all valid moves and group by anchor.
+
+        Uses a single batch DB query per position instead of 3 queries per move.
+        Also collects bell and predicate scores so selection doesn't need to
+        re-clone games and re-query.
+        """
         current_board = game.get_state().board
         from_hash = hash_board(current_board)
-        # Normalize from_board to 2D for predicate matching
         from_board_2d = current_board if current_board.ndim == 2 else current_board.reshape(1, -1)
+
+        # Single batch query: fetch stats + anchor_id + bell for ALL moves from this position
+        known_moves = self.batch_get_moves_from(from_hash) if hasattr(self, 'batch_get_moves_from') else {}
 
         anchors_with_moves: Dict[int, List[Tuple[np.ndarray, Stats]]] = defaultdict(list)
         anchor_stats: Dict[int, Stats] = {}
+        bell_scores: Dict[tuple, Optional[float]] = {}
+        pred_scores: Dict[tuple, Optional[float]] = {}
 
         for move, to_hash, to_board in self._compute_move_hashes(game, valid_moves):
-            direct_stats = self.get_move_stats(from_hash, to_hash)
+            mk = tuple(move)
 
-            if direct_stats.total > 0:
-                anchor_id = self.get_anchor_id(from_hash, to_hash)
-                aid = anchor_id if anchor_id is not None else UNEXPLORED_ANCHOR_ID
-                anchors_with_moves[aid].append((move, direct_stats))
+            if to_hash in known_moves:
+                direct_stats, anchor_id, bell = known_moves[to_hash]
+                bell_scores[mk] = bell
+                if direct_stats.total > 0:
+                    aid = anchor_id if anchor_id is not None else UNEXPLORED_ANCHOR_ID
+                    anchors_with_moves[aid].append((move, direct_stats))
+                    if aid not in anchor_stats:
+                        anchor_stats[aid] = self.get_anchor_stats_by_id(aid) if aid != UNEXPLORED_ANCHOR_ID else Stats()
 
-                if aid not in anchor_stats:
-                    anchor_stats[aid] = self.get_anchor_stats_by_id(aid) if aid != UNEXPLORED_ANCHOR_ID else Stats()
+                    # Also check predicate for the 4th signal
+                    board_2d = to_board if to_board.ndim == 2 else to_board.reshape(1, -1)
+                    ps = self.predicate_library.match(board_2d, from_board_2d)
+                    pred_scores[mk] = ps.mean_score if ps is not None else None
+                    continue
+
+            bell_scores[mk] = None
+
+            # Unseen transition — check predicate library for a prior
+            board_2d = to_board if to_board.ndim == 2 else to_board.reshape(1, -1)
+            pred_stats = self.predicate_library.match(board_2d, from_board_2d)
+            if pred_stats is not None:
+                anchors_with_moves[PREDICATE_ANCHOR_ID].append((move, pred_stats))
+                if PREDICATE_ANCHOR_ID not in anchor_stats:
+                    anchor_stats[PREDICATE_ANCHOR_ID] = pred_stats
+                pred_scores[mk] = pred_stats.mean_score
             else:
-                # Unseen transition — check predicate library for a prior
-                board_2d = to_board if to_board.ndim == 2 else to_board.reshape(1, -1)
-                pred_stats = self.predicate_library.match(board_2d, from_board_2d)
-                if pred_stats is not None:
-                    anchors_with_moves[PREDICATE_ANCHOR_ID].append((move, pred_stats))
-                    if PREDICATE_ANCHOR_ID not in anchor_stats:
-                        anchor_stats[PREDICATE_ANCHOR_ID] = pred_stats
-                else:
-                    anchors_with_moves[UNEXPLORED_ANCHOR_ID].append((move, Stats()))
-                    anchor_stats[UNEXPLORED_ANCHOR_ID] = Stats()
+                anchors_with_moves[UNEXPLORED_ANCHOR_ID].append((move, Stats()))
+                anchor_stats[UNEXPLORED_ANCHOR_ID] = Stats()
+                pred_scores[mk] = None
 
-        return MoveEvaluation(anchors_with_moves=dict(anchors_with_moves), anchor_stats=anchor_stats)
+        return MoveEvaluation(
+            anchors_with_moves=dict(anchors_with_moves),
+            anchor_stats=anchor_stats,
+            bell_scores=bell_scores,
+            pred_scores=pred_scores,
+        )
 
     def _compute_move_hashes(self, game: "GameBase", valid_moves: List[np.ndarray]) -> List[Tuple[np.ndarray, str, np.ndarray]]:
         """Generate (move, destination_hash, destination_board) triples.

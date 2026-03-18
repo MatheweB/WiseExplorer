@@ -159,8 +159,9 @@ def select_move(
     if not anchors_with_moves:
         return np.asarray(random.choice(valid_moves))
 
-    bell_scores = _collect_bell_scores(game, memory, valid_moves)
-    pred_scores = _collect_predicate_scores(game, memory, valid_moves)
+    # Bell and predicate scores are pre-collected by evaluate_moves (no re-cloning)
+    bell_scores = evaluation.bell_scores
+    pred_scores = evaluation.pred_scores
 
     # Collect anchor and solo scores per move for signal comparison
     anchor_scores: Dict[tuple, float] = {}
@@ -226,8 +227,9 @@ def select_move_for_training(
         return np.asarray(random.choice(valid_moves))
 
     pick_best = not is_prune
-    bell_scores = _collect_bell_scores(game, memory, valid_moves)
-    pred_scores = _collect_predicate_scores(game, memory, valid_moves)
+    # Bell and predicate scores are pre-collected by evaluate_moves (no re-cloning)
+    bell_scores = evaluation.bell_scores
+    pred_scores = evaluation.pred_scores
 
     # Collect anchor and solo scores for signal ranking
     anchor_scores: Dict[tuple, float] = {}
