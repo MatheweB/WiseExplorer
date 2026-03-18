@@ -68,6 +68,9 @@ class GameMemory(ABC):
         self.predicate_library = PredicateLibrary(self.conn, self.read_only)
         self._batch_miner = TreeMiner()   # batch CART for end-of-training
         self._iti_miner = ITIMiner()       # incremental for per-wave updates
+        self._cached_trans_scores: Dict[Tuple[str, str], Tuple[Counts, float]] = {}
+        self._cached_boards: Dict[str, np.ndarray] = {}  # board cache (append-only)
+        self._last_wave_keys: List[Tuple[str, str]] = []  # transitions touched last wave
 
     # -------------------------------------------------------------------------
     # Abstract Methods (subclasses must implement)
@@ -380,6 +383,10 @@ class GameMemory(ABC):
         swaps = self._commit(transitions)
         self._record_cross_scores(cross_scores)
         self._propagate_bellman(trajectory_keys)
+
+        # Track which transitions were touched for incremental mining
+        self._last_wave_keys = list(transitions.keys())
+
         return len(transitions), swaps
 
     def _store_boards(self, boards: Dict[str, Tuple[bytes, int, int]]) -> None:
@@ -404,6 +411,32 @@ class GameMemory(ABC):
             board = np.frombuffer(data, dtype=np.int8).reshape(nrows, ncols).copy()
             result[h] = board
         return result
+
+    def _load_new_boards(self) -> None:
+        """Load only boards not already in cache (boards table is append-only)."""
+        if not self._cached_boards:
+            # First call: load everything
+            self._cached_boards = self._load_boards()
+            return
+        # Only load new boards by checking which hashes from last wave are missing
+        needed = set()
+        for fh, th in self._last_wave_keys:
+            if fh not in self._cached_boards:
+                needed.add(fh)
+            if th not in self._cached_boards:
+                needed.add(th)
+        if not needed:
+            return
+        for h in needed:
+            row = self.conn.execute(
+                "SELECT board_data, board_rows, board_cols FROM boards WHERE board_hash=?",
+                (h,),
+            ).fetchone()
+            if row:
+                data, nrows, ncols = row
+                self._cached_boards[h] = np.frombuffer(
+                    data, dtype=np.int8,
+                ).reshape(nrows, ncols).copy()
 
     def _build_trans_scores(self) -> Tuple[Dict[str, np.ndarray], Dict[Tuple[str, str], Tuple[Counts, float]]]:
         """Load transitions and build per-transition scores with per-from-board signal selection.
@@ -469,23 +502,79 @@ class GameMemory(ABC):
         if self.read_only:
             raise RuntimeError("Cannot mine predicates in read-only mode")
 
-        boards, trans_scores = self._build_trans_scores()
-        if not trans_scores:
-            return 0
-
         if incremental:
-            # Per-wave: ITI with no pruning (full tree = finer priors)
-            predicates = self._iti_miner.mine(boards, trans_scores, prune=False)
+            # Per-wave: only query the transitions touched this wave.
+            # Update the caches incrementally, then pass to ITI
+            # (ITI internally skips already-known transitions).
+            if not self._last_wave_keys:
+                return 0
+            self._load_new_boards()
+            self._update_trans_cache(self._cached_boards)
+            if not self._cached_trans_scores:
+                return 0
+            predicates = self._iti_miner.mine(
+                self._cached_boards, self._cached_trans_scores,
+                prune=False, wave_keys=self._last_wave_keys,
+            )
         else:
-            # End-of-training: ITI with pruning (compact output)
-            # Uses the already-built ITI tree, just extracts with pruning.
-            # Falls back to batch CART if ITI has no tree yet.
+            # End-of-training: full rebuild for compact output.
+            boards, trans_scores = self._build_trans_scores()
+            if not trans_scores:
+                return 0
             if self._iti_miner._root is not None:
                 predicates = self._iti_miner.mine(boards, trans_scores, prune=True)
             else:
                 predicates = self._batch_miner.mine(boards, trans_scores)
         self.predicate_library.save(predicates)
         return len(predicates)
+
+    def _update_trans_cache(self, boards: Dict[str, np.ndarray]) -> None:
+        """Incrementally update cached transition scores for touched keys only."""
+        import numpy as _np
+
+        if not self._last_wave_keys:
+            return
+
+        # Query only the touched transitions
+        touched = set(self._last_wave_keys)
+        placeholders = ",".join(["(?,?)"] * len(touched))
+        params = [v for k in touched for v in k]
+
+        try:
+            rows = self.conn.execute(
+                f"SELECT from_hash, to_hash, wins, ties, losses, propagated_score "
+                f"FROM transitions WHERE (from_hash, to_hash) IN (VALUES {placeholders})",
+                params,
+            ).fetchall()
+        except Exception:
+            # Fallback: query all (some SQLite versions don't support VALUES)
+            rows = self.conn.execute(
+                "SELECT from_hash, to_hash, wins, ties, losses, propagated_score "
+                "FROM transitions"
+            ).fetchall()
+
+        # Group touched transitions by from_hash for signal selection
+        from_groups: Dict[str, list] = {}
+        for from_hash, to_hash, w, t, l, bell in rows:
+            if to_hash not in boards or from_hash not in boards:
+                continue
+            s = Stats(w, t, l)
+            if s.total <= 0:
+                continue
+            if from_hash not in from_groups:
+                from_groups[from_hash] = []
+            from_groups[from_hash].append((to_hash, (w, t, l), bell, s.mean_score))
+
+        for from_hash, transitions in from_groups.items():
+            bell_vals = [t[2] for t in transitions if t[2] is not None]
+            mean_vals = [t[3] for t in transitions]
+            bell_var = float(_np.var(bell_vals)) if len(bell_vals) >= 2 else 0.0
+            mean_var = float(_np.var(mean_vals)) if len(mean_vals) >= 2 else 0.0
+            use_bell = bell_var > mean_var and len(bell_vals) > len(transitions) * 0.5
+
+            for to_hash, counts, bell, mean in transitions:
+                score = bell if (use_bell and bell is not None) else mean
+                self._cached_trans_scores[(from_hash, to_hash)] = (counts, score)
 
     def _record_cross_scores(self, cross_scores: Dict) -> None:
         """Hook for recording cross-scores. No-op for Markov memory."""

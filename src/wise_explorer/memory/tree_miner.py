@@ -360,7 +360,6 @@ class TreeMiner:
     ) -> List[Predicate]:
         """Build CART regression tree and extract predicates from leaves."""
         n_atoms = match_matrix.shape[0]
-        base_var = score_tensor.var(correction=0).item() if n_boards >= 2 else 0.0
 
         predicates: List[Predicate] = []
 
@@ -383,8 +382,7 @@ class TreeMiner:
             current_var = matched_scores.var(correction=0).item() if n_match >= 2 else 0.0
             current_mean = matched_scores.mean().item()
 
-            var_threshold = max(base_var * 0.5, 0.05)
-            is_leaf = depth >= max_depth or n_match < min_leaf * 2 or current_var < var_threshold
+            is_leaf = depth >= max_depth or n_match < min_leaf * 2
             if is_leaf:
                 if used_atoms and n_match >= min_leaf:
                     # Extract predicate from this leaf

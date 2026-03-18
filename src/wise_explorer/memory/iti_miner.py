@@ -158,55 +158,65 @@ class ITIMiner:
         self,
         boards: Dict[str, np.ndarray],
         scores: Dict,
-        prune: bool = True,
+        prune: bool = False,
+        wave_keys: Optional[List[Tuple[str, str]]] = None,
     ) -> List[Predicate]:
         """Incremental mine: update tree with new/changed transitions.
 
         First call builds the tree from scratch. Subsequent calls only
-        process new transitions and update the existing tree.
+        process transitions touched this wave.
 
         Args:
-            prune: If True (default), apply bottom-up sibling pruning for
-                   compact output (use at end-of-training). If False, emit
-                   all leaves for finer-grained priors (use per-wave).
+            prune: If True, apply bottom-up sibling pruning using the
+                   1 SE criterion: merge siblings whose mean-score gap
+                   is less than 1 standard error (statistically insignificant).
+                   If False, emit all leaves for finer-grained priors.
+            wave_keys: Transitions touched this wave (new or updated).
+                   Avoids O(N) scan of all keys. If None, scans all keys.
         """
         self._prune_on_extract = prune
         if not TORCH_AVAILABLE or not boards or not scores:
             return []
 
-        # Identify transition keys
-        trans_keys = []
-        for key in scores:
-            if isinstance(key, tuple) and len(key) == 2:
-                fh, th = key
-                if fh in boards and th in boards:
-                    trans_keys.append((fh, th))
-
-        if len(trans_keys) < 4:
-            return []
-
-        sample = boards[trans_keys[0][1]]
-        rows, cols = sample.shape
-
-        # Check for new transitions
-        new_keys = [k for k in trans_keys if k not in self._trans_key_to_idx]
-
         if self._root is None or self._atoms is None:
             # Cold start: build everything from scratch
-            return self._cold_start(boards, scores, trans_keys, rows, cols)
+            trans_keys = [
+                k for k in scores
+                if isinstance(k, tuple) and len(k) == 2
+                and k[0] in boards and k[1] in boards
+            ]
+            if len(trans_keys) < 4:
+                return []
+            sample = boards[trans_keys[0][1]]
+            return self._cold_start(boards, scores, trans_keys,
+                                     sample.shape[0], sample.shape[1])
+
+        # Fast path: caller tells us which transitions were touched
+        if wave_keys is not None:
+            touched = [k for k in wave_keys
+                       if k[0] in boards and k[1] in boards and k in scores]
+        else:
+            # Slow path: scan all keys to find new ones
+            touched = [k for k in scores
+                       if isinstance(k, tuple) and len(k) == 2
+                       and k not in self._trans_key_to_idx
+                       and k[0] in boards and k[1] in boards]
+
+        # Separate into truly new vs score-updated existing
+        new_keys = [k for k in touched if k not in self._trans_key_to_idx]
+        updated_keys = [k for k in touched if k in self._trans_key_to_idx]
+
+        # Update scores for existing transitions
+        for k in updated_keys:
+            idx = self._trans_key_to_idx[k]
+            self._scores[idx] = scores[k][1]
 
         if not new_keys:
-            # No new transitions — update scores silently (no rebuild).
-            # Score drift from Bellman convergence is gradual; the tree's
-            # structure remains valid. A full rebuild happens at end-of-training
-            # via batch CART anyway.
-            for k in trans_keys:
-                idx = self._trans_key_to_idx.get(k)
-                if idx is not None:
-                    self._scores[idx] = scores[k][1]
             return self._extract_predicates()
 
         # Extend match matrix with new transitions
+        sample = boards[new_keys[0][1]]
+        rows, cols = sample.shape
         device = torch.device(self._device_name)
         to_tensor = torch.stack([
             torch.from_numpy(boards[th].copy()) for _, th in new_keys
@@ -355,12 +365,16 @@ class ITIMiner:
                     self._split_leaf(child, b, depth + 1)
 
     def _extract_predicates(self) -> List[Predicate]:
-        """Extract predicates with bottom-up sibling pruning.
+        """Extract predicates from the tree, optionally pruning redundant siblings.
 
-        Since the tree partitions the board space (no overlap between leaves),
-        the only redundancy is siblings with similar scores. Bottom-up pruning
-        is provably optimal for this structure: merge siblings when the parent's
-        variance is still below threshold.
+        When pruning is enabled, uses the 1 SE criterion: merge siblings whose
+        mean-score gap is less than 1 standard error of the parent's mean.
+        This is threshold-free — it uses the data's own noise level to decide
+        what's statistically significant.
+
+        Since tree leaves form a partition (no overlap), sibling merging is
+        provably optimal: the only possible redundancy is siblings with
+        similar scores.
 
         The tree itself is NOT modified (it needs its structure for incremental
         updates). Only the extracted predicates are pruned.
@@ -368,18 +382,12 @@ class ITIMiner:
         if self._root is None:
             return []
 
-        emit_nodes: list = []  # (node, path) pairs to emit
+        import math
+        emit_nodes: list = []
 
-        if getattr(self, '_prune_on_extract', True):
-            # Bottom-up pruning: merge siblings when parent variance is
-            # below threshold. Produces compact output equivalent to CART.
-            # Threshold is purely relative — no absolute floor, so it works
-            # at any stage of Bellman convergence.
-            base_var = self._root.parent_variance()
-            var_threshold = max(base_var * 0.5, 0.05)
-            self._prune_collect(self._root, [], var_threshold, emit_nodes)
+        if getattr(self, '_prune_on_extract', False):
+            self._se_prune_collect(self._root, [], emit_nodes)
         else:
-            # No pruning: emit all leaves for finer-grained priors.
             stack = [(self._root, [])]
             while stack:
                 node, path = stack.pop()
@@ -424,41 +432,29 @@ class ITIMiner:
 
         return predicates
 
-    def _prune_collect(
-        self,
-        node: _ITINode,
-        path: list,
-        var_threshold: float,
-        emit: list,
-    ):
-        """Bottom-up: collect nodes to emit as predicates, merging where possible.
+    def _se_prune_collect(self, node: _ITINode, path: list, emit: list):
+        """Collect predicates with 1 SE sibling pruning.
 
-        If a node is a leaf, it's a candidate for emission.
-        If a node is internal but its variance is below threshold, emit IT
-        instead of its children (merge). Otherwise, recurse into children.
+        Merge siblings when |left_mean - right_mean| < SE, where SE is the
+        standard error of the parent's mean (sqrt(var / n)). This means the
+        score difference between siblings is not statistically significant —
+        the split didn't separate different strategic regions.
         """
+        import math
+
         if node.is_leaf:
             emit.append((node, path))
             return
 
-        # Check: would this node be good enough as a single predicate?
-        # If parent variance is below threshold, merging children is better
-        # than emitting them separately. But never merge to root (path=[])
-        # since root has no atoms and can't be a useful predicate.
-        if path and node.parent_variance() < var_threshold:
+        # 1 SE criterion: is the gap between children significant?
+        gap = abs(node.left.mean_score() - node.right.mean_score())
+        parent_var = node.parent_variance()
+        se = math.sqrt(parent_var / max(node.total_count, 1))
+
+        # Merge if gap < 1 SE (not significant). Never merge root (path=[]).
+        if path and gap < se:
             emit.append((node, path))
             return
 
-        # Otherwise, recurse into children
-        self._prune_collect(
-            node.left,
-            path + [(node.split_atom, True)],
-            var_threshold,
-            emit,
-        )
-        self._prune_collect(
-            node.right,
-            path + [(node.split_atom, False)],
-            var_threshold,
-            emit,
-        )
+        self._se_prune_collect(node.left, path + [(node.split_atom, True)], emit)
+        self._se_prune_collect(node.right, path + [(node.split_atom, False)], emit)
