@@ -35,6 +35,7 @@ from wise_explorer.memory.predicates import (
     _board_at, _from_board_at, _derive_mining_params,
     AtomClause, Conjunction, Predicate, TORCH_AVAILABLE,
 )
+from wise_explorer.core.types import Stats
 from wise_explorer.memory.tree_miner import TreeMiner
 
 if TORCH_AVAILABLE:
@@ -107,7 +108,16 @@ class _ITINode:
         return self.total_sum / self.total_count if self.total_count > 0 else 0.5
 
     def best_split_atom(self, min_leaf: int, exclude: set) -> Tuple[int, float]:
-        """Atom with highest variance reduction. Returns (-1, -inf) if none."""
+        """Atom with highest variance reduction, if statistically significant.
+
+        Uses an F-test (p<0.05) to decide whether a split is meaningful.
+        F = Δ·(n-2) / weighted_child_var. For F(1, n-2) at p=0.05, the
+        critical value is ~4.0 (exact: 3.84 at n→∞, higher for small n).
+        This is self-scaling: requires large reductions when data is scarce,
+        allows finer splits when data is abundant. No tuning parameters.
+
+        Returns (-1, -inf) if no significant split exists.
+        """
         n = self.total_count
         if n < min_leaf * 2:
             return -1, float("-inf")
@@ -117,7 +127,16 @@ class _ITINode:
         lv = np.clip(self.match_sq / mc - (self.match_sum / mc) ** 2, 0, None)
         nc = np.clip(self.miss_count.astype(float), 1, None)
         rv = np.clip(self.miss_sq / nc - (self.miss_sum / nc) ** 2, 0, None)
-        red = pv - (self.match_count / n * lv + self.miss_count / n * rv)
+        weighted_child_var = self.match_count / n * lv + self.miss_count / n * rv
+        red = pv - weighted_child_var
+
+        # F-test: only keep splits that are statistically significant
+        # F = Δ·(n-2) / child_var. Critical value for F(1,n-2) at p=0.05 ≈ 4.0
+        f_crit = 4.0
+        with np.errstate(divide="ignore", invalid="ignore"):
+            f_stat = red * (n - 2) / np.where(weighted_child_var > 0,
+                                               weighted_child_var, np.inf)
+        red[f_stat < f_crit] = float("-inf")
 
         for idx in exclude:
             red[idx] = float("-inf")
@@ -138,6 +157,33 @@ class _ITINode:
         nc = max(self.miss_count[atom], 1)
         rv = max(self.miss_sq[atom] / nc - (self.miss_sum[atom] / nc) ** 2, 0)
         return pv - (self.match_count[atom] / n * lv + self.miss_count[atom] / n * rv)
+
+    def is_split_significant(self) -> bool:
+        """Check if the current split atom still passes the F-test (p<0.05).
+
+        Returns False if the split is no longer statistically justified,
+        meaning the node should collapse back to a leaf.
+        """
+        if self.is_leaf or self.split_atom < 0:
+            return True  # leaves are trivially fine
+        n = self.total_count
+        if n < 4:
+            return False
+        red = self._reduction_for(self.split_atom)
+        if red <= 0:
+            return False
+        mc = max(self.match_count[self.split_atom], 1)
+        lv = max(self.match_sq[self.split_atom] / mc
+                 - (self.match_sum[self.split_atom] / mc) ** 2, 0)
+        nc = max(self.miss_count[self.split_atom], 1)
+        rv = max(self.miss_sq[self.split_atom] / nc
+                 - (self.miss_sum[self.split_atom] / nc) ** 2, 0)
+        child_var = (self.match_count[self.split_atom] / n * lv
+                     + self.miss_count[self.split_atom] / n * rv)
+        if child_var <= 0:
+            return True  # perfect split, always significant
+        f_stat = red * (n - 2) / child_var
+        return f_stat >= 4.0
 
 
 class ITIMiner:
@@ -394,9 +440,21 @@ class ITIMiner:
             node.left.populate_batch(left_idx, self._match_matrix, self._scores)
             node.right.populate_batch(right_idx, self._match_matrix, self._scores)
 
+    def _collapse_to_leaf(self, node: _ITINode):
+        """Collapse an internal node back to a leaf, merging children."""
+        node.is_leaf = True
+        node.split_atom = -1
+        node.left = None
+        node.right = None
+
     def _check_rotation(self, node: _ITINode, ancestors_used: set, depth: int):
-        """Pull-up rotation with hysteresis."""
+        """Pull-up rotation with hysteresis. Collapses insignificant splits."""
         if node.is_leaf:
+            return
+
+        # If the current split is no longer significant, collapse to leaf
+        if not node.is_split_significant():
+            self._collapse_to_leaf(node)
             return
 
         best, best_red = node.best_split_atom(self._min_leaf, ancestors_used)
