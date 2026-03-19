@@ -13,12 +13,24 @@ from typing import Dict, List, Optional, Tuple, TYPE_CHECKING
 
 import numpy as np
 
-from wise_explorer.core.types import Stats
+from wise_explorer.core.types import Stats, is_decisive
 from wise_explorer.selection import training
 
 if TYPE_CHECKING:
     from wise_explorer.games.game_base import GameBase
     from wise_explorer.memory.game_memory import GameMemory
+
+
+# ---------------------------------------------------------------------------
+# Decisive scoring helper
+# ---------------------------------------------------------------------------
+
+def _effective_score(stats: Stats, base_rate: float = 0.5) -> float:
+    """Return exact ratio if evidence is unanimously significant,
+    otherwise Bayesian mean. Uses binomial test against base_rate."""
+    if is_decisive(stats, base_rate):
+        return stats.utility
+    return stats.mean_score
 
 
 # ---------------------------------------------------------------------------
@@ -164,26 +176,29 @@ def select_move(
     pred_scores = evaluation.pred_scores
 
     # Collect anchor and solo scores per move for signal comparison
+    # Uses decisive scoring: exact ratio when unanimously significant
     anchor_scores: Dict[tuple, float] = {}
     solo_scores: Dict[tuple, float] = {}
     for aid, moves in anchors_with_moves.items():
-        a_score = anchor_stats[aid].mean_score if aid in anchor_stats else 0.5
+        a_stats = anchor_stats.get(aid)
+        a_score = _effective_score(a_stats) if a_stats else 0.5
         for move, stats in moves:
             mk = tuple(move)
             anchor_scores[mk] = a_score
-            solo_scores[mk] = stats.mean_score
+            solo_scores[mk] = _effective_score(stats, a_score)
 
     signal_order = _rank_signals(bell_scores, anchor_scores, solo_scores, pred_scores)
 
     # Score each move using the ranked signal order
     move_scored: list[tuple[np.ndarray, Tuple[float, ...]]] = []
     for aid, moves in anchors_with_moves.items():
-        a_score = anchor_stats[aid].mean_score if aid in anchor_stats else 0.5
+        a_stats = anchor_stats.get(aid)
+        a_score = _effective_score(a_stats) if a_stats else 0.5
         for move, stats in moves:
             mk = tuple(move)
             bell = bell_scores.get(mk)
             pred = pred_scores.get(mk) if pred_scores else None
-            key = _score_move(bell, a_score, stats.mean_score, signal_order, pred)
+            key = _score_move(bell, a_score, _effective_score(stats, a_score), signal_order, pred)
             move_scored.append((move, key))
 
     if pick_best:
@@ -235,11 +250,12 @@ def select_move_for_training(
     anchor_scores: Dict[tuple, float] = {}
     solo_scores: Dict[tuple, float] = {}
     for aid, moves in anchors_with_moves.items():
-        a_score = anchor_stats[aid].mean_score if aid in anchor_stats else 0.5
+        a_stats = anchor_stats.get(aid)
+        a_score = _effective_score(a_stats) if a_stats else 0.5
         for move, stats in moves:
             mk = tuple(move)
             anchor_scores[mk] = a_score
-            solo_scores[mk] = stats.mean_score
+            solo_scores[mk] = _effective_score(stats, a_score)
 
     signal_order = _rank_signals(bell_scores, anchor_scores, solo_scores, pred_scores)
 
@@ -255,9 +271,11 @@ def select_move_for_training(
     if random.random() < exploration_weight:
         selected_move = random.choice(valid_moves)
     else:
+        best_a_stats = anchor_stats.get(best_anchor_id)
+        best_a_rate = _effective_score(best_a_stats) if best_a_stats else 0.5
         selected_move = _select_within_anchor(
             anchors_with_moves[best_anchor_id], bell_scores, signal_order, pick_best,
-            pred_scores,
+            pred_scores, anchor_base_rate=best_a_rate,
         )
 
     if debug:
@@ -273,6 +291,7 @@ def _select_within_anchor(
     signal_order: Tuple[str, ...],
     pick_best: bool,
     pred_scores: Optional[Dict[tuple, Optional[float]]] = None,
+    anchor_base_rate: float = 0.5,
 ) -> np.ndarray:
     """Pick best move within anchor using ranked signals. Random among full ties."""
     scored = []
@@ -280,7 +299,8 @@ def _select_within_anchor(
         mk = tuple(move)
         bell = bell_scores.get(mk)
         pred = pred_scores.get(mk) if pred_scores else None
-        key = _score_move(bell, stats.mean_score, stats.mean_score, signal_order, pred)
+        eff = _effective_score(stats, anchor_base_rate)
+        key = _score_move(bell, eff, eff, signal_order, pred)
         scored.append((move, key))
 
     if pick_best:
@@ -305,13 +325,14 @@ def _best_anchor_by_signal(
     anchor_best: Dict[int, Tuple[float, ...]] = {}
 
     for aid, moves in anchors_with_moves.items():
-        a_score = anchor_stats[aid].mean_score if aid in anchor_stats else 0.5
+        a_stats = anchor_stats.get(aid)
+        a_score = _effective_score(a_stats) if a_stats else 0.5
         best_key = _score_move(None, a_score, a_score, signal_order)
         for move, stats in moves:
             mk = tuple(move)
             bell = bell_scores.get(mk)
             pred = pred_scores.get(mk) if pred_scores else None
-            key = _score_move(bell, a_score, stats.mean_score, signal_order, pred)
+            key = _score_move(bell, a_score, _effective_score(stats, a_score), signal_order, pred)
             if pick_best:
                 best_key = max(best_key, key)
             else:

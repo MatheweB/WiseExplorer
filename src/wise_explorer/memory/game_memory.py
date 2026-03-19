@@ -16,7 +16,7 @@ from typing import Any, Dict, List, NamedTuple, Optional, Tuple, TYPE_CHECKING
 
 import numpy as np
 
-from wise_explorer.core.types import Stats, Counts, OUTCOME_INDEX, OUTCOME_SCORE
+from wise_explorer.core.types import Stats, Counts, OUTCOME_INDEX, OUTCOME_SCORE, is_decisive
 from wise_explorer.core.hashing import hash_board
 from wise_explorer.core.bayes import compatible
 from wise_explorer.memory.anchor_manager import AnchorManager
@@ -280,7 +280,11 @@ class GameMemory(ABC):
                     # Also check predicate for the 4th signal
                     board_2d = to_board if to_board.ndim == 2 else to_board.reshape(1, -1)
                     ps = self.predicate_library.match(board_2d, from_board_2d)
-                    pred_scores[mk] = ps.mean_score if ps is not None else None
+                    if ps is not None:
+                        a_rate = anchor_stats[aid].mean_score if aid in anchor_stats else 0.5
+                        pred_scores[mk] = ps.utility if is_decisive(ps, a_rate) else ps.mean_score
+                    else:
+                        pred_scores[mk] = None
                     continue
 
             bell_scores[mk] = None
@@ -292,7 +296,7 @@ class GameMemory(ABC):
                 anchors_with_moves[PREDICATE_ANCHOR_ID].append((move, pred_stats))
                 if PREDICATE_ANCHOR_ID not in anchor_stats:
                     anchor_stats[PREDICATE_ANCHOR_ID] = pred_stats
-                pred_scores[mk] = pred_stats.mean_score
+                pred_scores[mk] = pred_stats.utility if is_decisive(pred_stats) else pred_stats.mean_score
             else:
                 anchors_with_moves[UNEXPLORED_ANCHOR_ID].append((move, Stats()))
                 anchor_stats[UNEXPLORED_ANCHOR_ID] = Stats()
@@ -500,7 +504,7 @@ class GameMemory(ABC):
             ).fetchall()
             for aid, aw, at, al in anchor_rows:
                 s = Stats(aw, at, al)
-                anchor_stats[aid] = s.mean_score if s.total > 0 else 0.5
+                anchor_stats[aid] = (s.utility if is_decisive(s) else s.mean_score) if s.total > 0 else 0.5
         except Exception:
             pass
 
@@ -517,8 +521,8 @@ class GameMemory(ABC):
             s = Stats(w, t, l)
             if s.total <= 0:
                 continue
-            solo_mean = s.mean_score
-            anchor_mean = anchor_stats.get(anchor_id, solo_mean) if anchor_id is not None else solo_mean
+            anchor_mean = anchor_stats.get(anchor_id, s.mean_score) if anchor_id is not None else s.mean_score
+            solo_mean = s.utility if is_decisive(s, anchor_mean) else s.mean_score
 
             # Predicate score: structural prior from the predicate library
             pred_score = None
@@ -527,7 +531,7 @@ class GameMemory(ABC):
                 from_2d = boards[from_hash] if boards[from_hash].ndim == 2 else boards[from_hash].reshape(1, -1)
                 pred_stats = self.predicate_library.match(to_2d, from_2d)
                 if pred_stats is not None:
-                    pred_score = pred_stats.mean_score
+                    pred_score = pred_stats.utility if is_decisive(pred_stats, anchor_mean) else pred_stats.mean_score
 
             if from_hash not in from_groups:
                 from_groups[from_hash] = []

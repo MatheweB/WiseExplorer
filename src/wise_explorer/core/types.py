@@ -108,3 +108,39 @@ class Stats(NamedTuple):
             return probs[0] * W_WEIGHT + probs[1] * T_WEIGHT + probs[2] * L_WEIGHT
 
         raise ValueError(f"Unknown method: {method}")
+
+
+# ---------------------------------------------------------------------------
+# Decisive evidence test
+# ---------------------------------------------------------------------------
+
+def is_decisive(stats: Stats, base_rate: float = 0.5) -> bool:
+    """Is this outcome unanimously significant given the base rate?
+
+    Returns True when ALL outcomes are the same type (all wins, all
+    losses, or all ties) AND the probability of that happening by
+    chance is below 5% (binomial test).
+
+    The base_rate is what we'd expect without this specific pattern —
+    typically the anchor's pooled win rate. Higher base rates require
+    more unanimous samples to be considered decisive.
+
+    Examples:
+        base_rate=0.5 → need 5+ unanimous  (balanced game)
+        base_rate=0.7 → need 9+ unanimous  (skewed game)
+        base_rate=0.3 → need 3+ unanimous  (rare wins)
+
+    When True, use stats.utility (exact ratio) instead of
+    stats.mean_score (Bayesian smoothed).
+    """
+    if stats.total == 0:
+        return False
+
+    w, t, l = stats.wins, stats.ties, stats.losses
+    n_types = (w > 0) + (t > 0) + (l > 0)
+    if n_types != 1:
+        return False
+
+    p = max(min(base_rate, 0.95), 0.5)
+    threshold = max(3, math.ceil(math.log(0.05) / math.log(p)))
+    return stats.total >= threshold
