@@ -522,20 +522,26 @@ class GameMemory(ABC):
             if s.total <= 0:
                 continue
             anchor_mean = anchor_stats.get(anchor_id, s.mean_score) if anchor_id is not None else s.mean_score
-            solo_mean = s.utility if is_decisive(s, anchor_mean) else s.mean_score
+            solo_decisive = is_decisive(s, anchor_mean)
+            solo_mean = s.utility if solo_decisive else s.mean_score
 
             # Predicate score: structural prior from the predicate library
             pred_score = None
+            pred_decisive = False
             if self.predicate_library.count > 0:
                 to_2d = boards[to_hash] if boards[to_hash].ndim == 2 else boards[to_hash].reshape(1, -1)
                 from_2d = boards[from_hash] if boards[from_hash].ndim == 2 else boards[from_hash].reshape(1, -1)
                 pred_stats = self.predicate_library.match(to_2d, from_2d)
                 if pred_stats is not None:
-                    pred_score = pred_stats.utility if is_decisive(pred_stats, anchor_mean) else pred_stats.mean_score
+                    pred_decisive = is_decisive(pred_stats, anchor_mean)
+                    pred_score = pred_stats.utility if pred_decisive else pred_stats.mean_score
 
             if from_hash not in from_groups:
                 from_groups[from_hash] = []
-            from_groups[from_hash].append((to_hash, (w, t, l), bell, anchor_mean, solo_mean, pred_score))
+            from_groups[from_hash].append((
+                to_hash, (w, t, l), bell, anchor_mean, solo_mean,
+                pred_score, solo_decisive, pred_decisive,
+            ))
 
         # Per-from-board: rank all 4 signals by variance (matches selection)
         trans_scores: Dict[Tuple[str, str], Tuple[Counts, float]] = {}
@@ -559,8 +565,17 @@ class GameMemory(ABC):
 
             best_signal = max(variances, key=variances.get)
 
-            for to_hash, counts, bell, anchor_mean, solo_mean, pred_score in transitions:
-                if best_signal == "bell" and bell is not None:
+            for to_hash, counts, bell, anchor_mean, solo_mean, \
+                    pred_score, solo_decisive, pred_decisive in transitions:
+                # Decisive PREDICATE evidence trumps variance ranking.
+                # A predicate with unanimous + significant counts is
+                # collective ground truth — it aggregates many transitions'
+                # evidence, not just this one's visit count.
+                # Solo decisive is NOT trumped here because solo scores
+                # flow into exploration weight (1.0 → always explore).
+                if pred_decisive:
+                    score = pred_score  # already exact (utility)
+                elif best_signal == "bell" and bell is not None:
                     score = bell
                 elif best_signal == "anchor":
                     score = anchor_mean
