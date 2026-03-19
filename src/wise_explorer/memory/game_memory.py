@@ -568,13 +568,8 @@ class GameMemory(ABC):
             for to_hash, counts, bell, anchor_mean, solo_mean, \
                     pred_score, solo_decisive, pred_decisive in transitions:
                 # Decisive PREDICATE evidence trumps variance ranking.
-                # A predicate with unanimous + significant counts is
-                # collective ground truth — it aggregates many transitions'
-                # evidence, not just this one's visit count.
-                # Solo decisive is NOT trumped here because solo scores
-                # flow into exploration weight (1.0 → always explore).
                 if pred_decisive:
-                    score = pred_score  # already exact (utility)
+                    score = pred_score
                 elif best_signal == "bell" and bell is not None:
                     score = bell
                 elif best_signal == "anchor":
@@ -583,6 +578,7 @@ class GameMemory(ABC):
                     score = pred_score
                 else:
                     score = solo_mean
+
                 trans_scores[(from_hash, to_hash)] = (counts, score)
 
         return boards, trans_scores

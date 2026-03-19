@@ -294,6 +294,27 @@ class ITIMiner:
                 elif kind == "cross_eq":
                     r2, c2 = atom[3], atom[4]
                     result[j, i] = int(to_b[r, c]) == int(from_b[r2, c2])
+                # --- Aggregate atoms ---
+                elif kind.startswith("agg_"):
+                    indices = atom[2]  # tuple of cell indices
+                    flat = to_b.ravel()
+                    vals = [int(flat[idx]) for idx in indices]
+                    if kind == "agg_sum_eq":
+                        result[j, i] = sum(vals) == atom[3]
+                    elif kind == "agg_sum_gt":
+                        result[j, i] = sum(vals) > atom[3]
+                    elif kind == "agg_max_eq":
+                        result[j, i] = max(vals) == atom[3]
+                    elif kind == "agg_max_gt":
+                        result[j, i] = max(vals) > atom[3]
+                    elif kind == "agg_count_nz_eq":
+                        result[j, i] = sum(1 for v in vals if v != 0) == atom[3]
+                    elif kind == "agg_count_nz_gt":
+                        result[j, i] = sum(1 for v in vals if v != 0) > atom[3]
+                    elif kind == "agg_count_eq":
+                        result[j, i] = sum(1 for v in vals if v == atom[3]) == atom[4]
+                    elif kind == "agg_count_eq_gt":
+                        result[j, i] = sum(1 for v in vals if v == atom[3]) > atom[4]
         return result
 
     def _cold_start(self, boards, scores, trans_keys, rows, cols):

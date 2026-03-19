@@ -13,7 +13,7 @@ import numpy as np
 
 from wise_explorer.memory.predicates import (
     Eq, Neq, Literal, BoardAt, MakeSq, FromBoardAt,
-    _board_at, _from_board_at, _derive_mining_params,
+    _board_at, _from_board_at, _derive_mining_params, _AggAtom, _NegAggAtom,
     AtomClause, Conjunction, Predicate, TORCH_AVAILABLE,
 )
 
@@ -104,6 +104,54 @@ class TreeMiner:
                 r, c = divmod(cell_idx, cols)
                 atoms.append(("unchanged", r, c))
 
+        # === Aggregate atoms (multi-cell properties) ===
+        # These capture group-level relationships that no single-cell atom
+        # can express: counting, summing, extremes. Groups: whole board +
+        # rows + columns for 2D games.
+
+        all_cells = list(range(n_cells))
+
+        groups = [("all", all_cells)]
+        if rows > 1:
+            for r in range(rows):
+                groups.append((f"row{r}", [r * cols + c for c in range(cols)]))
+            for c in range(cols):
+                groups.append((f"col{c}", [r * cols + c for r in range(rows)]))
+
+        for group_name, cell_indices in groups:
+            group_vals = flat[:, cell_indices]  # (N, group_size)
+
+            # Sum: for each unique observed sum value, == and >
+            sums = group_vals.sum(dim=1)
+            for v in sums.unique().tolist():
+                v = int(v)
+                atoms.append(("agg_sum_eq", group_name, tuple(cell_indices), v))
+                atoms.append(("agg_sum_gt", group_name, tuple(cell_indices), v))
+
+            # Max: for each unique observed max value, == and >
+            maxes = group_vals.max(dim=1).values
+            for v in maxes.unique().tolist():
+                v = int(v)
+                atoms.append(("agg_max_eq", group_name, tuple(cell_indices), v))
+                atoms.append(("agg_max_gt", group_name, tuple(cell_indices), v))
+
+            # Count nonzero: for each unique count, == and >
+            counts_nz = (group_vals != 0).sum(dim=1)
+            for v in counts_nz.unique().tolist():
+                v = int(v)
+                atoms.append(("agg_count_nz_eq", group_name, tuple(cell_indices), v))
+                atoms.append(("agg_count_nz_gt", group_name, tuple(cell_indices), v))
+
+            # Count equal to specific value: for each observed cell value
+            all_vals = group_vals.unique().tolist()
+            for val in all_vals:
+                val = int(val)
+                counts_eq = (group_vals == val).sum(dim=1)
+                for v in counts_eq.unique().tolist():
+                    v = int(v)
+                    atoms.append(("agg_count_eq", group_name, tuple(cell_indices), val, v))
+                    atoms.append(("agg_count_eq_gt", group_name, tuple(cell_indices), val, v))
+
         return atoms
 
     def _build_match_matrix(self, atoms, board_tensor, rows, cols, from_tensor=None):
@@ -143,6 +191,31 @@ class TreeMiner:
                 _, r, c = atom
                 cell_idx = r * cols + c
                 match_rows.append(flat[:, cell_idx] == from_flat[:, cell_idx])
+            # --- Aggregate atoms ---
+            elif atom[0] == "agg_sum_eq":
+                _, _name, indices, v = atom
+                match_rows.append(flat[:, list(indices)].sum(dim=1) == v)
+            elif atom[0] == "agg_sum_gt":
+                _, _name, indices, v = atom
+                match_rows.append(flat[:, list(indices)].sum(dim=1) > v)
+            elif atom[0] == "agg_max_eq":
+                _, _name, indices, v = atom
+                match_rows.append(flat[:, list(indices)].max(dim=1).values == v)
+            elif atom[0] == "agg_max_gt":
+                _, _name, indices, v = atom
+                match_rows.append(flat[:, list(indices)].max(dim=1).values > v)
+            elif atom[0] == "agg_count_nz_eq":
+                _, _name, indices, v = atom
+                match_rows.append((flat[:, list(indices)] != 0).sum(dim=1) == v)
+            elif atom[0] == "agg_count_nz_gt":
+                _, _name, indices, v = atom
+                match_rows.append((flat[:, list(indices)] != 0).sum(dim=1) > v)
+            elif atom[0] == "agg_count_eq":
+                _, _name, indices, val, v = atom
+                match_rows.append((flat[:, list(indices)] == val).sum(dim=1) == v)
+            elif atom[0] == "agg_count_eq_gt":
+                _, _name, indices, val, v = atom
+                match_rows.append((flat[:, list(indices)] == val).sum(dim=1) > v)
 
         return torch.stack(match_rows)  # (num_atoms, N)
 
@@ -170,6 +243,9 @@ class TreeMiner:
         elif desc[0] == "unchanged":
             _, r, c = desc
             return Eq(_board_at(r, c), _from_board_at(r, c))
+        elif desc[0].startswith("agg_"):
+            # Aggregate atoms: store descriptor, evaluate directly on board
+            return _AggAtom(desc)
         raise ValueError(f"Unknown atom descriptor: {desc}")
 
     def _masked_variance(self, scores, mask):
@@ -559,4 +635,8 @@ class TreeMiner:
         elif desc[0] == "unchanged":
             _, r, c = desc
             return Neq(_board_at(r, c), _from_board_at(r, c))
+        elif desc[0].startswith("agg_"):
+            # Negate aggregate: flip == to != and > to <=
+            # Represented as a NegAggAtom that inverts the test
+            return _NegAggAtom(desc)
         raise ValueError(f"Unknown atom descriptor: {desc}")

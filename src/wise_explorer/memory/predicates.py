@@ -245,6 +245,10 @@ class Atom(ABC):
             return Ge(Expr.from_dict(d["left"]), Expr.from_dict(d["right"]))
         if t == "in_bounds":
             return InBounds(Expr.from_dict(d["rank"]), Expr.from_dict(d["file"]))
+        if t == "agg":
+            return AggAtom(descriptor=tuple(d["descriptor"]))
+        if t == "neg_agg":
+            return NegAggAtom(descriptor=tuple(d["descriptor"]))
         raise ValueError(f"Unknown atom type: {t}")
 
     def __eq__(self, other):
@@ -368,6 +372,94 @@ class InBounds(Atom):
 
     def __repr__(self):
         return f"in_bounds({self.rank},{self.file})"
+
+
+@dataclass(frozen=True)
+class AggAtom(Atom):
+    """Aggregate atom: evaluates a group-level property (sum, max, count).
+
+    Stores the raw descriptor tuple from the miner and evaluates directly
+    on the board. Covers sum, max, count_nz, and count_eq with == and >
+    comparisons. Interpretable: "sum(all)==4" or "count(row0, X)>1".
+    """
+    descriptor: tuple
+
+    def evaluate(self, board, bindings):
+        desc = self.descriptor
+        kind = desc[0]
+        indices = desc[2]  # tuple of cell indices
+        flat = board.ravel()
+        vals = np.array([int(flat[i]) for i in indices])
+
+        if kind == "agg_sum_eq":
+            return int(vals.sum()) == desc[3]
+        elif kind == "agg_sum_gt":
+            return int(vals.sum()) > desc[3]
+        elif kind == "agg_max_eq":
+            return int(vals.max()) == desc[3]
+        elif kind == "agg_max_gt":
+            return int(vals.max()) > desc[3]
+        elif kind == "agg_count_nz_eq":
+            return int((vals != 0).sum()) == desc[3]
+        elif kind == "agg_count_nz_gt":
+            return int((vals != 0).sum()) > desc[3]
+        elif kind == "agg_count_eq":
+            return int((vals == desc[3]).sum()) == desc[4]
+        elif kind == "agg_count_eq_gt":
+            return int((vals == desc[3]).sum()) > desc[4]
+        return False
+
+    def to_dict(self):
+        return {"type": "agg", "descriptor": list(self.descriptor)}
+
+    @staticmethod
+    def from_descriptor(desc):
+        return AggAtom(descriptor=desc)
+
+    def __repr__(self):
+        desc = self.descriptor
+        kind = desc[0]
+        group = desc[1]
+        if kind == "agg_sum_eq":
+            return f"sum({group})=={desc[3]}"
+        elif kind == "agg_sum_gt":
+            return f"sum({group})>{desc[3]}"
+        elif kind == "agg_max_eq":
+            return f"max({group})=={desc[3]}"
+        elif kind == "agg_max_gt":
+            return f"max({group})>{desc[3]}"
+        elif kind == "agg_count_nz_eq":
+            return f"count_nz({group})=={desc[3]}"
+        elif kind == "agg_count_nz_gt":
+            return f"count_nz({group})>{desc[3]}"
+        elif kind == "agg_count_eq":
+            return f"count({group},=={desc[3]})=={desc[4]}"
+        elif kind == "agg_count_eq_gt":
+            return f"count({group},=={desc[3]})>{desc[4]}"
+        return f"agg({desc})"
+
+
+@dataclass(frozen=True)
+class NegAggAtom(Atom):
+    """Negated aggregate atom: inverts the test (== becomes !=, > becomes <=)."""
+    descriptor: tuple
+
+    def evaluate(self, board, bindings):
+        # Evaluate the positive version and negate
+        pos = AggAtom(descriptor=self.descriptor)
+        return not pos.evaluate(board, bindings)
+
+    def to_dict(self):
+        return {"type": "neg_agg", "descriptor": list(self.descriptor)}
+
+    def __repr__(self):
+        pos = AggAtom(descriptor=self.descriptor)
+        return f"NOT {repr(pos)}"
+
+
+# For tree_miner._descriptor_to_atom compatibility
+_AggAtom = AggAtom.from_descriptor
+_NegAggAtom = lambda desc: NegAggAtom(descriptor=desc)
 
 
 # =============================================================================
