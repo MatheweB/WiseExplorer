@@ -12,7 +12,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 
 from wise_explorer.memory.predicates import (
-    Eq, Neq, Literal, BoardAt, MakeSq, FromBoardAt,
+    Eq, Neq, Gt, Le, Literal, BoardAt, MakeSq, FromBoardAt,
     _board_at, _from_board_at, _derive_mining_params, _AggAtom, _NegAggAtom,
     AtomClause, Conjunction, Predicate, TORCH_AVAILABLE,
 )
@@ -65,6 +65,13 @@ class TreeMiner:
             unique_vals = flat[:, cell_idx].unique().tolist()
             for v in unique_vals:
                 atoms.append(("eq", r, c, int(v)))
+
+        # CellGt: for each cell, for each observed value (threshold)
+        for cell_idx in range(n_cells):
+            r, c = divmod(cell_idx, cols)
+            unique_vals = flat[:, cell_idx].unique().tolist()
+            for v in unique_vals:
+                atoms.append(("gt", r, c, int(v)))
 
         # CellNonEmpty: for each cell
         for cell_idx in range(n_cells):
@@ -152,6 +159,34 @@ class TreeMiner:
                     atoms.append(("agg_count_eq", group_name, tuple(cell_indices), val, v))
                     atoms.append(("agg_count_eq_gt", group_name, tuple(cell_indices), val, v))
 
+            # Min: for each unique observed min value, == and >
+            mins = group_vals.min(dim=1).values
+            for v in mins.unique().tolist():
+                v = int(v)
+                atoms.append(("agg_min_eq", group_name, tuple(cell_indices), v))
+                atoms.append(("agg_min_gt", group_name, tuple(cell_indices), v))
+
+            # Count distinct non-zero values
+            cd_list = []
+            for row_idx in range(group_vals.shape[0]):
+                row_vals = group_vals[row_idx]
+                nz = row_vals[row_vals != 0]
+                cd_list.append(len(nz.unique()) if nz.numel() > 0 else 0)
+            cd_t = torch.tensor(cd_list, device=group_vals.device)
+            for v in cd_t.unique().tolist():
+                v = int(v)
+                atoms.append(("agg_count_distinct_eq", group_name, tuple(cell_indices), v))
+                atoms.append(("agg_count_distinct_gt", group_name, tuple(cell_indices), v))
+
+            # XOR: bitwise XOR of all values in group
+            xors = group_vals[:, 0].clone()
+            for ci in range(1, group_vals.shape[1]):
+                xors = xors ^ group_vals[:, ci]
+            for v in xors.unique().tolist():
+                v = int(v)
+                atoms.append(("agg_xor_eq", group_name, tuple(cell_indices), v))
+                atoms.append(("agg_xor_gt", group_name, tuple(cell_indices), v))
+
         return atoms
 
     def _build_match_matrix(self, atoms, board_tensor, rows, cols, from_tensor=None):
@@ -166,6 +201,10 @@ class TreeMiner:
                 _, r, c, v = atom
                 cell_idx = r * cols + c
                 match_rows.append(flat[:, cell_idx] == v)
+            elif atom[0] == "gt":
+                _, r, c, v = atom
+                cell_idx = r * cols + c
+                match_rows.append(flat[:, cell_idx] > v)
             elif atom[0] == "neq":
                 _, r, c, v = atom
                 cell_idx = r * cols + c
@@ -216,6 +255,36 @@ class TreeMiner:
             elif atom[0] == "agg_count_eq_gt":
                 _, _name, indices, val, v = atom
                 match_rows.append((flat[:, list(indices)] == val).sum(dim=1) > v)
+            elif atom[0] == "agg_min_eq":
+                _, _name, indices, v = atom
+                match_rows.append(flat[:, list(indices)].min(dim=1).values == v)
+            elif atom[0] == "agg_min_gt":
+                _, _name, indices, v = atom
+                match_rows.append(flat[:, list(indices)].min(dim=1).values > v)
+            elif atom[0] == "agg_count_distinct_eq":
+                _, _name, indices, v = atom
+                cols_g = flat[:, list(indices)]
+                cd = torch.tensor([len(cols_g[i][cols_g[i] != 0].unique()) if (cols_g[i] != 0).any() else 0 for i in range(cols_g.shape[0])], device=flat.device)
+                match_rows.append(cd == v)
+            elif atom[0] == "agg_count_distinct_gt":
+                _, _name, indices, v = atom
+                cols_g = flat[:, list(indices)]
+                cd = torch.tensor([len(cols_g[i][cols_g[i] != 0].unique()) if (cols_g[i] != 0).any() else 0 for i in range(cols_g.shape[0])], device=flat.device)
+                match_rows.append(cd > v)
+            elif atom[0] == "agg_xor_eq":
+                _, _name, indices, v = atom
+                idx_list = list(indices)
+                xor_vals = flat[:, idx_list[0]].clone()
+                for ci in idx_list[1:]:
+                    xor_vals = xor_vals ^ flat[:, ci]
+                match_rows.append(xor_vals == v)
+            elif atom[0] == "agg_xor_gt":
+                _, _name, indices, v = atom
+                idx_list = list(indices)
+                xor_vals = flat[:, idx_list[0]].clone()
+                for ci in idx_list[1:]:
+                    xor_vals = xor_vals ^ flat[:, ci]
+                match_rows.append(xor_vals > v)
 
         return torch.stack(match_rows)  # (num_atoms, N)
 
@@ -225,6 +294,9 @@ class TreeMiner:
         if desc[0] == "eq":
             _, r, c, v = desc
             return Eq(_board_at(r, c), Literal(v))
+        elif desc[0] == "gt":
+            _, r, c, v = desc
+            return Gt(_board_at(r, c), Literal(v))
         elif desc[0] == "neq":
             _, r, c, v = desc
             return Neq(_board_at(r, c), Literal(v))
@@ -308,15 +380,16 @@ class TreeMiner:
         )
 
         # Generate cell + cross-board atoms
-        atoms = self._generate_atoms(to_tensor, rows, cols, from_tensor)
+        all_atoms = self._generate_atoms(to_tensor, rows, cols, from_tensor)
 
-        if not atoms:
+        if not all_atoms:
             return []
 
-        # Build match matrix (cell atoms only, one column per transition)
+        # Build match matrix
         match_matrix = self._build_match_matrix(
-            atoms, to_tensor, rows, cols, from_tensor,
+            all_atoms, to_tensor, rows, cols, from_tensor,
         )
+        atoms = all_atoms
 
         # Derive parameters from transition count
         derived = _derive_mining_params(n_samples, 0.0, len(atoms))
@@ -613,10 +686,13 @@ class TreeMiner:
         if idx >= 0:
             return TreeMiner._descriptor_to_atom(desc)
 
-        # Negated atom: flip Eq↔Neq
+        # Negated atom: flip Eq↔Neq, Gt→Le
         if desc[0] == "eq":
             _, r, c, v = desc
             return Neq(_board_at(r, c), Literal(v))
+        elif desc[0] == "gt":
+            _, r, c, v = desc
+            return Le(_board_at(r, c), Literal(v))
         elif desc[0] == "neq":
             _, r, c, v = desc
             return Eq(_board_at(r, c), Literal(v))

@@ -1,0 +1,36 @@
+PREDICATE ATOM VOCABULARY — Minimal Complete Set
+=================================================
+
+All atoms evaluate to True/False for a given (from_board, to_board) transition.
+The tree's left/right branching provides NOT for free, so we only need == and > operators.
+Groups: {all} + {row0..rowN} + {col0..colN} (derived from board shape).
+
+CELL-LEVEL ATOMS (per cell):
+  1. Cell == value          "H3 == 4", "MID == O"       — exact cell state
+  2. Cell != 0              "MID is occupied"            — occupancy
+  3. Cell == Cell           "H0 == H1", "TL == BR"       — pairwise equality
+  4. Cell > value           "H3 > 2"                     — threshold comparison  [NEW]
+
+CROSS-BOARD ATOMS (per cell, comparing from_board → to_board):
+  5. FromCell == value      "was:H3 == 4"                — pre-move state
+  6. FromCell != 0          "was:MID occupied"            — pre-move occupancy
+  7. Cell == FromCell       "H3 unchanged"               — stability detection
+  8. Cell != FromCell       "H3 changed"                 — move detection
+
+GROUP AGGREGATE ATOMS (per group × per observed value × operators == and >):
+  9.  sum(group)            "sum(all) == 6"              — total material
+  10. min(group)            "min(all) == 1"              — lower extreme          [NEW]
+  11. max(group)            "max(all) == 3"              — upper extreme
+  12. count_nz(group)       "count_nz(all) == 4"         — occupancy count
+  13. count(group, ==val)   "count(row0, ==1) > 2"       — type-specific counting
+  14. count_distinct(group) "count_distinct(all) == 2"   — value variety           [NEW]
+  15. xor(group)            "xor(all) == 0"              — bitwise parity/balance  [NEW]
+
+TOTAL: 15 atom types (4 cell-level + 4 cross-board + 7 group aggregate)
+NEW:   4 atom types (#4, #10, #14, #15)
+
+NOTES:
+- Each atom type generates multiple concrete atoms depending on board shape and observed values.
+- Operators: == and > only. The tree's negation (right branch) provides !=, <, <=, >= for free.
+- Groups are mechanically derived from board dimensions, not game-specific.
+- No atom encodes game rules, win conditions, or player identity.

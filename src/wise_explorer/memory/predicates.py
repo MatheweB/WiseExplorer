@@ -407,6 +407,20 @@ class AggAtom(Atom):
             return int((vals == desc[3]).sum()) == desc[4]
         elif kind == "agg_count_eq_gt":
             return int((vals == desc[3]).sum()) > desc[4]
+        elif kind == "agg_min_eq":
+            return int(vals.min()) == desc[3]
+        elif kind == "agg_min_gt":
+            return int(vals.min()) > desc[3]
+        elif kind == "agg_count_distinct_eq":
+            nz = vals[vals != 0]
+            return (len(np.unique(nz)) if len(nz) > 0 else 0) == desc[3]
+        elif kind == "agg_count_distinct_gt":
+            nz = vals[vals != 0]
+            return (len(np.unique(nz)) if len(nz) > 0 else 0) > desc[3]
+        elif kind == "agg_xor_eq":
+            return int(np.bitwise_xor.reduce(vals)) == desc[3]
+        elif kind == "agg_xor_gt":
+            return int(np.bitwise_xor.reduce(vals)) > desc[3]
         return False
 
     def to_dict(self):
@@ -436,6 +450,18 @@ class AggAtom(Atom):
             return f"count({group},=={desc[3]})=={desc[4]}"
         elif kind == "agg_count_eq_gt":
             return f"count({group},=={desc[3]})>{desc[4]}"
+        elif kind == "agg_min_eq":
+            return f"min({group})=={desc[3]}"
+        elif kind == "agg_min_gt":
+            return f"min({group})>{desc[3]}"
+        elif kind == "agg_count_distinct_eq":
+            return f"count_distinct({group})=={desc[3]}"
+        elif kind == "agg_count_distinct_gt":
+            return f"count_distinct({group})>{desc[3]}"
+        elif kind == "agg_xor_eq":
+            return f"xor({group})=={desc[3]}"
+        elif kind == "agg_xor_gt":
+            return f"xor({group})>{desc[3]}"
         return f"agg({desc})"
 
 

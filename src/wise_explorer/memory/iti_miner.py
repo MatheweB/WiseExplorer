@@ -324,6 +324,8 @@ class ITIMiner:
                 r, c = atom[1], atom[2] if len(atom) > 2 else (0, 0)
                 if kind == "eq":
                     result[j, i] = int(to_b[r, c]) == atom[3]
+                elif kind == "gt":
+                    result[j, i] = int(to_b[r, c]) > atom[3]
                 elif kind == "neq":
                     result[j, i] = int(to_b[r, c]) != atom[3]
                 elif kind == "cells_eq":
@@ -361,6 +363,26 @@ class ITIMiner:
                         result[j, i] = sum(1 for v in vals if v == atom[3]) == atom[4]
                     elif kind == "agg_count_eq_gt":
                         result[j, i] = sum(1 for v in vals if v == atom[3]) > atom[4]
+                    elif kind == "agg_min_eq":
+                        result[j, i] = min(vals) == atom[3]
+                    elif kind == "agg_min_gt":
+                        result[j, i] = min(vals) > atom[3]
+                    elif kind == "agg_count_distinct_eq":
+                        nz = [v for v in vals if v != 0]
+                        result[j, i] = len(set(nz)) == atom[3]
+                    elif kind == "agg_count_distinct_gt":
+                        nz = [v for v in vals if v != 0]
+                        result[j, i] = len(set(nz)) > atom[3]
+                    elif kind == "agg_xor_eq":
+                        xval = 0
+                        for v in vals:
+                            xval ^= v
+                        result[j, i] = xval == atom[3]
+                    elif kind == "agg_xor_gt":
+                        xval = 0
+                        for v in vals:
+                            xval ^= v
+                        result[j, i] = xval > atom[3]
         return result
 
     def _cold_start(self, boards, scores, trans_keys, rows, cols):
@@ -376,11 +398,14 @@ class ITIMiner:
         ]).to(device)
 
         helper = TreeMiner(device=self._device_name)
-        self._atoms = helper._generate_atoms(to_tensor, rows, cols, from_tensor)
+        all_atoms = helper._generate_atoms(to_tensor, rows, cols, from_tensor)
         mm_torch = helper._build_match_matrix(
-            self._atoms, to_tensor, rows, cols, from_tensor,
+            all_atoms, to_tensor, rows, cols, from_tensor,
         )
+
+        self._atoms = all_atoms
         self._match_matrix = mm_torch.cpu().numpy()
+
         self._scores = np.array([scores[k][1] for k in trans_keys])
         self._counts = np.array([scores[k][0] for k in trans_keys])  # (N, 3) wins/ties/losses
         self._n_atoms = len(self._atoms)

@@ -61,7 +61,7 @@ def run_training(
             prune_players=set(),
         )
 
-    # Mine predicates once at end of training
+    # Mine predicates at end of training
     runner.memory.mine_predicates()
 
     return total
@@ -119,7 +119,7 @@ def run_training_interleaved(
         remaining -= batch
         phase = (phase + 1) % (num_players + 1)
 
-    # Mine predicates once at end of training
+    # Mine predicates at end of training
     runner.memory.mine_predicates()
 
     return total

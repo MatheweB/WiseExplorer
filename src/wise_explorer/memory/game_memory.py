@@ -682,6 +682,10 @@ class GameMemory(ABC):
         """Hook for Bellman propagation. No-op for Markov memory."""
         pass
 
+    def solve_graph(self, epsilon: float = 1e-6, max_iters: int = 200) -> int:
+        """Full value iteration on the game graph. No-op for Markov memory."""
+        return 0
+
     def _commit(self, transitions: Dict[Tuple[str, str], List[float]]) -> int:
         """
         Write transitions to database with incremental anchor updates.

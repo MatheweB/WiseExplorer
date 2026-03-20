@@ -281,15 +281,50 @@ class TransitionMemory(GameMemory):
 
         return self._compute_alpha(to_hash, best_child_to)
 
+    def _bellman_update(self, from_hash: str, to_hash: str, cur) -> float:
+        """Compute and store the Bellman value for a single transition.
+
+        Returns the computed propagated_score.
+        """
+        children = self.conn.execute(
+            "SELECT to_hash, propagated_score, wins, ties, losses "
+            "FROM transitions WHERE from_hash=?",
+            (to_hash,)
+        ).fetchall()
+
+        if not children:
+            row = self.conn.execute(
+                "SELECT wins, ties, losses FROM transitions "
+                "WHERE from_hash=? AND to_hash=?",
+                (from_hash, to_hash)
+            ).fetchone()
+            prop = Stats(*row).mean_score if row else Stats().mean_score
+        else:
+            best_score = -1.0
+            best_child_to = None
+            for child_to, prop_score, w, t, l in children:
+                v = prop_score if prop_score is not None else Stats(w, t, l).mean_score
+                if v > best_score:
+                    best_score = v
+                    best_child_to = child_to
+
+            v_next = best_score
+            alpha = self._compute_alpha(to_hash, best_child_to)
+            prop = alpha * v_next + (1.0 - alpha) * (1.0 - v_next)
+
+        cur.execute(
+            "UPDATE transitions SET propagated_score=? "
+            "WHERE from_hash=? AND to_hash=?",
+            (prop, from_hash, to_hash),
+        )
+        return prop
+
     def propagate_bellman(self, trajectory_keys: List[Tuple[str, str]]) -> None:
         """
         Backward Bellman sweep along a played trajectory.
 
-        For each transition (from_hash, to_hash) processed deepest-first:
-          - If to_hash has no children in DB: P = mean_score(from, to)
-          - Else: P = α · V_next + (1 − α) · (1 − V_next)
-            where V_next = max(V̂(to_hash, child)) and α is the learned
-            alignment factor from cross-scores at the best child.
+        Walk the trajectory deepest-first, updating each transition
+        based on its to_hash's children (all known moves from that board).
 
         When α = 0 (no cross-score data or adversarial game), this
         recovers the standard 1 − max minimax formula.
@@ -298,37 +333,145 @@ class TransitionMemory(GameMemory):
             return
 
         cur = self.conn.cursor()
+
         for from_hash, to_hash in reversed(trajectory_keys):
-            children = self.conn.execute(
-                "SELECT to_hash, propagated_score, wins, ties, losses "
-                "FROM transitions WHERE from_hash=?",
-                (to_hash,)
-            ).fetchall()
-
-            if not children:
-                # Terminal: use empirical mean score
-                row = self.conn.execute(
-                    "SELECT wins, ties, losses FROM transitions WHERE from_hash=? AND to_hash=?",
-                    (from_hash, to_hash)
-                ).fetchone()
-                prop = Stats(*row).mean_score if row else Stats().mean_score
-            else:
-                # Find best child and its V̂
-                best_score = -1.0
-                best_child_to = None
-                for child_to, prop_score, w, t, l in children:
-                    v = prop_score if prop_score is not None else Stats(w, t, l).mean_score
-                    if v > best_score:
-                        best_score = v
-                        best_child_to = child_to
-
-                v_next = best_score
-                alpha = self._compute_alpha(to_hash, best_child_to)
-                prop = alpha * v_next + (1.0 - alpha) * (1.0 - v_next)
-
-            cur.execute(
-                "UPDATE transitions SET propagated_score=? WHERE from_hash=? AND to_hash=?",
-                (prop, from_hash, to_hash)
-            )
+            self._bellman_update(from_hash, to_hash, cur)
 
         self.conn.commit()
+
+    def solve_graph(self, epsilon: float = 1e-6, max_iters: int = 200) -> int:
+        """Full value iteration on the stored game graph.
+
+        Unlike propagate_bellman (which walks one trajectory at a time),
+        this propagates values across ALL edges simultaneously until
+        convergence. Produces globally-consistent minimax values.
+
+        Uses topological ordering when possible (acyclic games like Nim/TTT)
+        for single-pass convergence. Falls back to iterative for cyclic graphs.
+
+        Returns the number of iterations to convergence.
+        """
+        rows = self.conn.execute(
+            "SELECT from_hash, to_hash, wins, ties, losses "
+            "FROM transitions WHERE wins+ties+losses > 0"
+        ).fetchall()
+        if not rows:
+            return 0
+
+        # Build adjacency and stats caches
+        children: Dict[str, List[Tuple[str, Stats]]] = defaultdict(list)
+        all_boards: set = set()
+        stats_cache: Dict[Tuple[str, str], Stats] = {}
+
+        for fh, th, w, t, l in rows:
+            s = Stats(w, t, l)
+            children[fh].append((th, s))
+            stats_cache[(fh, th)] = s
+            all_boards.add(fh)
+            all_boards.add(th)
+
+        # Load cross-scores for alpha computation
+        cross_cache: Dict[Tuple[str, str], float] = {}
+        try:
+            cross_agg: Dict[Tuple[str, str], List[float]] = defaultdict(
+                lambda: [0.0, 0.0]
+            )
+            for fh, th, ss, sc in self.conn.execute(
+                "SELECT from_hash, to_hash, score_sum, score_count "
+                "FROM cross_scores WHERE score_count > 0"
+            ).fetchall():
+                agg = cross_agg[(fh, th)]
+                agg[0] += ss
+                agg[1] += sc
+            for key, (ss, sc) in cross_agg.items():
+                cross_cache[key] = ss / sc
+        except Exception:
+            pass
+
+        def compute_alpha(parent: str, child: str) -> float:
+            mu_cross = cross_cache.get((parent, child))
+            if mu_cross is None:
+                return 0.0
+            st = stats_cache.get((parent, child))
+            if st is None:
+                return 0.0
+            return max(0.0, mu_cross + st.mean_score - 1.0)
+
+        # Terminal boards: appear as to_hash but have no outgoing edges
+        terminal = all_boards - set(children.keys())
+
+        # Initialize V[board]
+        V: Dict[str, float] = {}
+        for b in all_boards:
+            if b in terminal:
+                incoming = [s for fh in children for th, s in children[fh] if th == b]
+                V[b] = sum(s.mean_score for s in incoming) / len(incoming) if incoming else 0.5
+            else:
+                V[b] = 0.5
+
+        # Topological sort (Kahn's algorithm)
+        in_degree: Dict[str, int] = defaultdict(int)
+        for parent, kids in children.items():
+            for child, _ in kids:
+                in_degree[child] += 1
+
+        queue = [b for b in children if in_degree.get(b, 0) == 0]
+        topo_order: List[str] = []
+        while queue:
+            b = queue.pop()
+            topo_order.append(b)
+            for child, _ in children.get(b, []):
+                in_degree[child] -= 1
+                if in_degree[child] == 0 and child in children:
+                    queue.append(child)
+
+        is_acyclic = len(topo_order) == len(children)
+
+        def best_child_value(board: str):
+            best_v, best_c = -1.0, None
+            for child, _ in children.get(board, []):
+                cv = V.get(child, 0.5)
+                if cv > best_v:
+                    best_v, best_c = cv, child
+            return best_v, best_c
+
+        if is_acyclic:
+            for b in reversed(topo_order):
+                if not children.get(b):
+                    continue
+                best_v, best_c = best_child_value(b)
+                alpha = compute_alpha(b, best_c) if best_c else 0.0
+                V[b] = alpha * best_v + (1.0 - alpha) * (1.0 - best_v)
+            n_iters = 1
+        else:
+            non_terminal = [b for b in children if b not in terminal]
+            n_iters = max_iters
+            for iteration in range(1, max_iters + 1):
+                max_delta = 0.0
+                for b in non_terminal:
+                    best_v, best_c = best_child_value(b)
+                    alpha = compute_alpha(b, best_c) if best_c else 0.0
+                    new_v = alpha * best_v + (1.0 - alpha) * (1.0 - best_v)
+                    max_delta = max(max_delta, abs(new_v - V[b]))
+                    V[b] = new_v
+                if max_delta < epsilon:
+                    n_iters = iteration
+                    break
+
+        # Write back propagated_score for every transition
+        cur = self.conn.cursor()
+        for fh, th, w, t, l in rows:
+            kids = children.get(th, [])
+            if not kids:
+                prop = Stats(w, t, l).mean_score
+            else:
+                best_v, best_c = best_child_value(th)
+                alpha = compute_alpha(th, best_c) if best_c else 0.0
+                prop = alpha * best_v + (1.0 - alpha) * (1.0 - best_v)
+            cur.execute(
+                "UPDATE transitions SET propagated_score=? "
+                "WHERE from_hash=? AND to_hash=?",
+                (prop, fh, th),
+            )
+        self.conn.commit()
+        return n_iters
