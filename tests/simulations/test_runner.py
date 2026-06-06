@@ -101,8 +101,9 @@ class TestTransitionContextManager:
     """Context manager tests with TransitionMemory."""
 
     def test_creates_pool(self, transition_memory):
-        """Context manager creates pool on entry."""
-        runner = SimulationRunner(transition_memory, num_workers=1)
+        """Context manager creates a worker pool on entry (multi-worker)."""
+        # A single worker runs in-process (no pool) by design; use 2 to test the pool.
+        runner = SimulationRunner(transition_memory, num_workers=2)
 
         with runner:
             assert runner._pool is not None
@@ -179,8 +180,8 @@ class TestTransitionShutdown:
         runner.shutdown(force=True)  # Should not raise
 
     def test_context_manager_cleans_up(self, transition_memory):
-        """Context manager shuts down pool on exit."""
-        runner = SimulationRunner(transition_memory, num_workers=1)
+        """Context manager shuts down the worker pool on exit (multi-worker)."""
+        runner = SimulationRunner(transition_memory, num_workers=2)
 
         with runner:
             assert runner._pool is not None
@@ -230,8 +231,8 @@ class TestMarkovContextManager:
     """Context manager tests with MarkovMemory."""
 
     def test_creates_pool(self, markov_memory):
-        """Context manager creates pool on entry."""
-        runner = SimulationRunner(markov_memory, num_workers=1)
+        """Context manager creates a worker pool on entry (multi-worker)."""
+        runner = SimulationRunner(markov_memory, num_workers=2)
 
         with runner:
             assert runner._pool is not None
@@ -288,8 +289,8 @@ class TestMarkovShutdown:
         runner.shutdown()
 
     def test_context_manager_cleans_up(self, markov_memory):
-        """Context manager shuts down pool on exit."""
-        runner = SimulationRunner(markov_memory, num_workers=1)
+        """Context manager shuts down the worker pool on exit (multi-worker)."""
+        runner = SimulationRunner(markov_memory, num_workers=2)
 
         with runner:
             assert runner._pool is not None

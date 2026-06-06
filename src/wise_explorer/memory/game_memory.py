@@ -474,7 +474,22 @@ class GameMemory(ABC):
                 ).reshape(nrows, ncols).copy()
 
     def _build_trans_scores(self) -> Tuple[Dict[str, np.ndarray], Dict[Tuple[str, str], Tuple[Counts, float]]]:
-        """Load transitions and build per-transition scores with per-from-board signal selection.
+        """Build the per-transition target the predicate miner fits.
+
+        Two candidate value estimates per transition:
+
+          solo — the raw outcome ratio (exact when unanimous, else Bayesian mean).
+                 Always available, but carries exploration noise (the prune phase
+                 deliberately logs losses on winning positions).
+          bell — the minimax-propagated value: solo with that exploration noise
+                 filtered out by the backup. The cleaner signal *when it has
+                 converged*, but on large games it stays near its 0.5 prior.
+
+        We mine on the de-noised signal (bell) only when it actually carries
+        structure — when its support-weighted variance clears the measurement-
+        noise floor of the data. Otherwise bell is flat/unconverged and we fall
+        back to the raw outcome. The choice is GLOBAL (one signal for the whole
+        tree) so the splitter always compares like with like. Parameter-free.
 
         Returns (boards, trans_scores) or (empty, empty) if insufficient data.
         """
@@ -484,103 +499,55 @@ class GameMemory(ABC):
 
         try:
             rows = self.conn.execute(
-                "SELECT from_hash, to_hash, wins, ties, losses, "
-                "propagated_score, anchor_id "
+                "SELECT from_hash, to_hash, wins, ties, losses, propagated_score "
                 "FROM transitions"
             ).fetchall()
         except Exception:
             return {}, {}
-
         if not rows:
             return {}, {}
 
         import numpy as _np
 
-        # Load anchor stats for anchor_mean signal
-        anchor_stats: Dict[int, float] = {}
-        try:
-            anchor_rows = self.conn.execute(
-                "SELECT anchor_id, wins, ties, losses FROM anchors"
-            ).fetchall()
-            for aid, aw, at, al in anchor_rows:
-                s = Stats(aw, at, al)
-                anchor_stats[aid] = (s.utility if is_decisive(s) else s.mean_score) if s.total > 0 else 0.5
-        except Exception:
-            pass
-
-        # Group transitions by from_hash with all four signals
-        # (bell, anchor, solo, pred). Pred comes from the predicate library —
-        # if predicates have learned structural patterns that discriminate
-        # better than raw scores, they win the variance ranking and guide
-        # mining toward better splits. Bell eventually overrides as it
-        # converges, so any wrong predicates self-correct.
-        from_groups: Dict[str, list] = {}
-        for from_hash, to_hash, w, t, l, bell, anchor_id in rows:
-            if to_hash not in boards or from_hash not in boards:
+        keys: List[Tuple[str, str]] = []
+        counts_l: List[Counts] = []
+        solo_l: List[float] = []
+        bell_l: List[float] = []
+        support_l: List[float] = []
+        se2_l: List[float] = []
+        for from_hash, to_hash, w, t, l, bell in rows:
+            if from_hash not in boards or to_hash not in boards:
                 continue
             s = Stats(w, t, l)
             if s.total <= 0:
                 continue
-            anchor_mean = anchor_stats.get(anchor_id, s.mean_score) if anchor_id is not None else s.mean_score
-            solo_decisive = is_decisive(s, anchor_mean)
-            solo_mean = s.utility if solo_decisive else s.mean_score
+            solo = s.utility if is_decisive(s) else s.mean_score
+            keys.append((from_hash, to_hash))
+            counts_l.append((w, t, l))
+            solo_l.append(solo)
+            bell_l.append(bell if bell is not None else solo)
+            support_l.append(float(s.total))
+            se2_l.append(s.std_error ** 2)
 
-            # Predicate score: structural prior from the predicate library
-            pred_score = None
-            pred_decisive = False
-            if self.predicate_library.count > 0:
-                to_2d = boards[to_hash] if boards[to_hash].ndim == 2 else boards[to_hash].reshape(1, -1)
-                from_2d = boards[from_hash] if boards[from_hash].ndim == 2 else boards[from_hash].reshape(1, -1)
-                pred_stats = self.predicate_library.match(to_2d, from_2d)
-                if pred_stats is not None:
-                    pred_decisive = is_decisive(pred_stats, anchor_mean)
-                    pred_score = pred_stats.utility if pred_decisive else pred_stats.mean_score
+        if not keys:
+            return boards, {}
 
-            if from_hash not in from_groups:
-                from_groups[from_hash] = []
-            from_groups[from_hash].append((
-                to_hash, (w, t, l), bell, anchor_mean, solo_mean,
-                pred_score, solo_decisive, pred_decisive,
-            ))
+        support = _np.asarray(support_l)
+        se2 = _np.asarray(se2_l)
+        bell_arr = _np.asarray(bell_l)
+        total_w = support.sum()
 
-        # Per-from-board: rank all 4 signals by variance (matches selection)
-        trans_scores: Dict[Tuple[str, str], Tuple[Counts, float]] = {}
-        for from_hash, transitions in from_groups.items():
-            bell_vals = [t[2] for t in transitions if t[2] is not None]
-            anchor_vals = [t[3] for t in transitions]
-            solo_vals = [t[4] for t in transitions]
-            pred_vals = [t[5] for t in transitions if t[5] is not None]
+        # Support-weighted measurement-noise floor and bell variance.
+        floor = float((support * se2).sum() / total_w) if total_w > 0 else 0.0
+        bell_mean = float((support * bell_arr).sum() / total_w) if total_w > 0 else 0.5
+        bell_var = float((support * (bell_arr - bell_mean) ** 2).sum() / total_w) if total_w > 0 else 0.0
 
-            variances = {
-                "bell": float(_np.var(bell_vals)) if len(bell_vals) >= 2 else 0.0,
-                "anchor": float(_np.var(anchor_vals)) if len(anchor_vals) >= 2 else 0.0,
-                "solo": float(_np.var(solo_vals)) if len(solo_vals) >= 2 else 0.0,
-                "pred": float(_np.var(pred_vals)) if len(pred_vals) >= 2 else 0.0,
-            }
-            # Signals need sufficient coverage
-            if len(bell_vals) <= len(transitions) * 0.5:
-                variances["bell"] = 0.0
-            if len(pred_vals) <= len(transitions) * 0.5:
-                variances["pred"] = 0.0
+        use_bell = bell_var > floor
+        chosen = bell_l if use_bell else solo_l
 
-            best_signal = max(variances, key=variances.get)
-
-            for to_hash, counts, bell, anchor_mean, solo_mean, \
-                    pred_score, solo_decisive, pred_decisive in transitions:
-                # Decisive PREDICATE evidence trumps variance ranking.
-                if pred_decisive:
-                    score = pred_score
-                elif best_signal == "bell" and bell is not None:
-                    score = bell
-                elif best_signal == "anchor":
-                    score = anchor_mean
-                elif best_signal == "pred" and pred_score is not None:
-                    score = pred_score
-                else:
-                    score = solo_mean
-
-                trans_scores[(from_hash, to_hash)] = (counts, score)
-
+        trans_scores: Dict[Tuple[str, str], Tuple[Counts, float]] = {
+            key: (counts_l[i], chosen[i]) for i, key in enumerate(keys)
+        }
         return boards, trans_scores
 
     def mine_predicates(self, incremental: bool = False) -> int:
@@ -600,6 +567,11 @@ class GameMemory(ABC):
         if self.read_only:
             raise RuntimeError("Cannot mine predicates in read-only mode")
 
+        # Predicate mining is transition-based (it reads the `transitions` table
+        # and uses from→to cross-board atoms). Markov memory has no such table.
+        if self.is_markov:
+            return 0
+
         if incremental:
             # Per-wave: only query the transitions touched this wave.
             # Update the caches incrementally, then pass to ITI
@@ -615,14 +587,16 @@ class GameMemory(ABC):
                 prune=False, wave_keys=self._last_wave_keys,
             )
         else:
-            # End-of-training: full rebuild for compact output.
+            # End-of-training: converge the Bellman values (full value iteration)
+            # so the bell/solo signal choice in _build_trans_scores sees the
+            # de-noised target, then rebuild the saved library with the batch
+            # CART miner — deterministic and globally optimal at each split, where
+            # the per-wave ITI trades that for incremental speed.
+            self.solve_graph()
             boards, trans_scores = self._build_trans_scores()
             if not trans_scores:
                 return 0
-            if self._iti_miner._root is not None:
-                predicates = self._iti_miner.mine(boards, trans_scores, prune=True)
-            else:
-                predicates = self._batch_miner.mine(boards, trans_scores)
+            predicates = self._batch_miner.mine(boards, trans_scores)
         self.predicate_library.save(predicates)
         return len(predicates)
 

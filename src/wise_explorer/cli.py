@@ -1,8 +1,13 @@
 """
-Command-line interface for game AI training and play.
+Command-line interface for game AI training, play, and inspection.
+
+    wise-explorer                       # train + play (default)
+    wise-explorer inspect -g nim        # show the rules it has learned (no training)
 """
 
 import argparse
+import sys
+from pathlib import Path
 
 from wise_explorer.api import start_simulations
 import wise_explorer.memory as Memory
@@ -99,9 +104,85 @@ def parse_human_players(players_str: str | None, num_players: int, game_id: str,
     
     return sorted(set(human_players))
 
+def run_inspect(argv: list[str]) -> None:
+    """`wise-explorer inspect` — render the rules a game has already learned.
+
+    Reads the saved predicate library straight from the same DB the training
+    loop writes to (no retraining). Use --fresh N for a self-contained demo on
+    a throwaway database.
+    """
+    from wise_explorer.inspection import render_predicates
+
+    p = argparse.ArgumentParser(
+        prog="wise-explorer inspect",
+        description="Show the human-readable rules a game has learned.",
+    )
+    p.add_argument("--game", "-g", choices=list(GAMES.keys()), default="tic_tac_toe",
+                   help="Game whose learned rules to inspect (default: tic_tac_toe)")
+    p.add_argument("--top", type=int, default=None,
+                   help="Show only the N most decisive rules (half wins, half losses)")
+    p.add_argument("--wins-only", action="store_true", help="Show only winning rules")
+    p.add_argument("--losses-only", action="store_true", help="Show only losing rules")
+    p.add_argument("--saved", action="store_true",
+                   help="Render the agent's saved compact library instead of re-mining the stored transitions")
+    p.add_argument("--fresh", type=int, default=None, metavar="N",
+                   help="Train N self-play games into a throwaway DB first (quick demo)")
+    p.add_argument("--markov", action="store_true", help="Inspect the Markov-mode DB")
+    a = p.parse_args(argv)
+
+    game = create_game(a.game)
+    render_kw = dict(
+        game_id=a.game, top_n=a.top, wins_only=a.wins_only,
+        losses_only=a.losses_only, remine=not a.saved,
+    )
+
+    if a.fresh:
+        mem = _train_throwaway(game, a.fresh, a.markov)
+        render_predicates(mem, db_label="fresh demo", **render_kw)
+        mem.close()
+        return
+
+    db_path = Path(MEMORY_DIR) / f"{game.game_id()}{'_markov' if a.markov else ''}.db"
+    if not db_path.exists():
+        print(f"No trained model for '{a.game}' at {db_path}.")
+        print(f"  Train one:     wise-explorer -g {a.game} -e 2000")
+        print(f"  Or quick demo: wise-explorer inspect -g {a.game} --fresh 4000")
+        return
+
+    mem = Memory.for_game(game, base_dir=MEMORY_DIR, markov=a.markov, read_only=True)
+    render_predicates(mem, db_label=db_path.name, **render_kw)
+    mem.close()
+
+
+def _train_throwaway(game, sims: int, markov: bool):
+    """Train `sims` self-play games into a temp DB; return the open memory."""
+    import tempfile
+    from wise_explorer.simulation.runner import SimulationRunner
+    from wise_explorer.simulation.training import run_training
+
+    base = Path(tempfile.gettempdir()) / "we_inspect"
+    for suffix in ("", "-wal", "-shm"):
+        f = base / f"{game.game_id()}{'_markov' if markov else ''}.db{suffix}"
+        if f.exists():
+            f.unlink()
+    mem = Memory.for_game(game, base_dir=str(base), markov=markov)
+    swarms = create_agent_swarms(list(range(1, game.num_players() + 1)), 4)
+    td = 25 if game.game_id() == "mini_chess" else 60
+    print(f"Training {game.game_id()} × {sims} self-play games…")
+    runner = SimulationRunner(mem, num_workers=1)
+    with runner:
+        run_training(runner, swarms, game, simulations=sims, turn_depth=td)
+    return mem
+
+
 def main() -> None:
+    # Hybrid CLI: a bare `wise-explorer` still trains + plays; `inspect` is a verb.
+    if len(sys.argv) > 1 and sys.argv[1] == "inspect":
+        run_inspect(sys.argv[2:])
+        return
+
     args = parse_args()
-    
+
     # Build configuration
     config_kwargs = {
         "game_name": args.game,

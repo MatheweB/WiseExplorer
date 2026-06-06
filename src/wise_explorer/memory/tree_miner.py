@@ -396,9 +396,22 @@ class TreeMiner:
         min_leaf = max(derived["min_support"], 3)
         max_depth = derived["max_atoms"]
 
-        # Build CART tree — splits on structural features only
+        # Two per-sample quantities keep mining robust and parameter-free:
+        #   support — games seen (evidence weight). Down-weights rarely-seen
+        #             transitions so single-observation noise can't dominate.
+        #   se2     — Bayesian std_error² of the value. Lets the tree stop once a
+        #             node's spread is within its own samples' noise.
+        support = counts_tensor.sum(dim=1).clamp(min=1.0)
+        w_, t_, l_ = counts_tensor[:, 0], counts_tensor[:, 1], counts_tensor[:, 2]
+        w1, t1, l1 = w_ + 1.0, t_ + 1.0, l_ + 1.0
+        n_pseudo = w1 + t1 + l1
+        mean_c = (w1 + 0.5 * t1) / n_pseudo
+        meansq_c = (w1 + 0.25 * t1) / n_pseudo
+        se2 = (meansq_c - mean_c ** 2) / (w_ + t_ + l_ + 3.0)
+
+        # Build support-weighted CART tree — splits on structural features only
         predicates = self._build_tree(
-            atoms, match_matrix, score_tensor, counts_tensor,
+            atoms, match_matrix, score_tensor, counts_tensor, support, se2,
             min_leaf, max_depth, n_samples, device,
         )
 
@@ -500,30 +513,54 @@ class TreeMiner:
         self,
         atoms: list,
         match_matrix,       # (A, N) bool
-        score_tensor,        # (N,) float
-        counts_tensor,       # (N, 3) float
+        score_tensor,        # (N,) float  — the value the tree fits
+        counts_tensor,       # (N, 3) float — raw W/T/L (for leaf aggregation)
+        weight_tensor,       # (N,) float  — support (games seen)
+        se2_tensor,          # (N,) float  — per-sample measurement variance
         min_leaf: int,
         max_depth: int,
         n_boards: int,
         device,
     ) -> List[Predicate]:
-        """Build CART regression tree and extract predicates from leaves."""
-        n_atoms = match_matrix.shape[0]
+        """Build a CART regression tree and extract predicates from its leaves.
 
+        Structure detection is UNWEIGHTED — every transition contributes equally
+        to variance and to split gain, so a single sharp move is never buried
+        under the well-trodden lines. The only place support enters is the STOP:
+        a node becomes a leaf once its (unweighted) value-variance falls within
+        the support-weighted measurement-noise floor of its samples — i.e. the
+        remaining spread is explained by sampling noise, with no real structure
+        left to split on. Both halves are parameter-free.
+        """
         predicates: List[Predicate] = []
 
-        # Recursive split via stack (avoid deep recursion)
+        def emit_leaf(mask, used_atoms, n_match, variance, mean):
+            if not used_atoms or n_match < min_leaf:
+                return
+            matched_counts = counts_tensor[mask].sum(dim=0)
+            clauses = [
+                AtomClause(a) for a in (
+                    TreeMiner._descriptor_to_atom_negated(atoms, idx)
+                    for idx in used_atoms
+                ) if a is not None
+            ]
+            if clauses:
+                predicates.append(Predicate(
+                    conjunction=Conjunction(clauses),
+                    counts=(matched_counts[0].item(), matched_counts[1].item(),
+                            matched_counts[2].item()),
+                    support=int(n_match),
+                    variance=variance,
+                    mining_score=mean,
+                ))
+
+        # Recursive split via stack (avoid deep recursion).
         # Each entry: (board_mask, used_atom_indices, depth)
-        stack = [(
-            torch.ones(n_boards, dtype=torch.bool, device=device),
-            [],
-            0,
-        )]
+        stack = [(torch.ones(n_boards, dtype=torch.bool, device=device), [], 0)]
 
         while stack:
             mask, used_atoms, depth = stack.pop()
             n_match = mask.sum().item()
-
             if n_match < min_leaf:
                 continue
 
@@ -531,135 +568,59 @@ class TreeMiner:
             current_var = matched_scores.var(correction=0).item() if n_match >= 2 else 0.0
             current_mean = matched_scores.mean().item()
 
-            is_leaf = depth >= max_depth or n_match < min_leaf * 2
-            if is_leaf:
-                if used_atoms and n_match >= min_leaf:
-                    # Extract predicate from this leaf
-                    matched_counts = counts_tensor[mask].sum(dim=0)
-                    clauses = [
-                        AtomClause(a) for a in (
-                            TreeMiner._descriptor_to_atom_negated(atoms, idx)
-                            for idx in used_atoms
-                        ) if a is not None
-                    ]
-                    if clauses:
-                        predicates.append(Predicate(
-                            conjunction=Conjunction(clauses),
-                            counts=(
-                                matched_counts[0].item(),
-                                matched_counts[1].item(),
-                                matched_counts[2].item(),
-                            ),
-                            support=int(n_match),
-                            variance=current_var,
-                            mining_score=current_mean,
-                        ))
+            # Support-weighted measurement-noise floor: the spread we'd expect
+            # from sampling noise alone, with rarely-seen transitions kept from
+            # inflating it. Stop once the variance is within that floor.
+            w_node = weight_tensor[mask]
+            node_floor = (w_node * se2_tensor[mask]).sum().item() / max(w_node.sum().item(), 1e-9)
+
+            if (depth >= max_depth or n_match < min_leaf * 2
+                    or current_var <= node_floor):
+                emit_leaf(mask, used_atoms, n_match, current_var, current_mean)
                 continue
 
-            # Find best split: atom with highest variance reduction
-            best_reduction = -1.0
-            best_atom = -1
+            # Vectorized (unweighted) variance reduction over all atoms.
+            left_masks = match_matrix & mask.unsqueeze(0)            # (A, N)
+            right_masks = (~match_matrix) & mask.unsqueeze(0)
+            left_n = left_masks.sum(dim=1).float()
+            right_n = right_masks.sum(dim=1).float()
 
-            # Vectorized: compute variance reduction for all atoms at once
-            left_masks = match_matrix[:, :] & mask.unsqueeze(0)   # (A, N)
-            right_masks = (~match_matrix[:, :]) & mask.unsqueeze(0)  # (A, N)
-            left_n = left_masks.sum(dim=1).float()    # (A,)
-            right_n = right_masks.sum(dim=1).float()   # (A,)
-
-            # Filter: both children must have >= min_leaf boards
+            # Both children need >= min_leaf distinct samples; don't reuse atoms.
             valid = (left_n >= min_leaf) & (right_n >= min_leaf)
-            # Don't reuse atoms (used_atoms may contain negative indices
-            # for right-branch splits; use abs to get the real atom index)
             for idx in used_atoms:
-                real_idx = abs(idx) - 1 if idx < 0 else idx
-                valid[real_idx] = False
-
+                valid[abs(idx) - 1 if idx < 0 else idx] = False
             if not valid.any():
-                # No valid split — emit leaf
-                if used_atoms and n_match >= min_leaf:
-                    matched_counts = counts_tensor[mask].sum(dim=0)
-                    clauses = [
-                        AtomClause(a) for a in (
-                            TreeMiner._descriptor_to_atom_negated(atoms, idx)
-                            for idx in used_atoms
-                        ) if a is not None
-                    ]
-                    if clauses:
-                        predicates.append(Predicate(
-                            conjunction=Conjunction(clauses),
-                            counts=(
-                                matched_counts[0].item(),
-                                matched_counts[1].item(),
-                                matched_counts[2].item(),
-                            ),
-                            support=int(n_match),
-                            variance=current_var,
-                            mining_score=current_mean,
-                        ))
+                emit_leaf(mask, used_atoms, n_match, current_var, current_mean)
                 continue
 
-            # Batch variance computation for left and right children
-            valid_idx = valid.nonzero(as_tuple=True)[0]
-
-            # Left child variances
-            left_scores = score_tensor.unsqueeze(0) * left_masks[valid_idx].float()
-            left_sums = left_scores.sum(dim=1)
-            left_means = left_sums / left_n[valid_idx].clamp(min=1)
-            left_sq = ((left_scores - left_means.unsqueeze(1)) * left_masks[valid_idx].float()) ** 2
-            left_vars = left_sq.sum(dim=1) / left_n[valid_idx].clamp(min=1)
-
-            # Right child variances
-            right_scores = score_tensor.unsqueeze(0) * right_masks[valid_idx].float()
-            right_sums = right_scores.sum(dim=1)
-            right_means = right_sums / right_n[valid_idx].clamp(min=1)
-            right_sq = ((right_scores - right_means.unsqueeze(1)) * right_masks[valid_idx].float()) ** 2
-            right_vars = right_sq.sum(dim=1) / right_n[valid_idx].clamp(min=1)
-
-            # Variance reduction = parent_var - weighted child vars
+            vi = valid.nonzero(as_tuple=True)[0]
+            lm = left_masks[vi].float()
+            rm = right_masks[vi].float()
+            l_scores = score_tensor.unsqueeze(0) * lm
+            l_means = l_scores.sum(dim=1) / left_n[vi].clamp(min=1)
+            l_vars = ((l_scores - l_means.unsqueeze(1)) * lm).pow(2).sum(dim=1) / left_n[vi].clamp(min=1)
+            r_scores = score_tensor.unsqueeze(0) * rm
+            r_means = r_scores.sum(dim=1) / right_n[vi].clamp(min=1)
+            r_vars = ((r_scores - r_means.unsqueeze(1)) * rm).pow(2).sum(dim=1) / right_n[vi].clamp(min=1)
             n_total = float(n_match)
             reductions = current_var - (
-                left_n[valid_idx] / n_total * left_vars
-                + right_n[valid_idx] / n_total * right_vars
+                left_n[vi] / n_total * l_vars + right_n[vi] / n_total * r_vars
             )
 
             best_local = reductions.argmax()
-            best_atom = valid_idx[best_local].item()
-            best_reduction = reductions[best_local].item()
-
-            if best_reduction <= 0:
-                # No improvement — emit leaf
-                if used_atoms and n_match >= min_leaf:
-                    matched_counts = counts_tensor[mask].sum(dim=0)
-                    clauses = [
-                        AtomClause(a) for a in (
-                            TreeMiner._descriptor_to_atom_negated(atoms, idx)
-                            for idx in used_atoms
-                        ) if a is not None
-                    ]
-                    if clauses:
-                        predicates.append(Predicate(
-                            conjunction=Conjunction(clauses),
-                            counts=(
-                                matched_counts[0].item(),
-                                matched_counts[1].item(),
-                                matched_counts[2].item(),
-                            ),
-                            support=int(n_match),
-                            variance=current_var,
-                            mining_score=current_mean,
-                        ))
+            best_atom = vi[best_local].item()
+            if reductions[best_local].item() <= 0:
+                emit_leaf(mask, used_atoms, n_match, current_var, current_mean)
                 continue
 
-            # Split: push both children
-            left_mask = mask & match_matrix[best_atom]
-            right_mask = mask & ~match_matrix[best_atom]
+            # Split: left child takes the atom, right child its negation
+            # (tracked via the negative-index convention).
+            stack.append((mask & match_matrix[best_atom],
+                          used_atoms + [best_atom], depth + 1))
+            stack.append((mask & ~match_matrix[best_atom],
+                          used_atoms + [-(best_atom + 1)], depth + 1))
 
-            stack.append((left_mask, used_atoms + [best_atom], depth + 1))
-            # Right child uses the NEGATION of the atom — we track this
-            # by using a negative index convention
-            stack.append((right_mask, used_atoms + [-(best_atom + 1)], depth + 1))
-
-        # Deduplicate
+        # Deduplicate by conjunction string.
         seen: set = set()
         unique: List[Predicate] = []
         for p in predicates:
@@ -667,7 +628,6 @@ class TreeMiner:
             if key not in seen:
                 seen.add(key)
                 unique.append(p)
-
         return unique
 
     @staticmethod

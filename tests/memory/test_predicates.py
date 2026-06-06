@@ -20,7 +20,7 @@ from wise_explorer.memory.predicates import (
     # Predicates
     Predicate,
     # Mining & Library
-    PredicateMiner, PredicateLibrary,
+    TreeMiner, PredicateLibrary, TORCH_AVAILABLE,
     # Helpers
     _sq, _board_at, _from_board_at, _score_variance,
 )
@@ -416,90 +416,73 @@ class TestScoreVariance:
         assert _score_variance(["a"], {"a": 0.5}) == 0.0
 
 
-class TestPredicateMiner:
-    def _make_ttt_boards(self):
-        """Create synthetic TTT boards with known patterns."""
+@pytest.mark.skipif(not TORCH_AVAILABLE, reason="TreeMiner requires PyTorch")
+class TestTreeMiner:
+    """The batch CART miner discovers structural predicates from transitions.
+
+    The miner is transition-keyed: scores map (from_hash, to_hash) -> (counts,
+    value), with both boards present in `boards`.
+    """
+
+    def _make_transitions(self):
+        """Transitions whose value is determined by the centre cell: a winning
+        region (centre == 1) and a losing region (centre == 2)."""
         boards = {}
         scores = {}
+        from_b = np.zeros((3, 3), dtype=np.int8)
+        boards["start"] = from_b
 
-        # Winning diagonal for X: board[0,0]==1, board[1,1]==1, board[2,2]==1
-        for i in range(10):
-            board = np.zeros((3, 3), dtype=np.int8)
-            board[0, 0] = 1
-            board[1, 1] = 1
-            board[2, 2] = 1
-            # Vary other cells to create different boards
-            board[0, 1] = 2 if i % 3 == 0 else 0
-            board[2, 0] = 2 if i % 2 == 0 else 0
-            board[1, 0] = 2 if i > 5 else 0
-            h = f"win_diag_{i}"
-            boards[h] = board
-            scores[h] = ((8.0, 1.0, 1.0), Stats(8, 1, 1).mean_score)
+        # Winning to-boards: centre is X. High support, unanimous win.
+        for i in range(8):
+            b = np.zeros((3, 3), dtype=np.int8)
+            b[1, 1] = 1
+            b[0, i % 3] = 2  # vary the rest
+            th = f"win_{i}"
+            boards[th] = b
+            scores[("start", th)] = ((10.0, 0.0, 0.0), 1.0)
 
-        # Losing positions for X (O has a row)
-        for i in range(10):
-            board = np.zeros((3, 3), dtype=np.int8)
-            board[0, 0] = 2
-            board[0, 1] = 2
-            board[0, 2] = 2
-            board[1, 0] = 1 if i % 2 == 0 else 0
-            board[2, 2] = 1 if i % 3 == 0 else 0
-            h = f"loss_row_{i}"
-            boards[h] = board
-            scores[h] = ((1.0, 1.0, 8.0), Stats(1, 1, 8).mean_score)
-
-        # Mixed/contested boards
-        for i in range(10):
-            board = np.zeros((3, 3), dtype=np.int8)
-            board[1, 1] = 1  # center
-            board[0, 0] = 2 if i % 2 == 0 else 0
-            h = f"mixed_{i}"
-            boards[h] = board
-            scores[h] = ((4.0, 3.0, 3.0), Stats(4, 3, 3).mean_score)
+        # Losing to-boards: centre is O. High support, unanimous loss.
+        for i in range(8):
+            b = np.zeros((3, 3), dtype=np.int8)
+            b[1, 1] = 2
+            b[2, i % 3] = 1
+            th = f"loss_{i}"
+            boards[th] = b
+            scores[("start", th)] = ((0.0, 0.0, 10.0), 0.0)
 
         return boards, scores
 
     def test_mine_discovers_predicates(self):
-        boards, scores = self._make_ttt_boards()
-        miner = PredicateMiner(min_support=5, max_variance=0.1, variance_penalty=0.05)
-        predicates = miner.mine(boards, scores)
+        boards, scores = self._make_transitions()
+        predicates = TreeMiner().mine(boards, scores)
         assert len(predicates) > 0
 
-    def test_mine_low_variance_predicates(self):
-        """Mined predicates should have lower variance than random."""
-        boards, scores = self._make_ttt_boards()
-        miner = PredicateMiner(min_support=5, max_variance=0.1, variance_penalty=0.05)
-        predicates = miner.mine(boards, scores)
-
-        # All predicates should have reasonable variance
-        for pred in predicates:
-            assert pred.support >= 5
+    def test_predicates_have_support(self):
+        boards, scores = self._make_transitions()
+        for pred in TreeMiner().mine(boards, scores):
+            assert pred.support >= 3  # min_leaf
 
     def test_mine_empty_returns_empty(self):
-        miner = PredicateMiner()
-        assert miner.mine({}, {}) == []
+        assert TreeMiner().mine({}, {}) == []
 
     def test_mine_insufficient_data(self):
-        boards = {"a": np.zeros((3, 3), dtype=np.int8)}
-        scores = {"a": ((1.0, 0.0, 0.0), 1.0)}
-        miner = PredicateMiner(min_support=5)
-        assert miner.mine(boards, scores) == []
+        # Fewer than 4 transitions — nothing to split on.
+        boards = {"a": np.zeros((3, 3), dtype=np.int8),
+                  "b": np.ones((3, 3), dtype=np.int8)}
+        scores = {("a", "b"): ((1.0, 0.0, 0.0), 1.0)}
+        assert TreeMiner().mine(boards, scores) == []
 
-    def test_winning_diagonal_discovered(self):
-        """The miner should find the X diagonal pattern."""
-        boards, scores = self._make_ttt_boards()
-        miner = PredicateMiner(min_support=5, max_variance=0.15, variance_penalty=0.01)
-        predicates = miner.mine(boards, scores)
+    def test_winning_pattern_discovered(self):
+        """At least one predicate should single out the winning (centre==X) region."""
+        boards, scores = self._make_transitions()
+        predicates = TreeMiner().mine(boards, scores)
 
-        # Check that at least one predicate matches all winning diagonals
-        win_boards = {h: b for h, b in boards.items() if h.startswith("win_diag")}
-        found_win_pred = False
-        for pred in predicates:
-            matches_all_wins = all(pred.matches(b) for b in win_boards.values())
-            if matches_all_wins and pred.mean_score > 0.6:
-                found_win_pred = True
-                break
-        assert found_win_pred, "No predicate found that matches all winning diagonals"
+        win_boards = [b for h, b in boards.items() if h.startswith("win_")]
+        found = any(
+            pred.mean_score > 0.5 and all(pred.matches(b) for b in win_boards)
+            for pred in predicates
+        )
+        assert found, "No predicate isolates the winning region"
 
 
 # =============================================================================
@@ -743,33 +726,32 @@ class TestFromBoardAt:
         ])
         assert conj.matches(to_board, {"_from": from_board}) is True
 
-    def test_miner_with_from_boards(self):
-        """PredicateMiner generates cross-board atoms when from_boards provided."""
-        # Create boards where a piece appearing at (0,0) predicts high score
+    @pytest.mark.skipif(not TORCH_AVAILABLE, reason="TreeMiner requires PyTorch")
+    def test_miner_with_cross_board_atoms(self):
+        """The miner generates cross-board atoms from the (from -> to) transition.
+
+        A piece appearing at (0,0) (absent before, present after) predicts a win.
+        """
         boards = {}
-        from_boards = {}
         scores = {}
-        for i in range(10):
-            to_b = np.zeros((3, 3), dtype=np.int8)
+        # Winning: a piece appears at (0,0) — a cross-board "changed" pattern.
+        for i in range(8):
             from_b = np.zeros((3, 3), dtype=np.int8)
-            to_b[0, 0] = 1  # piece appeared at (0,0)
+            to_b = np.zeros((3, 3), dtype=np.int8)
+            to_b[0, 0] = 1
             to_b[1, 1] = 2 if i % 2 == 0 else 0
-            from_b[1, 1] = 2 if i % 2 == 0 else 0  # this didn't change
-            h = f"appeared_{i}"
-            boards[h] = to_b
-            from_boards[h] = from_b
-            scores[h] = ((8.0, 1.0, 1.0), 0.8)
-
-        for i in range(10):
-            to_b = np.zeros((3, 3), dtype=np.int8)
+            from_b[1, 1] = to_b[1, 1]  # unchanged
+            fh, th = f"wf_{i}", f"wt_{i}"
+            boards[fh], boards[th] = from_b, to_b
+            scores[(fh, th)] = ((10.0, 0.0, 0.0), 1.0)
+        # Losing: (0,0) stays empty, a piece appears elsewhere.
+        for i in range(8):
             from_b = np.zeros((3, 3), dtype=np.int8)
-            to_b[2, 2] = 2  # piece appeared at (2,2) instead
-            from_b[0, 0] = 1 if i % 3 == 0 else 0
-            h = f"other_{i}"
-            boards[h] = to_b
-            from_boards[h] = from_b
-            scores[h] = ((1.0, 1.0, 8.0), 0.2)
+            to_b = np.zeros((3, 3), dtype=np.int8)
+            to_b[2, 2] = 2
+            fh, th = f"lf_{i}", f"lt_{i}"
+            boards[fh], boards[th] = from_b, to_b
+            scores[(fh, th)] = ((0.0, 0.0, 10.0), 0.0)
 
-        miner = PredicateMiner(min_support=5, max_variance=0.1, variance_penalty=0.05)
-        preds = miner.mine(boards, scores, from_boards)
+        preds = TreeMiner().mine(boards, scores)
         assert len(preds) > 0

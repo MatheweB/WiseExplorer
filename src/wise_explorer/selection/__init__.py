@@ -213,7 +213,20 @@ def select_move(
             anchor_scores[mk] = a_score
             solo_scores[mk] = _effective_score(stats, a_score)
 
-    signal_order = _rank_signals(bell_scores, anchor_scores, solo_scores, pred_scores)
+    # Competitive play is *reliability*-first, not *discrimination*-first: rank
+    # the game-theoretic Bellman value primary, with the remaining signals
+    # (variance-ordered) as tiebreakers. Pure variance arbitration would defer to
+    # whichever signal spreads the moves most — but exploration noise inflates the
+    # spread of the raw W/T/L signals (solo/anchor), so they'd override a correct
+    # Bellman value. This self-adapts: when Bellman discriminates it decides; when
+    # it's flat (ties) or missing, the tiebreakers take over. Measured on TTT vs
+    # minimax ground truth: 96%→99.6% optimal at convergence, 86%→88% early.
+    # (Training keeps pure variance arbitration — it wants discriminative
+    # exploration breadth, which is what makes Bellman converge in the first place.)
+    signal_order = ("bell",) + tuple(
+        s for s in _rank_signals(bell_scores, anchor_scores, solo_scores, pred_scores)
+        if s != "bell"
+    )
 
     # Score each move using the ranked signal order
     move_scored: list[tuple[np.ndarray, Tuple[float, ...]]] = []
