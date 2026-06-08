@@ -11,7 +11,7 @@ Given only a record of which moves led to wins, Wise Explorer builds four kinds 
 knowledge — raw statistics, statistical clusters, minimax values, and **symbolic
 rules you can read** — and lets the *data itself* decide which to trust, move by move.
 
-## 🧮 It rediscovered the math that solves Nim
+## It self-discovers interpretable rules that solve games (like Nim)
 
 Nim has been *solved* since 1901: you win by always moving so that the bitwise **XOR of the
 pile sizes is zero** — the "nim-sum" (Bouton's theorem). **Wise Explorer was never told
