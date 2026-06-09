@@ -61,8 +61,9 @@ def run_training(
             prune_players=set(),
         )
 
-    # Mine predicates at end of training
+    # Mine predicates and grow the concept library on the converged values
     runner.memory.mine_predicates()
+    runner.memory.grow_concepts()
 
     return total
 
@@ -119,7 +120,8 @@ def run_training_interleaved(
         remaining -= batch
         phase = (phase + 1) % (num_players + 1)
 
-    # Mine predicates at end of training
+    # Mine predicates and grow the concept library on the converged values
     runner.memory.mine_predicates()
+    runner.memory.grow_concepts()
 
     return total

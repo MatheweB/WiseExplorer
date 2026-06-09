@@ -154,6 +154,40 @@ def run_inspect(argv: list[str]) -> None:
     mem.close()
 
 
+def run_invent(argv: list[str]) -> None:
+    """`wise-explorer invent` — invent new concepts from the stored transitions.
+
+    Searches for board features built from generic primitives, keeps the ones
+    that compress the win/loss data (MDL), reuses them across rounds, and stops
+    when a round no longer pays. See docs/concept-invention.md.
+    """
+    from wise_explorer import synthesis
+
+    p = argparse.ArgumentParser(
+        prog="wise-explorer invent",
+        description="Invent human-readable concepts (e.g. the nim-sum) from self-play.",
+    )
+    p.add_argument("--game", "-g", choices=list(GAMES.keys()), default="nim",
+                   help="Game to invent concepts for (default: nim)")
+    p.add_argument("--fresh", type=int, default=None, metavar="N",
+                   help="Train N self-play games into a throwaway DB first (quick demo)")
+    p.add_argument("--rounds", type=int, default=4, help="Max reuse rounds (default: 4)")
+    a = p.parse_args(argv)
+
+    game = create_game(a.game)
+    if a.fresh:
+        mem = _train_throwaway(game, a.fresh, markov=False)
+    else:
+        db_path = Path(MEMORY_DIR) / f"{game.game_id()}.db"
+        if not db_path.exists():
+            print(f"No trained model for '{a.game}' at {db_path}.")
+            print(f"  Or quick demo: wise-explorer invent -g {a.game} --fresh 10000")
+            return
+        mem = Memory.for_game(game, base_dir=MEMORY_DIR, read_only=True)
+    print(synthesis.render(synthesis.invent(mem, a.game, max_rounds=a.rounds), label=a.game))
+    mem.close()
+
+
 def _train_throwaway(game, sims: int, markov: bool):
     """Train `sims` self-play games into a temp DB; return the open memory."""
     import tempfile
@@ -176,9 +210,12 @@ def _train_throwaway(game, sims: int, markov: bool):
 
 
 def main() -> None:
-    # Hybrid CLI: a bare `wise-explorer` still trains + plays; `inspect` is a verb.
+    # Hybrid CLI: a bare `wise-explorer` still trains + plays; `inspect`/`invent` are verbs.
     if len(sys.argv) > 1 and sys.argv[1] == "inspect":
         run_inspect(sys.argv[2:])
+        return
+    if len(sys.argv) > 1 and sys.argv[1] == "invent":
+        run_invent(sys.argv[2:])
         return
 
     args = parse_args()

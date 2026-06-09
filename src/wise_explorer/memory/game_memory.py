@@ -23,12 +23,25 @@ from wise_explorer.memory.anchor_manager import AnchorManager
 from wise_explorer.memory.predicates import PredicateLibrary, TORCH_AVAILABLE
 from wise_explorer.memory.iti_miner import ITIMiner
 from wise_explorer.memory.tree_miner import TreeMiner
+from wise_explorer.memory.concept_library import ConceptLibrary
 
 if TYPE_CHECKING:
     from wise_explorer.agent.agent import State
     from wise_explorer.games.game_base import GameBase
 UNEXPLORED_ANCHOR_ID = -999
 PREDICATE_ANCHOR_ID = -998
+
+
+def _placed_token(from_board: np.ndarray, to_board: np.ndarray) -> int:
+    """The token the move just placed — the new non-empty value at a changed cell. This is
+    the only perspective the concept layer needs (move-relative concepts read it; cell-only
+    ones ignore it). 0 when it can't be recovered."""
+    a = np.asarray(from_board).ravel()
+    b = np.asarray(to_board).ravel()
+    if a.shape != b.shape:
+        return 0
+    placed = b[(a != b) & (b != 0)]
+    return int(placed[0]) if len(placed) else 0
 
 
 class MoveEvaluation(NamedTuple):
@@ -41,6 +54,7 @@ class MoveEvaluation(NamedTuple):
     anchor_stats: Dict[int, Stats]
     bell_scores: Dict[tuple, Optional[float]]  # move_key -> propagated_score
     pred_scores: Dict[tuple, Optional[float]]  # move_key -> predicate mean_score
+    concept_scores: Dict[tuple, Optional[float]]  # move_key -> invented-concept value
 
 
 class GameMemory(ABC):
@@ -72,6 +86,7 @@ class GameMemory(ABC):
 
         self.anchors = AnchorManager(self.conn, self.main_table, self.read_only)
         self.predicate_library = PredicateLibrary(self.conn, self.read_only)
+        self.concept_library = ConceptLibrary(self.conn, self.read_only)   # value signal, persisted
         self._batch_miner = TreeMiner()   # batch CART for end-of-training
         self._iti_miner = ITIMiner()       # incremental for per-wave updates
         self._cached_trans_scores: Dict[Tuple[str, str], Tuple[Counts, float]] = {}
@@ -251,9 +266,13 @@ class GameMemory(ABC):
         anchor_stats: Dict[int, Stats] = {}
         bell_scores: Dict[tuple, Optional[float]] = {}
         pred_scores: Dict[tuple, Optional[float]] = {}
+        concept_scores: Dict[tuple, Optional[float]] = {}
 
         for move, to_hash, to_board in self._compute_move_hashes(game, valid_moves):
             mk = tuple(move)
+            # invented-concept value of the resulting board (inert until the library is grown)
+            concept_scores[mk] = self.concept_library.value_for(
+                to_board, _placed_token(from_board_2d, to_board))
 
             if to_hash in known_moves:
                 direct_stats, anchor_id, bell = known_moves[to_hash]
@@ -294,6 +313,7 @@ class GameMemory(ABC):
             anchor_stats=anchor_stats,
             bell_scores=bell_scores,
             pred_scores=pred_scores,
+            concept_scores=concept_scores,
         )
 
     def _compute_move_hashes(self, game: "GameBase", valid_moves: List[np.ndarray]) -> List[Tuple[np.ndarray, str, np.ndarray]]:
@@ -558,6 +578,16 @@ class GameMemory(ABC):
             predicates = self._batch_miner.mine(boards, trans_scores)
         self.predicate_library.save(predicates)
         return len(predicates)
+
+    def grow_concepts(self) -> int:
+        """Refresh the invented-concept library from the current transitions, so the concept
+        value signal tracks what self-play has revealed. Cheap to call on the mining cadence;
+        the synthesiser reuses what it already kept rather than starting from scratch."""
+        if self.read_only or getattr(self, "is_markov", False):
+            return 0
+        from wise_explorer import synthesis
+        B, V, M = synthesis._boards_values(self)
+        return self.concept_library.refresh(B, V, M)
 
     def _update_trans_cache(self, boards: Dict[str, np.ndarray]) -> None:
         """Incrementally update cached transition scores for touched keys only."""
