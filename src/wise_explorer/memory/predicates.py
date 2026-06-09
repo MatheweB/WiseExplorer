@@ -739,15 +739,6 @@ def _derive_mining_params(
     }
 
 
-def _score_variance(matching: list, hash_scores: Dict[str, float]) -> float:
-    """Compute raw score variance across matching board hashes."""
-    if len(matching) < 2:
-        return 0.0
-    scores = [hash_scores[h] for h in matching]
-    mean = sum(scores) / len(scores)
-    return sum((s - mean) ** 2 for s in scores) / len(scores)
-
-
 # =============================================================================
 # Layer 5 — Tensor-Accelerated Mining (GPU/CPU)
 # =============================================================================
@@ -820,13 +811,6 @@ class PredicateLibrary:
         if best is not None:
             return Stats(*best.counts)
         return None
-
-    def match_all(self, board: np.ndarray, from_board: Optional[np.ndarray] = None) -> List[Predicate]:
-        """Return all matching predicates, sorted by specificity then variance."""
-        bindings = {"_from": from_board} if from_board is not None else {}
-        matches = [p for p in self._predicates if p.conjunction.matches(board, bindings)]
-        matches.sort(key=lambda p: (-p.specificity, p.variance))
-        return matches
 
     def save(self, predicates: List[Predicate]) -> None:
         """Replace all stored predicates with new ones."""

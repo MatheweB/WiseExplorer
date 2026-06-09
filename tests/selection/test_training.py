@@ -1,108 +1,115 @@
 """
-Tests for wise_explorer.selection.training
+Tests for training move selection (Scheme 2: uncertainty-weighted value
+distribution).
 
-Tests probabilistic move selection for training with exploration.
+``move_weight`` is the core logic and is tested as a pure function;
+``select_move_for_training`` is covered by an integration smoke + reproducibility
+test against a real memory.
 """
 
 import random
-from typing import Dict, List, Tuple
 
 import numpy as np
-import pytest
 
+import wise_explorer.memory as M
 from wise_explorer.core.types import Stats
-from wise_explorer.selection.training import (
-    _exploration_weight,
-    select_anchor_deterministic,
-    select_move_random,
-)
+from wise_explorer.games.tic_tac_toe import TicTacToe
+from wise_explorer.selection import select_move_for_training
+from wise_explorer.selection.training import move_weight
 
 
-class TestExplorationWeight:
-    """_exploration_weight function tests."""
+class TestMoveWeight:
+    """The Scheme 2 weight: drive = std_error, spent by value lean."""
 
-    def test_pick_best_vs_pick_prune(self):
-        """pick_best affects weight direction."""
-        winning = Stats(100, 0, 0)
-        losing = Stats(0, 0, 100)
-        
-        # pick_best=True favors high scores
-        assert _exploration_weight(winning, True) > _exploration_weight(losing, True)
-        # pick_best=False favors low scores
-        assert _exploration_weight(losing, False) > _exploration_weight(winning, False)
+    def test_exploit_favors_high_score(self):
+        """With equal uncertainty, exploit weights the promising move higher."""
+        good = Stats(8, 1, 1)
+        bad = Stats(1, 1, 8)  # mirror of good -> identical std_error, lower score
+        assert abs(good.std_error - bad.std_error) < 1e-9  # symmetric counts
+        assert move_weight(good, is_prune=False) > move_weight(bad, is_prune=False)
 
+    def test_prune_favors_low_score(self):
+        """With equal uncertainty, prune weights the unpromising move higher."""
+        good = Stats(8, 1, 1)
+        bad = Stats(1, 1, 8)
+        assert move_weight(bad, is_prune=True) > move_weight(good, is_prune=True)
 
-class TestSelectAnchor:
-    """select_anchor function tests."""
+    def test_weights_are_mirror_images_summing_to_drive(self):
+        """exploit + prune weight == std_error (the two split the uncertainty)."""
+        for s in (Stats(3, 2, 5), Stats(10, 0, 0), Stats(0, 0, 0), Stats(1, 7, 2)):
+            total = move_weight(s, is_prune=False) + move_weight(s, is_prune=True)
+            assert abs(total - s.std_error) < 1e-12
 
-    def test_returns_valid_id(self, anchor_stats_varied: Dict[int, Stats]):
-        """Returns a valid anchor ID."""
-        random.seed(42)
-        result = select_anchor_deterministic(anchor_stats_varied, pick_best=True)
-        assert result in anchor_stats_varied
-
-    def test_single_anchor(self):
-        """Returns only anchor when just one exists."""
-        stats = {42: Stats(10, 5, 5)}
-        assert select_anchor_deterministic(stats, pick_best=True) == 42
-
-    def test_empty_raises(self):
-        """Raises on empty anchor stats."""
-        with pytest.raises(ValueError, match="No anchors"):
-            select_anchor_deterministic({}, pick_best=True)
-
-    def test_deterministic(self, anchor_stats_varied: Dict[int, Stats]):
-        """Selection picks the best mean_score"""
-        selected_anchor_id = select_anchor_deterministic(anchor_stats_varied, pick_best=True)
-        max_scored_anchor = max(anchor_stats_varied.items(), key=lambda a: a[1].mean_score)[1]
-        assert anchor_stats_varied[selected_anchor_id] == max_scored_anchor
-
-    def test_favors_unexplored(self):
-        """Unexplored anchors are favored over losing anchors."""
-        stats = {
-            0: Stats(0, 0, 5000),  # Very certain loss
-            1: Stats(0, 0, 0),     # Unexplored
-        }
-        
-        random.seed(42)
-        unexplored_count = sum(
-            1 for _ in range(100) if select_anchor_deterministic(stats, pick_best=True) == 1
-        )
-        assert unexplored_count > 80
+    def test_weight_scales_with_uncertainty(self):
+        """Self-correction: an under-sampled move outweighs a well-sampled one
+        of the same value, so sampling (which shrinks std_error) lowers weight."""
+        unsure = Stats(1, 0, 1)     # score 0.5, high std_error
+        resolved = Stats(50, 0, 50)  # score 0.5, low std_error
+        assert unsure.mean_score == resolved.mean_score
+        assert move_weight(unsure, is_prune=False) > move_weight(resolved, is_prune=False)
+        assert move_weight(unsure, is_prune=True) > move_weight(resolved, is_prune=True)
 
 
-class TestSelectMove:
-    """select_move function tests."""
+def _random_game_stacks(rng, n_games):
+    """Play n random Tic-Tac-Toe games; return record_round stacks."""
+    stacks = []
+    for _ in range(n_games):
+        g = TicTacToe()
+        moves = {1: [], 2: []}
+        while not g.is_over():
+            p = g.current_player()
+            board = g.get_state().board.copy()
+            valid = list(g.valid_moves())
+            mv = valid[rng.randrange(len(valid))]
+            g.apply_move(mv, validated=True)
+            moves[p].append((mv, board, p))
+        for p in (1, 2):
+            stacks.append((moves[p], g.get_result(p)))
+    return stacks
 
-    def test_returns_valid_move(self, moves_with_stats: List[Tuple[np.ndarray, Stats]]):
-        """Returns a valid move from the list."""
-        random.seed(42)
-        result = select_move_random(moves_with_stats, pick_best=True)
-        
-        move_arrays = [m[0] for m in moves_with_stats]
-        assert any(np.array_equal(result, m) for m in move_arrays)
 
-    def test_single_move(self):
-        """Returns only move when just one exists."""
-        moves = [(np.array([7, 8]), Stats(10, 5, 5))]
-        result = select_move_random(moves, pick_best=True)
-        np.testing.assert_array_equal(result, np.array([7, 8]))
+def _legal(game):
+    return {tuple(int(x) for x in np.asarray(m).ravel()) for m in game.valid_moves()}
 
-    def test_returns_array(self, moves_with_stats: List[Tuple[np.ndarray, Stats]]):
-        """Returns numpy array."""
-        random.seed(42)
-        result = select_move_random(moves_with_stats, pick_best=True)
-        assert isinstance(result, np.ndarray)
 
-class TestReproducibility:
-    """Reproducibility with random seed tests."""
-    
-    def test_move_selection_reproducible(self, moves_with_stats: List[Tuple[np.ndarray, Stats]]):
-        """Same seed produces same results."""
-        random.seed(12345)
-        result1 = [tuple(select_move_random(moves_with_stats, pick_best=True)) for _ in range(10)]
-        
-        random.seed(12345)
-        result2 = [tuple(select_move_random(moves_with_stats, pick_best=True)) for _ in range(10)]
-        
-        assert result1 == result2
+def _as_key(move):
+    return tuple(int(x) for x in np.asarray(move).ravel())
+
+
+class TestSelectMoveForTraining:
+    """Integration: sampling returns legal moves and is reproducible."""
+
+    def test_fresh_memory_returns_legal_move(self, tmp_path):
+        """Unexplored frontier: all weights tie -> uniform fallback, still legal."""
+        mem = M.for_game(TicTacToe(), base_dir=str(tmp_path))
+        g = TicTacToe()
+        for is_prune in (False, True):
+            random.seed(0)
+            sel = select_move_for_training(g, mem, is_prune=is_prune)
+            assert _as_key(sel) in _legal(g)
+        mem.close()
+
+    def test_populated_memory_returns_legal_move(self, tmp_path):
+        """Weighted path (real stats): both phases return a legal move."""
+        mem = M.for_game(TicTacToe(), base_dir=str(tmp_path))
+        mem.record_round(TicTacToe, _random_game_stacks(random.Random(0), 60))
+        g = TicTacToe()
+        for is_prune in (False, True):
+            random.seed(7)
+            sel = select_move_for_training(g, mem, is_prune=is_prune)
+            assert _as_key(sel) in _legal(g)
+        mem.close()
+
+    def test_reproducible_under_seed(self, tmp_path):
+        """Same seed -> same sampled sequence."""
+        mem = M.for_game(TicTacToe(), base_dir=str(tmp_path))
+        mem.record_round(TicTacToe, _random_game_stacks(random.Random(1), 60))
+        g = TicTacToe()
+
+        def draws():
+            return [_as_key(select_move_for_training(g, mem, is_prune=False)) for _ in range(20)]
+
+        random.seed(123); first = draws()
+        random.seed(123); second = draws()
+        assert first == second
+        mem.close()

@@ -46,9 +46,9 @@ class TestCreateAgentSwarms:
         agents = swarms[1]
         
         assert agents[0] is not agents[1]
-        
-        agents[0].move_depth = 100
-        assert agents[1].move_depth != 100
+
+        agents[0].player_id = 100
+        assert agents[1].player_id != 100
 
     def test_zero_agents(self):
         """Works with zero agents per player."""

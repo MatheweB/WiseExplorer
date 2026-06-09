@@ -1,66 +1,32 @@
 """
-Move selection for training.
+Move-selection weighting for training.
 
-Training uses probabilistic selection weighted by uncertainty and promise
-to ensure diverse exploration while focusing on promising lines.
-
-The Formula:
-    weight = promise
-    
-    - promise = mean_score (exploit) or 1-mean_score (prune)
-    - Probabilistic selection maintains diversity
+Training samples moves from an uncertainty-weighted value distribution.
+``move_weight`` gives one move's weight; the sampling itself lives in
+``select_move_for_training`` in the package root.
 """
 
 from __future__ import annotations
 
-import random
-from typing import Dict, List, Tuple
-
-import numpy as np
-
 from wise_explorer.core.types import Stats
 
-def _exploration_weight(stats: Stats, pick_best: bool) -> float:
-    """
-    Calculate exploration weight for a move/anchor.
-    
-    The intuition is the higher the score of the move we're looking at, the less we need to
-    try it again (because we're confident about its outcome). So we explore.
-    The same intuition applies for the pruning phase (bad outcome = confident, so explore).
-    
-    Args:
-        stats: Move statistics
-        pick_best:  If True, promise = mean_score (exploit mode)
-                    If False, promise = 1 - mean_score (prune mode)
-    """
-    promise = stats.mean_score if pick_best else (1.0 - stats.mean_score)
-    return promise
 
+def move_weight(stats: Stats, is_prune: bool) -> float:
+    """Training weight for a single move.
 
-def select_anchor_deterministic(anchor_stats: Dict[int, Stats], pick_best: bool) -> int:
-    """Deterministic selection of best/worst anchor by mean_score."""
-    if not anchor_stats:
-        raise ValueError("No anchors provided")
+    A move's *exploration drive* is its uncertainty (``Stats.std_error``). We
+    spend that drive on whichever side of the value we are still pinning down:
 
-    if pick_best:
-        return max(anchor_stats.keys(), key=lambda a: anchor_stats[a].mean_score)
-    else:
-        return min(anchor_stats.keys(), key=lambda a: anchor_stats[a].mean_score)
+    - exploit phase (``is_prune=False``): ``std_error * mean_score``
+      (promising moves we are not yet sure of)
+    - prune phase (``is_prune=True``):    ``std_error * (1 - mean_score)``
+      (unpromising moves we are not yet sure of)
 
-def select_move_random(moves: List[Tuple[np.ndarray, Stats]], pick_best: bool) -> np.ndarray:
+    The two weights are mirror images and sum to ``std_error``. Because the
+    weight scales with ``std_error``, sampling a move shrinks its weight
+    (self-correcting); on the unexplored frontier every move shares the maximal
+    ``std_error``, so weights tie and sampling spreads ~uniformly.
     """
-    Random selection within anchor.
-    
-    All moves in an anchor are statistically equivalent.
-    
-    Args:
-        moves: List of (move, stats) tuples
-        pick_best: If True, favor high scores; if False, favor low scores
-        
-    Returns:
-        Selected move array
-    """
-    if len(moves) == 1:
-        return moves[0][0]
-    
-    return random.choice(moves)[0]
+    drive = stats.std_error
+    score = stats.mean_score
+    return drive * (1.0 - score) if is_prune else drive * score

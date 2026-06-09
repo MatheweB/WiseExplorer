@@ -138,19 +138,6 @@ class GameMemory(ABC):
         pass
 
     @abstractmethod
-    def _aggregate_destination_scores(self) -> Dict[str, Counts]:
-        """Aggregate scores per destination board hash for predicate mining."""
-        pass
-
-    def _get_destination_bellman_scores(self) -> Dict[str, float]:
-        """Get average Bellman score per destination hash. Override in subclasses with Bellman."""
-        return {}
-
-    def _get_transition_from_hashes(self) -> Dict[str, str]:
-        """Get the most common from_hash for each to_hash. Override in subclasses."""
-        return {}
-
-    @abstractmethod
     def _get_mode_specific_info(self) -> Dict[str, Any]:
         """Return mode-specific info for get_info()."""
         pass
@@ -476,20 +463,13 @@ class GameMemory(ABC):
     def _build_trans_scores(self) -> Tuple[Dict[str, np.ndarray], Dict[Tuple[str, str], Tuple[Counts, float]]]:
         """Build the per-transition target the predicate miner fits.
 
-        Two candidate value estimates per transition:
-
-          solo — the raw outcome ratio (exact when unanimous, else Bayesian mean).
-                 Always available, but carries exploration noise (the prune phase
-                 deliberately logs losses on winning positions).
-          bell — the minimax-propagated value: solo with that exploration noise
-                 filtered out by the backup. The cleaner signal *when it has
-                 converged*, but on large games it stays near its 0.5 prior.
-
-        We mine on the de-noised signal (bell) only when it actually carries
-        structure — when its support-weighted variance clears the measurement-
-        noise floor of the data. Otherwise bell is flat/unconverged and we fall
-        back to the raw outcome. The choice is GLOBAL (one signal for the whole
-        tree) so the splitter always compares like with like. Parameter-free.
+        The target is the minimax-propagated **Bellman** value of each transition
+        — the raw win/tie/loss outcome with the prune phase's exploration noise
+        filtered out by the backup — falling back to the raw outcome only for
+        transitions the backup hasn't reached yet. Where Bellman is still flat
+        (unconverged, as on large games) it carries no structure, so the miner's
+        MDL stop finds nothing and abstains on its own; no separate "has it
+        converged?" test is needed.
 
         Returns (boards, trans_scores) or (empty, empty) if insufficient data.
         """
@@ -507,14 +487,9 @@ class GameMemory(ABC):
         if not rows:
             return {}, {}
 
-        import numpy as _np
-
         keys: List[Tuple[str, str]] = []
         counts_l: List[Counts] = []
-        solo_l: List[float] = []
         bell_l: List[float] = []
-        support_l: List[float] = []
-        se2_l: List[float] = []
         for from_hash, to_hash, w, t, l, bell in rows:
             if from_hash not in boards or to_hash not in boards:
                 continue
@@ -524,29 +499,13 @@ class GameMemory(ABC):
             solo = s.utility if is_decisive(s) else s.mean_score
             keys.append((from_hash, to_hash))
             counts_l.append((w, t, l))
-            solo_l.append(solo)
             bell_l.append(bell if bell is not None else solo)
-            support_l.append(float(s.total))
-            se2_l.append(s.std_error ** 2)
 
         if not keys:
             return boards, {}
 
-        support = _np.asarray(support_l)
-        se2 = _np.asarray(se2_l)
-        bell_arr = _np.asarray(bell_l)
-        total_w = support.sum()
-
-        # Support-weighted measurement-noise floor and bell variance.
-        floor = float((support * se2).sum() / total_w) if total_w > 0 else 0.0
-        bell_mean = float((support * bell_arr).sum() / total_w) if total_w > 0 else 0.5
-        bell_var = float((support * (bell_arr - bell_mean) ** 2).sum() / total_w) if total_w > 0 else 0.0
-
-        use_bell = bell_var > floor
-        chosen = bell_l if use_bell else solo_l
-
         trans_scores: Dict[Tuple[str, str], Tuple[Counts, float]] = {
-            key: (counts_l[i], chosen[i]) for i, key in enumerate(keys)
+            key: (counts_l[i], bell_l[i]) for i, key in enumerate(keys)
         }
         return boards, trans_scores
 

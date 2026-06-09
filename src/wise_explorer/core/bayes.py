@@ -89,32 +89,18 @@ def _compatible_impl(
 ) -> bool:
     """
     Check if two distributions are statistically compatible.
-    
-    Uses early-exit heuristics before full Bayes factor.
+
+    Returns True iff the Dirichlet-Multinomial Bayes factor favors the
+    "same distribution" hypothesis (log-BF > 0). Empty distributions are
+    treated as compatible (no evidence against pooling).
     """
     na = a0 + a1 + a2
     nb = b0 + b1 + b2
-    
-    # Empty distributions
+
+    # Empty distributions: no evidence against compatibility
     if na == 0 or nb == 0:
-        return True  # No evidence against compatibility
-    
-    # Quick L1 distance check on distributions
-    # If obviously different, skip expensive Bayes computation
-    da0, da1, da2 = a0 / na, a1 / na, a2 / na
-    db0, db1, db2 = b0 / nb, b1 / nb, b2 / nb
-    
-    l1_dist = abs(da0 - db0) + abs(da1 - db1) + abs(da2 - db2)
-    
-    # Very different distributions - quick reject
-    if l1_dist > 0.6:
-        return False
-    
-    # Very similar distributions - quick accept
-    if l1_dist < 0.1 and na > 10 and nb > 10:
         return True
-    
-    # Full Bayes factor check
+
     return _log_bayes_factor_impl(a0, a1, a2, b0, b1, b2, 1.0) > 0.0
 
 

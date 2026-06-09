@@ -56,6 +56,27 @@ class TestCompatible:
         a, b = (80, 10, 10), (70, 15, 15)
         assert compatible(a, b) == compatible(b, a)
 
+    def test_follows_bayes_factor_no_l1_override(self):
+        """compatible() is exactly the Bayes-factor sign for non-empty inputs.
+
+        Regression guard: earlier versions short-circuited on an L1-distance
+        heuristic with magic thresholds (0.6 / 0.1 / n>10) that disagreed with
+        the Bayes factor in thousands of small-support cases. compatible() must
+        equal the model it documents, not an L1 ball. The (122,122,9)/(151,159,0)
+        case is one the old quick-accept got wrong (l1=0.071 -> True, but BF<0).
+        """
+        cases = [
+            ((1, 0, 0), (0, 1, 0)),
+            ((2, 0, 0), (0, 0, 2)),
+            ((122, 122, 9), (151, 159, 0)),
+            ((10, 5, 5), (5, 10, 5)),
+            ((3, 1, 0), (0, 1, 3)),
+            ((50, 30, 20), (48, 32, 19)),
+            ((100, 0, 0), (0, 0, 100)),
+        ]
+        for a, b in cases:
+            assert bool(compatible(a, b)) == (log_bayes_factor(a, b) > 0.0)
+
 
 class TestSimilarity:
     """Tests for similarity function."""

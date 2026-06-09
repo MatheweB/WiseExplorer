@@ -79,35 +79,6 @@ class TransitionMemory(GameMemory):
             [(aid, key[0], key[1]) for key, aid in membership.items()]
         )
 
-    def _get_transition_from_hashes(self) -> Dict[str, str]:
-        """Get the from_hash with the most samples for each to_hash."""
-        rows = self.conn.execute(
-            "SELECT to_hash, from_hash, wins+ties+losses as total "
-            "FROM transitions WHERE total > 0 "
-            "ORDER BY to_hash, total DESC"
-        ).fetchall()
-        result = {}
-        for to_hash, from_hash, _ in rows:
-            if to_hash not in result:
-                result[to_hash] = from_hash
-        return result
-
-    def _get_destination_bellman_scores(self) -> Dict[str, float]:
-        """Average Bellman propagated score per destination board hash."""
-        rows = self.conn.execute(
-            "SELECT to_hash, AVG(propagated_score) FROM transitions "
-            "WHERE propagated_score IS NOT NULL GROUP BY to_hash"
-        ).fetchall()
-        return {h: score for h, score in rows}
-
-    def _aggregate_destination_scores(self) -> Dict[str, Counts]:
-        """Aggregate scores per destination board hash across all transitions."""
-        rows = self.conn.execute(
-            "SELECT to_hash, SUM(wins), SUM(ties), SUM(losses) "
-            "FROM transitions GROUP BY to_hash HAVING SUM(wins+ties+losses) > 0"
-        ).fetchall()
-        return {h: (w, t, l) for h, w, t, l in rows}
-
     def _commit_outcomes(self, transitions: Dict[Tuple[str, str], List[float]], cur: sqlite3.Cursor) -> Tuple[List, Dict]:
         """Commit outcomes and return keys/deltas for anchor manager."""
         cur.executemany(
@@ -199,18 +170,6 @@ class TransitionMemory(GameMemory):
             r[0]: (Stats(r[1], r[2], r[3]), r[4], r[5])
             for r in rows
         }
-
-    def _best_estimate(self, from_hash: str, to_hash: str) -> float:
-        """Return propagated_score if available, else mean_score (Eq. 3 in design doc)."""
-        row = self.conn.execute(
-            "SELECT propagated_score, wins, ties, losses FROM transitions WHERE from_hash=? AND to_hash=?",
-            (from_hash, to_hash)
-        ).fetchone()
-        if row is None:
-            return Stats().mean_score  # Bayesian prior ~0.5
-        if row[0] is not None:
-            return row[0]
-        return Stats(row[1], row[2], row[3]).mean_score
 
     def _compute_alpha(self, child_from: str, child_to: str) -> float:
         """

@@ -14,7 +14,7 @@ from typing import Dict, Generator, List, Tuple
 import numpy as np
 import pytest
 
-from wise_explorer.agent.agent import Agent, State
+from wise_explorer.agent.agent import Agent
 from wise_explorer.core.types import Stats
 from wise_explorer.games.game_base import GameBase
 from wise_explorer.memory import TransitionMemory, MarkovMemory, GameMemory
@@ -93,18 +93,6 @@ def two_player_game() -> GameBase:
 # =============================================================================
 # Agent Fixtures
 # =============================================================================
-
-@pytest.fixture
-def sample_agent() -> Agent:
-    """Configured Agent instance."""
-    agent = Agent()
-    agent.player_id = 1
-    agent.core_move = np.array([0, 0])
-    agent.move = np.array([1, 1])
-    agent.game_state = State.NEUTRAL
-    agent.move_depth = 5
-    return agent
-
 
 @pytest.fixture
 def agent_swarms(two_player_game: GameBase) -> Dict[int, List[Agent]]:

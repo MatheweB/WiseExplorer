@@ -11,7 +11,7 @@ Given only a record of which moves led to wins, Wise Explorer builds four kinds 
 knowledge — raw statistics, statistical clusters, minimax values, and **symbolic
 rules you can read** — and lets the *data itself* decide which to trust, move by move.
 
-## It self-discovers interpretable rules that solve games (like Nim)
+## It self-discovers human interpretable rules that solve games (like Nim)
 
 Nim has been *solved* since 1901: you win by always moving so that the bitwise **XOR of the
 pile sizes is zero** — the "nim-sum" (Bouton's theorem). **Wise Explorer was never told
@@ -190,10 +190,10 @@ midgame Tic-Tac-Toe position the Bellman values might all be flat while clustere
 statistics do the separating — and the *same* mechanism quietly switches to trusting
 **anchor**. **The data decides; nothing is hard-coded.**
 
-This variance ranking drives *exploration* (training), where spreading the moves apart is
-what you want. For *competitive play* it's refined to **reliability-first** — rank the
-de-noised Bellman value primary, the rest as tiebreakers — because raw-count noise inflates
-discrimination and would otherwise override a correct Bellman value. ([Why it converges ↓](#why-it-converges--the-certainty-frontier) makes this concrete: +3.4% optimal play on Tic-Tac-Toe.)
+This arbitration is **competitive play's** rule, refined to **reliability-first**: the
+de-noised Bellman value ranks primary and the rest only break ties, since raw-count noise
+inflates discrimination and would otherwise override a correct Bellman value. **Training**
+explores by a different and far simpler rule, [below ↓](#self-play-training).
 
 <details>
 <summary><b>Under the hood: how each signal is computed</b></summary>
@@ -248,38 +248,23 @@ Rules are built from a small typed language
 the whole board), and the logical connectives `∃ · ∧ · ¬ · ∨` — rich enough that the
 `xor`-of-all-heaps atom *is* the nim-sum that defines optimal Nim.
 
-**How a rule is found.** Mining is a regression decision tree (CART) over the transitions.
-Each transition `i` carries a value `v_i ∈ [0,1]` (≈1 if the move tends to win, ≈0 if it
-loses), a support `n_i` (games routed through it), and a Bayesian standard error `se_i` from
-its win/tie/loss counts — so its sampling variance is `se_i²`. The whole thing is one idea:
-**observed variance = structural + sampling**, and we keep splitting while the structural
-part is positive.
+**How a rule is found.** Mining grows a small decision tree over the transitions: each carries
+a value `v ∈ [0,1]` (≈1 if the move tends to win, ≈0 if it loses), and the tree splits the
+boards on whichever atom best separates the winners from the losers.
 
-**De-noised target.** Raw win-rates are noisy — the [`prune` phase](#why-wise-explorer)
-deliberately plays losing moves, logging losses on strong positions. So `v_i` is the minimax
-(Bellman) value, the same
-outcomes with that exploration noise backed out by the backup, *when it has converged*;
-otherwise the raw win-rate. The choice is global (one signal for the whole tree) and
-automatic: use Bellman iff its variance clears the noise floor, `Var(bell) > σ̄²`. On large
-games the backup never converges — it sticks near its 0.5 prior (`Var ≈ 0`) and is dropped.
+It fits the **Bellman** value, not the raw win-rate. The [`prune` phase](#why-wise-explorer)
+deliberately throws games, which biases the raw rate; the minimax backup removes that noise.
+Where the backup hasn't converged — games too large to solve — the value stays flat, and the
+miner simply **abstains** instead of inventing rules from noise.
 
-**Noise floor.** Across a node, the floor is the support-weighted mean per-sample variance,
-so a transition seen once (huge `se_i²`) can't inflate it:
-
-> `σ̄² = ( Σ_i n_i · se_i² ) / ( Σ_i n_i )`
-
-**Stop rule (variance decomposition).** Write `v_i = μ_i + ε_i` with true value `μ_i` and
-sampling noise `Var(ε_i) = se_i²`. Then `Var(v) ≈ Var(μ) + σ̄²`, so the structural variance is
-`Var(μ) ≈ Var(v) − σ̄²`, and a node becomes a leaf once it hits zero:
-
-> `Var(v) ≤ σ̄²`   → no structure left to explain.
-
-Parameter-free and self-scaling. Crucially `Var(v)` — the impurity used for both the stop and
-the split gain — is **unweighted**: every transition counts equally, so one sharp, rare
-winning move is never buried under the well-trodden lines. Support `n_i` enters *only* `σ̄²`.
-
-**Split gain.** Split on the board predicate maximizing the unweighted variance reduction
-`Δ = Var(parent) − [ (n_L/n)·Var(left) + (n_R/n)·Var(right) ]`; stop if even the best `Δ ≤ 0`.
+**Each split has to pay for itself, in bits.** Think of the rules as a compressed description
+of the win/loss data. A split survives only if the uncertainty it removes outweighs the cost of
+writing one more rule — naming an atom (`~log₂(#atoms)` bits) and a branch. Carving up an
+already-decided region — splitting `nim-sum = 0`, which is already all wins — buys nothing, so
+it's dropped, and only the rules the data truly demands remain. This **Minimum Description
+Length** test (Rissanen / Quinlan) is the same "shortest program that fits" idea behind library
+learners like DreamCoder and Poesia & Goodman's [Peano](https://arxiv.org/abs/2211.15864) — and
+on Nim it reaches the two-rule theorem with ~5× fewer games than a significance test would.
 
 On Nim this collapses to the theorem — one split on the nim-sum, two pure leaves:
 
@@ -419,6 +404,13 @@ A naive learner only ever chases moves that look good; it never builds certainty
 
 Half the training budget goes to pruning — each player taking its turn as the one dragged
 through its worst lines — and half to a shared exploit phase.
+
+Within a phase, the move is a weighted draw: each candidate is weighted by **how unsure we
+are of it × how good it looks** (`se · score` to exploit, `se · (1 − score)` to prune). The
+two phases fall straight out of that — exploit leans to strong-but-unsettled moves, prune to
+weak-but-unsettled ones, and both skip moves already pinned down. It needs no dials: sampling a
+move shrinks its uncertainty, so attention drifts onward by itself, and on a fresh position
+every move is equally unsure, so the draw is uniform and coverage simply fills in.
 
 Deliberately playing badly is the *wisdom*: the agent that has thoroughly charted how to
 lose is the one that never stumbles into it — the same dual-curiosity as the decision tree
@@ -580,9 +572,10 @@ zero-prior-knowledge and game-agnostic:
    language + CART/ITI miner that distills play into human-readable rules. On Nim it
    independently recovers **Bouton's 1901 theorem** (the nim-sum) as the root of its
    decision tree, every rule provably correct against a theory it was never given.
-2. **Parameter-free, de-noised rule mining** — the tree fits the minimax-de-noised value and
-   stops by a variance-decomposition test (`Var(v) ≤ σ̄²`), discovering structure with no tuned
-   thresholds and *abstaining* rather than overfitting noise when a game is too sparsely sampled.
+2. **Compression-driven rule mining** — the tree fits the minimax-de-noised value and keeps a
+   split only when it pays for itself in description length (MDL), so it finds the *smallest*
+   rule set the data supports — recovering the theorem with far less play, and *abstaining*
+   rather than overfitting noise when a game is too sparsely sampled.
 3. **Variance-arbitrated multi-signal selection** — letting the data decide, per position,
    whether statistics, clustering, game value, or a learned rule should drive the choice.
 4. **A principled N-player / non-zero-sum generalization of minimax** via an alignment

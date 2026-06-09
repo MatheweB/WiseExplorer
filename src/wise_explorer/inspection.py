@@ -19,7 +19,7 @@ import numpy as np
 
 from wise_explorer.core.types import Stats
 from wise_explorer.memory.predicates import (
-    AtomClause, Eq, Neq, Literal, BoardAt, MakeSq, FromBoardAt, Predicate,
+    AtomClause, Eq, Neq, Gt, Le, Literal, BoardAt, MakeSq, FromBoardAt, Predicate,
     AggAtom, NegAggAtom,
 )
 
@@ -220,10 +220,18 @@ def nat_lang(pred, rows, cols, gt):
     pn = lambda r, c: _pos(r, c, gt, rows)
     parts = []
     # Aggregate atoms first — they carry the headline pattern (e.g. the nim-sum).
+    # Cell comparisons (Gt/Le) are rendered here too so no condition is silently
+    # dropped — otherwise two distinct leaves (e.g. split on "H3 > 2" vs "H3 ≤ 2")
+    # would print as the same statement.
     for clause in pred.conjunction.clauses:
         atom = clause.atom if isinstance(clause, AtomClause) else clause
         if isinstance(atom, (AggAtom, NegAggAtom)):
             parts.append(_agg_phrase(atom, gt))
+        elif isinstance(atom, (Gt, Le)):
+            lc = _get_cell(atom.left)
+            rl = atom.right.value if isinstance(atom.right, Literal) else None
+            if lc and lc[0] == "board" and rl is not None:
+                parts.append(f"{pn(lc[1], lc[2])} {'>' if isinstance(atom, Gt) else '≤'} {vn(rl)}")
     for (r,c), v in sorted(feq.items()):  parts.append(f"{pn(r,c)} was {vn(v)}")
     for (r,c), v in sorted(fneq.items()): parts.append(f"{pn(r,c)} was {'occupied' if v==0 else f'not {vn(v)}'}")
     for (r,c), v in sorted(beq.items()):  parts.append(f"{pn(r,c)} is {vn(v)}")

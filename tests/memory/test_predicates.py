@@ -22,7 +22,7 @@ from wise_explorer.memory.predicates import (
     # Mining & Library
     TreeMiner, PredicateLibrary, TORCH_AVAILABLE,
     # Helpers
-    _sq, _board_at, _from_board_at, _score_variance,
+    _sq, _board_at, _from_board_at,
 )
 from wise_explorer.memory import TransitionMemory
 
@@ -402,20 +402,6 @@ class TestPredicate:
 # Mining Tests
 # =============================================================================
 
-class TestScoreVariance:
-    def test_identical_scores(self):
-        scores = {"a": 0.5, "b": 0.5, "c": 0.5}
-        assert _score_variance(["a", "b", "c"], scores) == 0.0
-
-    def test_varied_scores(self):
-        scores = {"a": 0.0, "b": 1.0}
-        var = _score_variance(["a", "b"], scores)
-        assert var == pytest.approx(0.25)
-
-    def test_single_element(self):
-        assert _score_variance(["a"], {"a": 0.5}) == 0.0
-
-
 @pytest.mark.skipif(not TORCH_AVAILABLE, reason="TreeMiner requires PyTorch")
 class TestTreeMiner:
     """The batch CART miner discovers structural predicates from transitions.
@@ -483,6 +469,16 @@ class TestTreeMiner:
             for pred in predicates
         )
         assert found, "No predicate isolates the winning region"
+
+    def test_mdl_keeps_ruleset_minimal(self):
+        """One split on the centre cell fully explains the data, so the MDL stop
+        should settle on the minimal two-leaf rule set — it must not carve the
+        already-pure win/loss regions into redundant refinements."""
+        boards, scores = self._make_transitions()
+        preds = TreeMiner().mine(boards, scores)
+        assert len(preds) <= 2, [str(p.conjunction) for p in preds]
+        assert any(p.mean_score > 0.5 for p in preds), "no winning rule"
+        assert any(p.mean_score < 0.5 for p in preds), "no losing rule"
 
 
 # =============================================================================
@@ -579,27 +575,6 @@ class TestPredicateLibrary:
         stats = lib.match(board)
         # Should return the more specific predicate
         assert stats.wins == 90.0
-
-    def test_match_all(self, library):
-        lib, _ = library
-        pred1 = Predicate(
-            conjunction=Conjunction([AtomClause(Eq(_board_at(0, 0), Literal(1)))]),
-            counts=(30.0, 10.0, 10.0), support=50, variance=0.1,
-        )
-        pred2 = Predicate(
-            conjunction=Conjunction([
-                AtomClause(Eq(_board_at(0, 0), Literal(1))),
-                AtomClause(Eq(_board_at(1, 1), Literal(1))),
-            ]),
-            counts=(90.0, 5.0, 5.0), support=30, variance=0.01,
-        )
-        lib.save([pred1, pred2])
-
-        board = np.array([[1, 0, 0], [0, 1, 0], [0, 0, 0]], dtype=np.int8)
-        matches = lib.match_all(board)
-        assert len(matches) == 2
-        # Most specific first
-        assert matches[0].specificity >= matches[1].specificity
 
     def test_read_only_save_noop(self, temp_db_path):
         mem = TransitionMemory(temp_db_path)

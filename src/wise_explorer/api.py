@@ -34,7 +34,7 @@ def _ai_turn(
     if len(game.valid_moves()) == 0:
         return None
 
-    move = select_move(game, memory, random_in_anchor=False, debug=debug)
+    move = select_move(game, memory, debug=debug)
     game.apply_move(move)
     return move
 
