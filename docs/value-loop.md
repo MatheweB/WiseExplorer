@@ -29,8 +29,8 @@ small enough to cover, that is exact. At scale it is quietly catastrophic:
 | | 4-pile Nim | 8-pile Nim (3,000 games) |
 |---|---|---|
 | positions | 120 | 362,880 |
-| visited | all of them | ~5,000 (1.4%) |
-| max over replies is | the true max | the max over a 1.4% sample |
+| visited | all of them | ~25,000 (7%) |
+| max over replies is | the true max | the max over a 7% sample |
 
 A position whose refutation was never played *looks safe* — not because the evidence says
 it is safe, but because the evidence never met the door that disproves it. The backup then
@@ -138,9 +138,9 @@ anchor the loop to reality, and one was *measured the hard way*:
 
 The measured negative result: the obvious-looking "clean room" ordering — fit the library
 on *evidence-only* values so it can never see its own output — **collapses** (stuck near 80/200
-from the first chunk, then 32/200 by the fourth, on seeded 8-pile Nim). At 1.4% coverage the un-healed backup is
-mostly noise, and a refit on noise shreds the transferred rules; the loop then heals with a
-broken library. Information starvation turned out to be a worse failure mode than
+from the first chunk, then 32/200 by the fourth, on seeded 8-pile Nim). With ~93% of
+positions never visited, the un-healed backup is mostly noise, and a refit on noise shreds
+the transferred rules; the loop then heals with a broken library. Information starvation turned out to be a worse failure mode than
 self-reference. Discovery must fit the system's *best current belief* — the completed
 values — and the echo risk is held by the evidence re-anchor and the MDL gate, not by
 hiding the library's own signal from it.
@@ -165,7 +165,7 @@ is. No flag, no threshold.
 ## Measured behavior
 
 Protocol: 4-pile Nim trained 2,000 games (discovers the nim-sum), its library seeded into a
-fresh 8-pile memory (362,880 positions — training will visit ~1%), then 6 chunks × 500
+fresh 8-pile memory (362,880 positions — training will visit ~7%), then 6 chunks × 500
 games. After each chunk, optimal-move rate on 200 sampled winning positions using the full
 competitive selection (bell ranked first), against the nim-sum oracle. The control is
 byte-identical except `complete_values` is a no-op. (Measured with one wheel turn per
@@ -183,8 +183,8 @@ often, and the seeded-then-retrained 400/400 above is the shipped code end to en
 
 The control tells the whole story. It starts near-perfect — its bell is empty, so
 selection falls through to the clean transferred rule. Then every boundary rolls the
-dice: a rebuild on raw evidence at ~1% coverage is fitting mostly noise, so the library's
-quality becomes a **random walk on luck**. This run diluted at chunk 2 (1 → 6 concepts),
+dice: a rebuild on raw evidence with 93% of positions unvisited is fitting mostly noise,
+so the library's quality becomes a **random walk on luck**. This run diluted at chunk 2 (1 → 6 concepts),
 wobbled, briefly recovered on a lucky fit (190 at chunk 5), and ended collapsed (52, 12
 concepts). Two earlier control runs walked differently — one diluted at chunk 3 and
 flat-lined at ~15%, one held to chunk 4 then spiraled — but every unhealed run measured

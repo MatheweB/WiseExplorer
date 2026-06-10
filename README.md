@@ -45,7 +45,7 @@ only on 4-pile Nim (120 positions) plays **8-pile Nim** (362,880 positions, a st
 | | trained on | plays 8-pile Nim | optimal moves |
 |---|---|---|:--:|
 | **zero-shot transfer** | 4-pile only (120 positions) | with no 8-pile data at all | **400/400** |
-| from-scratch control | 8-pile, 3000 games | after seeing 1.65% of the space | 51/400 (≈ chance) |
+| from-scratch control | 8-pile, 3000 games | after seeing ~7% of the space | 51/400 (≈ chance) |
 | **seeded, then retrained** | 4-pile seed + 3000 8-pile games | the [value loop](docs/value-loop.md) keeps the rule in charge | **400/400** |
 
 ```mermaid
@@ -56,10 +56,11 @@ flowchart LR
     classDef fail  fill:#7f1d1d,stroke:#b91c1c,color:#fee2e2
     A["4-pile Nim<br/>120 positions · 2,000 games"] -->|"invents"| P["fold(⊕, board, cell) = 0<br/>a width-free program"]
     P -->|"zero-shot · no retraining"| B["8-pile Nim<br/>362,880 positions · 400/400 optimal"]
+    P -->|"seed + 3,000 more games —<br/>the value loop keeps the rule in charge"| B2["8-pile Nim, retrained<br/>400/400 optimal"]
     S["8-pile Nim from scratch<br/>3,000 games"] -.->|"space too big to discover in"| F["no rule found<br/>≈ chance play"]
     class A small
     class P prog
-    class B big
+    class B,B2 big
     class S,F fail
 ```
 
@@ -90,6 +91,7 @@ flowchart LR
     T --> S2["② anchors"]
     T --> S3["③ Bellman"]
     T --> S4["④ concepts"]
+    S4 -.->|"heals — the value loop"| S3
     S1 --> V{{"variance<br/>arbitration"}}
     S2 --> V
     S3 --> V
@@ -559,9 +561,10 @@ converges to optimal.
 ## The value loop: discoveries repair the evidence
 
 And where coverage *can't* be given, the discovered concepts hand it back. A Bellman
-backup can only take its max over replies somebody **played** — so at 1% coverage, a
-position whose refutation was never visited *looks safe*, and that false safety
-propagates into the exact signal competitive play trusts first. The value loop closes
+backup can only take its max over replies somebody **played** — and when ~93% of
+positions have never been visited, a position whose refutation is among them *looks
+safe*, and that false safety propagates into the exact signal competitive play trusts
+first. The value loop closes
 the leak with the library's own discoveries: every time the evidence has doubled, the
 backup is re-run over **all** legal replies, with the never-played ones priced by the
 concepts.
@@ -572,7 +575,7 @@ flowchart LR
     classDef he fill:#9a3412,stroke:#7c2d12,color:#ffedd5
     classDef di fill:#065f46,stroke:#047857,color:#d1fae5
     classDef pl fill:#1f2937,stroke:#475569,color:#e5e7eb
-    P(["self-play<br/>writes evidence"]):::pl --> S["values re-derived<br/>from raw counts"]:::ev
+    P(["self-play<br/>writes evidence"]):::pl -->|"when the evidence<br/>has doubled"| S["values re-derived<br/>from raw counts"]:::ev
     S --> H["concepts price the<br/>replies nobody played"]:::he
     H --> D["concepts re-distilled from<br/>the completed values"]:::di
     D --> H2["values re-healed<br/>with the fresh rules"]:::he

@@ -297,18 +297,18 @@ board it is given, and serializes with no board size attached. So the nim-sum di
 game's database (`ConceptLibrary.seed_from`): the programs carry over, their worth is re-fit
 locally.
 
-Measured (see `scripts/transfer_demo.py`):
+Measured (run `wise-explorer transfer --full`):
 
 - **n=4** (120 positions): discovers the nim-sum, plays 96/96 winning positions optimally.
 - **zero-shot n=8** (362,880 positions): the n=4 library, with **no n=8 data**, plays
   400/400 sampled winning positions optimally.
-- **from-scratch n=8 control**, 3000 games: never finds the rule; ~chance play. The space
+- **from-scratch n=8 control**, 3,000 games: never finds the rule; ~chance play. The space
   is too big to discover in, but the rule never needed discovering there.
-
-The honest caveat: *retraining* the seeded library on n=8's own self-play **degrades** it
-(the values at 1.65% state-space coverage are biased, and a refit can't beat bad targets).
-Transfer beats retrain; making retraining-at-scale safe is open work — the bottleneck is
-value quality, not discovery.
+- **seeded-then-retrained n=8**, 3,000 games: **400/400** — indistinguishable from
+  zero-shot. This used to be the honest caveat: refitting on n=8's own coverage-starved
+  values *degraded* the library, because a fit can't beat bad targets. The
+  [value loop](value-loop.md) removed the bad targets — discovery now fits values the
+  concepts have already healed — and retraining at scale became safe.
 
 ## Running it
 
@@ -342,10 +342,12 @@ and a closing KEY that translates every fold the rules use.
 - **Soft values.** Self-play values are noisy, mixed-quality averages, so loss leaves sit around
   0.3–0.4 rather than 0; the rule *structure* is exact even when the numbers are soft.
 - **Discovery is only as good as the values it fits.** On a game too large to cover, the
-  Bellman values stay biased and a fit will happily "explain" their noise (we measured this
-  at 8-pile Nim — and also measured that weighting boards by evidence does *not* fix it; the
-  bad targets, not the vote counting, are the bottleneck). That is exactly why transfer
-  matters: discover where the values can converge, apply where they can't.
+  *evidence-only* Bellman values stay biased and a fit will happily "explain" their noise
+  (measured at 8-pile Nim — and weighting boards by evidence does *not* fix it; the bad
+  targets, not the vote counting, are the bottleneck). The [value loop](value-loop.md) is
+  the system's answer: discovery fits values the library has already healed, which is what
+  makes retraining at scale safe. Where the library knows *nothing*, the limit stands —
+  discover where values can converge, transfer to where they can't.
 
 ## Lineage
 

@@ -169,8 +169,9 @@ def run_invent(argv: list[str]) -> None:
 
 def run_transfer(argv: list[str]) -> None:
     """`wise-explorer transfer` — discover the nim-sum on 4-pile Nim, then play a
-    much bigger Nim perfectly with zero training on it. --full adds the honest
-    controls (from-scratch fails; retraining the seeded library degrades it)."""
+    much bigger Nim perfectly with zero training on it. --full adds the controls
+    (from-scratch never finds the rule; seeded retraining holds 400/400 because
+    the value loop keeps the rule in charge)."""
     import random
     import sqlite3
     import tempfile
@@ -284,12 +285,12 @@ def run_transfer(argv: list[str]) -> None:
     train(mem8, n, 3000)
     o, w = optimal_sampled(by_memory(mem8, n), n)
     survives = any(str(c) == "fold(⊕, board, cell) = 0" for c in mem8.concept_library.kept)
-    print(f"  optimal {o}/{w} — the nim-sum {'survives' if survives else 'was LOST'}. Training"
-          " at ~1% coverage would")
-    print("  normally bury the rule under coverage-biased Bellman backups; the value loop"
-          " instead uses the")
-    print("  rule to price the replies training never played, healing that signal"
-          " (docs/value-loop.md).")
+    print(f"  optimal {o}/{w} — the nim-sum {'survives' if survives else 'was LOST'}. With"
+          " ~93% of positions never")
+    print("  visited, training would normally bury the rule under coverage-biased Bellman"
+          " backups; the value loop")
+    print("  instead uses the rule to price the replies training never played, healing"
+          " that signal (docs/value-loop.md).")
     mem8.close()
 
 

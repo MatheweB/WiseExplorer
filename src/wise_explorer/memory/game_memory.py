@@ -477,10 +477,11 @@ class GameMemory(ABC):
         nobody has played so the backup stops trusting blind spots, and ``rebuild`` then
         fits discovery on the completed values — the system's best current belief — before
         a final heal with the rules just distilled. (Measured, seeded 8-pile Nim: fitting
-        on evidence-only values instead collapses play 80→32/200 — at 1% coverage the
-        un-healed backup is mostly noise and the refit shreds the transferred rules.
-        Fitting on healed values holds ~94%. The guard against self-echo is the evidence
-        re-anchor plus the MDL gate, not starving discovery of its own signal.)
+        on evidence-only values instead collapses play 80→32/200 — with ~93% of positions
+        never visited the un-healed backup is mostly noise and the refit shreds the
+        transferred rules. Fitting on healed values holds ~99%. The guard against
+        self-echo is the evidence re-anchor plus the MDL gate, not starving discovery of
+        its own signal.)
 
         This is discovery's only venue — between calls the library is the last considered
         fit. Without a ``game`` the heals are skipped (values stay evidence-only)."""
