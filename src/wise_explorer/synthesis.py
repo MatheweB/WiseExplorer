@@ -174,25 +174,32 @@ class Concept:
 
 # ───────────────────────────── MDL helpers ─────────────────────────────────────
 
-def _classes(V: np.ndarray, lo: float, hi: float) -> np.ndarray:
-    c = np.ones(len(V), dtype=int); c[V < lo] = 0; c[V > hi] = 2; return c   # LOSS/DRAW/WIN
+# How a node's values are priced, in bits. No buckets and no thresholds: each value
+# contributes *fractional* mass to the two outcome anchors it sits between — {0, ½, 1},
+# the game's own utility scale — and the node costs the Shannon entropy of those masses.
+# (Measured 2026-06 against hard LOSS/DRAW/WIN cuts at 0.40/0.60: same nim-sum, same
+# zero-shot transfer, slightly better TTT play, half the duplicate threat spellings, less
+# junk at scale, faster — and nothing hand-placed. The cuts were deleted.
+# Also measured and rejected: weighting each board's say by its evidence — it bloated the
+# converged library and worsened play; junk fits noise in the values themselves, which no
+# row-weighting can repair. One row, one vote.)
+
+def _soft_counts(v: np.ndarray) -> np.ndarray:
+    """Each value's fractional LOSS/DRAW/WIN mass — linear interpolation between the two
+    outcome anchors it sits between (V=0.59 ⇒ 0.82 draw + 0.18 win)."""
+    ml = np.maximum(0.0, 1.0 - 2.0 * v)                  # 1 at V=0, 0 from V=½ up
+    mw = np.maximum(0.0, 2.0 * v - 1.0)                  # 0 up to V=½, 1 at V=1
+    return np.array([ml.sum(), len(v) - ml.sum() - mw.sum(), mw.sum()])
 
 
-# Note (measured, 2026-06): weighting each board's say by its evidence (games seen, or the
-# value's posterior precision) was benched against this unweighted fit on the n=4→n=8
-# transfer and LOST on both ends — it bloated the converged n=4 library and worsened n=8
-# play. The junk a noisy run keeps does not live on under-visited rows; it fits noise in the
-# *values* themselves, which no row-weighting can repair. One row, one vote.
-def _bits(cl: np.ndarray) -> float:
-    n = len(cl)
+def _bits(v: np.ndarray) -> float:
+    """Bits to code a node's values as outcome mixtures: n · H(soft LOSS/DRAW/WIN masses).
+    Zero iff the node is pure (all its mass on one anchor); continuous in between."""
+    n = len(v)
     if n == 0:
         return 0.0
-    h = 0.0
-    for k in (0, 1, 2):
-        p = (cl == k).mean()
-        if p > 0:
-            h -= p * math.log2(p)
-    return h * n
+    p = _soft_counts(v) / n
+    return float(-sum(pk * math.log2(pk) for pk in p if pk > 0)) * n
 
 
 # ───────────────────────────── bottom-up synthesis (obs-equivalence) ───────────
@@ -399,30 +406,34 @@ class Rule:
         return " AND ".join((str(c) if t else f"¬[{c}]") for c, t in self.path)
 
 
-def _build_rules(concepts: List[Concept], CL: np.ndarray, V: np.ndarray, min_leaf: int, max_depth: int):
+def _verdict(v: np.ndarray) -> str:
+    return ["LOSS", "DRAW", "WIN"][int(_soft_counts(v).argmax())]   # heaviest outcome mass
+
+
+def _build_rules(concepts: List[Concept], V: np.ndarray, min_leaf: int, max_depth: int):
     rules: List[Rule] = []
     split_cost = math.log2(max(len(concepts), 2)) + 2.0   # MDL: a split must beat its own description
 
     def grow(idx, path):
-        cl = CL[idx]; n = len(idx)
-        here = _bits(cl)
-        verd = ["LOSS", "DRAW", "WIN"][int(np.bincount(cl, minlength=3).argmax())]
+        v = V[idx]; n = len(idx)
+        here = _bits(v)
+        verd = _verdict(v)
         if n < 2 * min_leaf or here < 1e-6 or len(path) >= max_depth:
-            rules.append(Rule(list(path), verd, n, float(V[idx].mean()), here)); return
+            rules.append(Rule(list(path), verd, n, float(v.mean()), here)); return
         best = None
         for con in concepts:
             m = con.mask[idx]; nl = int(m.sum())
             if nl < min_leaf or n - nl < min_leaf:
                 continue
-            g = here - (_bits(cl[m]) + _bits(cl[~m]))
+            g = here - (_bits(v[m]) + _bits(v[~m]))
             if best is None or g > best[0]:
                 best = (g, con, m)
         if best is None or best[0] <= split_cost:
-            rules.append(Rule(list(path), verd, n, float(V[idx].mean()), here)); return
+            rules.append(Rule(list(path), verd, n, float(v.mean()), here)); return
         _, con, m = best
         grow(idx[m], path + [(con, True)]); grow(idx[~m], path + [(con, False)])
 
-    grow(np.arange(len(CL)), [])
+    grow(np.arange(len(V)), [])
     return rules
 
 
@@ -431,14 +442,14 @@ def _model_bits(rules: List[Rule], n_atoms: int) -> float:
     return sum(len(r.path) * a + math.log2(3) for r in rules)
 
 
-def _fit(kept: List[Concept], B, V, M, CL, min_leaf) -> Tuple[List[Rule], float, float]:
+def _fit(kept: List[Concept], B, V, M, min_leaf) -> Tuple[List[Rule], float, float]:
     """Fit the existing library to this data: re-derive each concept's mask on these boards,
     rebuild the rule tree over them, and report ``(rules, resid, model)`` — how well what we
     already know explains what we now see."""
     for c in kept:
         v = c.expr.eval(B, M)
         c.mask = (v == c.const) if c.op == "=" else (v > c.const)
-    rules = _build_rules(kept, CL, V, min_leaf, max_depth=6)
+    rules = _build_rules(kept, V, min_leaf, max_depth=6)
     return rules, sum(r.resid for r in rules), _model_bits(rules, max(len(kept), 2))
 
 
@@ -471,7 +482,7 @@ class InventionResult:
 _BITS_PER_SYMBOL = math.log2(12)
 
 
-def _invent_round(kept, prior_rules, resid, model, B, V, M, CL, min_leaf, base, max_size, cap):
+def _invent_round(kept, prior_rules, resid, model, B, V, M, min_leaf, base, max_size, cap):
     """One round of invention: reuse ``kept`` as size-1 building blocks, search for new
     concepts, and keep what the rule tree actually uses iff it pays for itself in bits.
     Returns (new_used, rules, resid, model, data_saved, cost, paid); on an empty round it
@@ -489,7 +500,7 @@ def _invent_round(kept, prior_rules, resid, model, B, V, M, CL, min_leaf, base, 
     pool_new = [c for c in (extra_atoms + cands) if c.mask.tobytes() not in have][:POOL]
     if not pool_new:
         return [], prior_rules, resid, model, 0.0, 0.0, False
-    rules = _build_rules(kept + pool_new, CL, V, min_leaf, max_depth=6)
+    rules = _build_rules(kept + pool_new, V, min_leaf, max_depth=6)
     used, used_keys = [], set()                        # charge only for what the tree uses
     for r in rules:
         for con, _ in r.path:
@@ -507,8 +518,7 @@ def _invent_round(kept, prior_rules, resid, model, B, V, M, CL, min_leaf, base, 
 
 
 def invent_from_boards(B: np.ndarray, V: np.ndarray, M: Optional[np.ndarray] = None, *,
-                       max_rounds: int = 4, lo: float = 0.40, hi: float = 0.60,
-                       max_size: Optional[int] = None, cap="auto",
+                       max_rounds: int = 4, max_size: Optional[int] = None, cap="auto",
                        seed: Optional[List["Concept"]] = None) -> InventionResult:
     """Run the multi-round concept-invention loop on boards B with values V.
 
@@ -524,7 +534,6 @@ def invent_from_boards(B: np.ndarray, V: np.ndarray, M: Optional[np.ndarray] = N
     over them, so a sufficient seed yields a valid model even when no new concept is added.
     """
     N, n_cells = B.shape
-    CL = _classes(V, lo, hi)
     if max_size is None:
         max_size = 7 if n_cells <= 5 else 5     # reach: narrow boards may still need size-7 programs
     if cap == "auto":
@@ -536,11 +545,11 @@ def invent_from_boards(B: np.ndarray, V: np.ndarray, M: Optional[np.ndarray] = N
     base += [Lit(v) for v in sorted(set(int(x) for x in np.unique(B)) | {0, 1})]
 
     rounds: List[RoundInfo] = []
-    baseline = _bits(CL)
+    baseline = _bits(V)
     # carry the seed in: fit it to THESE boards and start the model from it
     kept: List[Concept] = list(seed) if seed else []
     if kept:
-        final_rules, resid, model = _fit(kept, B, V, M, CL, min_leaf)
+        final_rules, resid, model = _fit(kept, B, V, M, min_leaf)
     else:
         final_rules, resid, model = [], baseline, 0.0
 
@@ -548,7 +557,7 @@ def invent_from_boards(B: np.ndarray, V: np.ndarray, M: Optional[np.ndarray] = N
         # Round 1 folds over the whole board (seeding e.g. the nim-sum); later rounds reuse
         # what was kept and fold over the groups it discovered.
         new_used, rep_rules, rep_resid, new_model, data_saved, cost, paid = _invent_round(
-            kept, final_rules, resid, model, B, V, M, CL, min_leaf, base, max_size, cap)
+            kept, final_rules, resid, model, B, V, M, min_leaf, base, max_size, cap)
         rounds.append(RoundInfo(k, new_used, rep_rules, rep_resid, data_saved, cost, paid))
         if not paid:
             break
@@ -666,9 +675,9 @@ def grow(table: BoardTable, kept, floor, searched_n, max_size=None, cap="auto"):
     N = len(B)
     if N < 8:
         return kept, [], floor, searched_n
-    CL = _classes(V, 0.40, 0.60); min_leaf = max(3, N // 200)
-    baseline = _bits(CL)
-    rules, resid, _ = _fit(kept, B, V, M, CL, min_leaf) if kept else ([], baseline, 0.0)
+    min_leaf = max(3, N // 200)
+    baseline = _bits(V)
+    rules, resid, _ = _fit(kept, B, V, M, min_leaf) if kept else ([], baseline, 0.0)
     frac = resid / baseline if baseline > 0 else 0.0
     due = searched_n is None or N >= 2 * searched_n
     insufficient = (not kept) or floor is None or frac > floor + 1e-9
@@ -768,8 +777,74 @@ def invent(memory, game_id: Optional[str] = None, **kw) -> InventionResult:
     return invent_from_boards(B, V, M, **kw)
 
 
+def meaning(c: Concept) -> Optional[str]:
+    """A plain-English reading of a fold concept, side by side with its formula.
+
+    Derived, never asserted: a fold body over g-cell lines has only the (played, empty)
+    pairs with played + empty ≤ g as possible inputs, so we enumerate the body over all of
+    them and say which line-states the threshold picks out ("them" = g − played − empty).
+    Returns ``None`` for concepts that are already readable (plain cell arithmetic)."""
+    e = c.expr.inner if isinstance(c.expr, Named) else c.expr
+    if not isinstance(e, Fold) or c.op != "=":
+        return None
+    if isinstance(e.domain, BoardDomain):
+        word = _WORD.get(e.op, e.op)
+        body = "every cell" if isinstance(e.body, Elem) else f"{e.body} over every cell"
+        return f"the {word} of {body} is {c.const}"
+    if not isinstance(e.domain, GroupDomain):
+        return None
+    sizes = {len(g) for g in e.domain.groups}
+    if len(sizes) != 1:
+        return None                                          # mixed-size groups: no single table
+    g = sizes.pop()
+    pairs = [(p, emp) for p in range(g + 1) for emp in range(g + 1 - p)]
+    vals = e.body.eval(np.array(pairs, dtype=np.int64))
+    by_val: Dict[int, List[str]] = {}
+    for (p, emp), v in zip(pairs, vals):
+        by_val.setdefault(int(v), []).append(f"you {p} · empty {emp} · them {g - p - emp}")
+    # the gloss speaks the program's own vocabulary: the formula says "groups" (the regions
+    # the search discovered — lines in Tic-Tac-Toe, whatever they are elsewhere), so the
+    # reading says "group" — no game-specific words are ever introduced
+    if e.op in ("max", "min") and c.const in by_val:
+        hits = by_val[c.const]
+        if e.op == "max":
+            # whichever reading is shorter: the states the top group may be, or — when the
+            # threshold sits low — the states no group is allowed to reach above it
+            above = [d for v, ds in by_val.items() if v > c.const for d in ds]
+            if above and len(above) < len(hits):
+                return f"no group is {' or '.join(above)}"
+            return f"the top-scoring group: {' or '.join(hits)}"
+        return f"the lowest-scoring group: {' or '.join(hits)}"
+    if e.op == "+":
+        scores = "; ".join(f"{d} → {v}" for v in sorted(by_val) if v != 0 for d in by_val[v])
+        return f"group scores ({scores}) sum to {c.const}"
+    return None
+
+
+def _fold_groups(concepts) -> List[Tuple[int, ...]]:
+    """The distinct cell-regions the group-folds among ``concepts`` walk, in first-seen
+    order — so a reading like "the top-scoring group" can be grounded in actual cells."""
+    out, seen = [], set()
+    for c in concepts:
+        e = c.expr.inner if isinstance(c.expr, Named) else c.expr
+        if isinstance(e, Fold) and isinstance(e.domain, GroupDomain):
+            for g in e.domain.groups:
+                if g not in seen:
+                    seen.add(g); out.append(g)
+    return out
+
+
+def _groups_line(concepts) -> Optional[str]:
+    regions = _fold_groups(concepts)
+    if not regions:
+        return None
+    cells = " ".join("(" + "·".join(f"c{i}" for i in g) + ")" for g in regions)
+    return f"groups = the board regions it discovered: {cells}"
+
+
 def render(res: InventionResult, label: str = "") -> str:
-    """Human-readable report of an invention run."""
+    """Human-readable report of an invention run. Every fold concept is shown side by side
+    with its derived plain-English reading (⟺ lines), so the raw output is never lost."""
     out: List[str] = []
     out.append("")
     out.append(f"══ CONCEPT INVENTION{(' — ' + label.upper()) if label else ''} ══"
@@ -783,6 +858,9 @@ def render(res: InventionResult, label: str = "") -> str:
                        f"({len(r.new_concepts)} concept{'s' if len(r.new_concepts) != 1 else ''} invented)")
             for c in r.new_concepts:
                 out.append(f"        + {c}")
+                m = meaning(c)
+                if m:
+                    out.append(f"          ⟺ {m}")
         else:
             out.append(f"ROUND {r.number}  ✗ stop — saved {r.data_saved:,.0f} bits  vs  {r.cost:,.0f} cost   "
                        f"(nothing new pays for itself)")
@@ -792,4 +870,20 @@ def render(res: InventionResult, label: str = "") -> str:
     out.append("RULES it builds from the invented concepts:")
     for rule in sorted(res.rules, key=lambda r: -r.avg):
         out.append(f"   [{rule.verdict:<4}] n={rule.n:<5} avg={rule.avg:.2f}   {rule.render()}")
+    # the key: every fold used by a rule, with its derived reading — formulas above stay verbatim
+    used, seen = [], set()
+    for rule in res.rules:
+        for con, _ in rule.path:
+            key = str(con)
+            if key not in seen and meaning(con):
+                seen.add(key); used.append(con)
+    if used:
+        out.append("")
+        out.append("KEY — each fold above, in plain terms (derived from the program, not asserted):")
+        gl = _groups_line(used)
+        if gl:
+            out.append(f"   {gl}")
+        for con in used:
+            out.append(f"   {con}")
+            out.append(f"      ⟺ {meaning(con)}")
     return "\n".join(out)

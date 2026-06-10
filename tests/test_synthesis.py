@@ -117,6 +117,35 @@ class TestScaleInvariance:
             assert nimsum.holds(row) == expected
 
 
+class TestMeaning:
+    """meaning() derives a plain-English reading by enumerating the program over its
+    finite input space — game-agnostic: it keys off the domain, never the game."""
+
+    def test_board_fold_reads_as_english(self):
+        c = S.Concept(S.Fold("⊕", S.BoardDomain(), S.Elem(0, S.BoardDomain.names)),
+                      "=", 0, np.zeros(2, dtype=bool), 2)
+        assert S.meaning(c) == "the xor of every cell is 0"
+
+    def test_threat_gloss_is_derived_not_asserted(self):
+        e = lambda j: S.Elem(j, S.GroupDomain.names)
+        body = S.BinOp("⊕", e(0), S.BinOp("max", e(0), e(1)))      # played xor (played max empty)
+        fold = S.Fold("max", S.GroupDomain([(0, 1, 2), (3, 4, 5)]), body)
+        c = S.Concept(fold, "=", 1, np.zeros(2, dtype=bool), fold.size)
+        assert S.meaning(c) == "the top-scoring group: you 0 · empty 1 · them 2"
+
+    def test_gloss_adapts_to_any_group_size(self):
+        # 4-cell groups (e.g. a connect-four-like game): the enumeration follows the size
+        e = lambda j: S.Elem(j, S.GroupDomain.names)
+        body = S.BinOp("∣·∣", e(0), S.BinOp("min", e(0), e(1)))    # played dist (played min empty)
+        fold = S.Fold("max", S.GroupDomain([(0, 1, 2, 3)]), body)
+        c = S.Concept(fold, "=", 4, np.zeros(2, dtype=bool), fold.size)
+        assert S.meaning(c) == "the top-scoring group: you 4 · empty 0 · them 0"
+
+    def test_plain_cell_arithmetic_keeps_its_formula(self):
+        c = S.Concept(S.BinOp("&", S.Cell(0), S.Cell(4)), "=", 0, np.zeros(2, dtype=bool), 3)
+        assert S.meaning(c) is None                               # already readable as-is
+
+
 class TestGroupCounting:
     def test_counts_played_and_empty_at_face_value(self):
         # the board is never recoded — counts compare to the move (== m) and to empty (== 0);

@@ -34,19 +34,36 @@ wise-explorer invent -g nim --fresh 10000
 
 ## …and the theorem transfers: discover small, play big
 
-Because the invented rule is a width-free **program** — `fold(⊕, board, cell)` reads
-*every* pile of whatever board it is handed — knowledge learned on a small game applies
-to a big one unchanged. The library trained only on 4-pile Nim (120 positions) plays
-**8-pile Nim** (362,880 positions, a state space ~3000× larger) **perfectly, zero-shot**:
+The invented rule is a width-free **program**, not a lookup table:
+
+$$\text{fold}(\oplus,\ \text{board},\ \text{cell}) \;=\; \text{pile}_1 \oplus \text{pile}_2 \oplus \cdots \oplus \text{pile}_n \quad\text{for any } n$$
+
+so knowledge learned on a small game applies to a big one unchanged. The library trained
+only on 4-pile Nim (120 positions) plays **8-pile Nim** (362,880 positions, a state space
+~3000× larger) **perfectly, zero-shot**:
 
 | | trained on | plays 8-pile Nim | optimal moves |
 |---|---|---|:--:|
 | **zero-shot transfer** | 4-pile only (120 positions) | with no 8-pile data at all | **400/400** |
 | from-scratch control | 8-pile, 3000 games | after seeing 1.65% of the space | 51/400 (≈ chance) |
 
-The from-scratch agent can't find the rule in a space that big — but it never needed to.
-The rule was discoverable where the game was small, and a program doesn't care how wide
-the board is. Run the whole experiment (~30 s):
+```mermaid
+flowchart LR
+    classDef small fill:#0e7490,stroke:#155e75,color:#ecfeff
+    classDef prog  fill:#9a3412,stroke:#7c2d12,color:#ffedd5
+    classDef big   fill:#065f46,stroke:#047857,color:#d1fae5
+    classDef fail  fill:#7f1d1d,stroke:#b91c1c,color:#fee2e2
+    A["4-pile Nim<br/>120 positions · 2,000 games"] -->|"invents"| P["fold(⊕, board, cell) = 0<br/>a width-free program"]
+    P -->|"zero-shot · no retraining"| B["8-pile Nim<br/>362,880 positions · 400/400 optimal"]
+    S["8-pile Nim from scratch<br/>3,000 games"] -.->|"space too big to discover in"| F["no rule found<br/>≈ chance play"]
+    class A small
+    class P prog
+    class B big
+    class S,F fail
+```
+
+The from-scratch agent can't find the rule in a space that big — but it never needed to be
+found there. Discover where the game is small; apply where it is big. Run it yourself (~30 s):
 
 ```bash
 python scripts/transfer_demo.py          # discover on n=4, play n=8 zero-shot
@@ -146,28 +163,34 @@ epochs before strong play emerges.
 Most game AIs evaluate **positions** (*how good is this board?*). Wise Explorer evaluates
 **transitions** (*this board → that board, and what became of the player who moved?*).
 The outcome is always stored **from the mover's perspective** — and that single choice is
-what makes everything else game- and player-count-agnostic.
+what makes everything else game- and player-count-agnostic. Watch one game decompose:
 
 ```mermaid
 flowchart LR
     classDef b fill:#1f2937,stroke:#475569,color:#e5e7eb
     classDef w fill:#065f46,stroke:#047857,color:#d1fae5
-    F["board before<br/>(from_hash)"] -->|"a move"| T2["board after<br/>(to_hash)"]
-    T2 --> R["this mover went on to WIN<br/>⇒ +1 WIN on this from → to"]
-    R -.->|"pooled over<br/>thousands of games"| Tally["from → to<br/>W=128 · T=14 · L=37<br/>→ win-rate ≈ 0.74"]
-    class F,T2 b
-    class R,Tally w
+    classDef l fill:#7f1d1d,stroke:#b91c1c,color:#fee2e2
+    subgraph G["one self-play game — X eventually wins"]
+      B0["board₀"] -->|"X moves"| B1["board₁"]
+      B1 -->|"O moves"| B2["board₂"]
+      B2 -->|"X moves"| B3["board₃ ✦"]
+    end
+    B1 -.-> T1["board₀ → board₁<br/>mover was X ⇒ tally <b>+WIN</b>"]
+    B2 -.-> T2["board₁ → board₂<br/>mover was O ⇒ tally <b>+LOSS</b>"]
+    B3 -.-> T3["board₂ → board₃<br/>mover was X ⇒ tally <b>+WIN</b>"]
+    class B0,B1,B2,B3 b
+    class T1,T3 w
+    class T2 l
 ```
 
-| What it buys | Why |
-|---|---|
-| **No turn bookkeeping** | "A win is a win for whoever moved" — boards are just hashed integer arrays |
-| **Any number of players, any order** | each player records *its own* moves tagged with *its own* result; nothing counts players |
-| **Evidence compounds** | the same `from → to` reached by different move orders pools into one tally |
+The *same game* feeds opposite tallies — each move is credited with **its own mover's**
+eventual result, so nobody tracks whose turn it is, and the same `from → to` reached in
+other games pools into one tally (`W=128 · T=14 · L=37 → 0.74`).
 
-So a new game only has to describe its boards and say who won
-([custom games ↓](#implementing-a-custom-game)). The learner never knows it's playing Nim
-versus chess — only that some moves tend to precede wins.
+Because every player records *its own* moves tagged with *its own* result, the identical
+loop runs for two players or seven. A new game only has to describe its boards and say who
+won ([custom games ↓](#implementing-a-custom-game)) — the learner never knows it's playing
+Nim versus chess, only that some moves tend to precede wins.
 
 ---
 
@@ -184,9 +207,13 @@ questions:
 | ④ | **concept** | "What does the *formula I invented* say this is worth?" | ✅ the only one |
 
 **The deciding move** — variance arbitration — is what makes the agent tick. For each
-signal it asks *"how much do you actually disagree about these moves?"* (their variance
-across the moves on offer) and trusts the **most discriminating** one. A signal that
-scores every move alike is, by construction, useless for *this* decision.
+signal it computes how much it actually disagrees about the `k` moves on offer,
+
+$$\mathrm{Var}(s) \;=\; \tfrac{1}{k}\sum_{i=1}^{k}\bigl(s_i - \bar{s}\bigr)^2
+\qquad\begin{aligned} s_i &= \text{signal } s\text{'s score for move } i\\ \bar{s} &= \text{the mean of those } k \text{ scores}\end{aligned}$$
+
+and trusts the **most discriminating** one. A signal that scores every move alike has
+variance ≈ 0 — useless for *this* decision, by construction.
 
 | signal | move A | move B | move C | variance | rank |
 |---|:--:|:--:|:--:|:--:|:--|
@@ -197,23 +224,24 @@ scores every move alike is, by construction, useless for *this* decision.
 
 *Ranked by the sharpest signal, ties broken by the next ⇒ the agent plays **move B**.*
 
-Here **Bellman** sharply separates the moves — one a forced loss (`0.00`), one a forced win
-(`1.00`) — so it decides, and the flat statistical signals are (correctly) ignored. In a
-midgame Tic-Tac-Toe position the Bellman values might all be flat while clustered
-statistics do the separating — and the *same* mechanism quietly switches to trusting
-**anchor**. **The data decides; nothing is hard-coded.**
-
-This arbitration is **competitive play's** rule, refined to **reliability-first**: the
-de-noised Bellman value ranks primary and the rest only break ties, since raw-count noise
-inflates discrimination and would otherwise override a correct Bellman value. **Training**
-explores by a different and far simpler rule, [below ↓](#self-play-training).
+Here **Bellman** separates a forced loss (`0.00`) from a forced win (`1.00`), so it decides.
+In a midgame position where Bellman is flat, the *same* mechanism switches to whichever
+signal does separate — **the data decides; nothing is hard-coded.** (Competitive play
+refines this to reliability-first: Bellman ranks primary and the rest break ties, since
+raw-count noise would otherwise out-shout a correct value. Training explores by a different
+rule, [below ↓](#self-play-training).)
 
 <details>
 <summary><b>Under the hood: how each signal is computed</b></summary>
 
-- **① solo** — the raw win/tie/loss tally for this transition, scored with a **Bayesian
-  mean** (`α = 1` pseudocounts) so a move seen once or twice sits near `0.5` instead of
-  swinging on a lucky result ([`core/types.py`](src/wise_explorer/core/types.py)).
+- **① solo** — the raw win/tie/loss tally `(w, t, l)` for this transition, scored with a
+  **Bayesian mean**:
+
+  $$\text{score} = \frac{(w+1)\cdot 1 + (t+1)\cdot \tfrac12 + (l+1)\cdot 0}{w+t+l+3}$$
+
+  Wins are worth 1, ties ½, losses 0; the three `+1`s are *pseudocounts* — one imaginary
+  game of each outcome (hence the `+3` below) — so a move seen once sits near `0.5` instead
+  of swinging on a lucky result ([`core/types.py`](src/wise_explorer/core/types.py)).
 - **② anchor** — positions whose win/tie/loss distributions are *statistically
   indistinguishable* are clustered, and a thinly-seen position borrows its cluster's pooled
   stats:
@@ -255,24 +283,108 @@ trains*.
 
 The whole language is three primitives — cell reads, arithmetic/bitwise operators, and one
 combinator, **`fold(op, domain, body)`**: reduce a formula over a region of the board.
-Everything it has ever discovered is some nesting of that one shape:
+Everything it has ever discovered is some nesting of that one shape, and each round builds
+its concepts *out of* the previous round's. The same loop grows a different tower per game:
 
-| discovered concept | what it is |
-|---|---|
-| `fold(⊕, board, cell) = 0` | the **nim-sum** — xor every pile (width-free: any board size) |
-| `(c0 and (c4 and c8)) = 0` | a Tic-Tac-Toe **line** — found as a region, not given |
-| `fold(max, groups, …played…empty…) = 1` | a **threat** — "some discovered line is one move from won" |
+```mermaid
+flowchart TD
+    classDef raw fill:#1f2937,stroke:#475569,color:#e5e7eb
+    classDef one fill:#0e7490,stroke:#155e75,color:#ecfeff
+    classDef two fill:#065f46,stroke:#047857,color:#d1fae5
+    subgraph NIM["Nim — one story was enough"]
+      NC["cells — the piles"]
+      NS["fold(⊕, board, cell) = 0<br/>⟺ the xor of every cell is 0 — <b>the nim-sum</b>"]
+      NC -->|"round 1 · fold the whole board"| NS
+    end
+    subgraph TTT["Tic-Tac-Toe — two stories"]
+      TC["cells — c0 … c8"]
+      TL["(c0 and (c4 and c8)) = 0 · (c0 and (c3 and c6)) = 0 · …<br/><b>the lines</b> — found as regions, not given"]
+      TT["fold(max, groups, (played xor (played max empty))) = 1<br/>⟺ top-scoring group: you 0 · empty 1 · them 2 — <b>a threat</b>"]
+      TC -->|"round 1 · arithmetic over cells"| TL
+      TL -->|"round 2 · each line becomes a group,<br/>read against the move: played · empty"| TT
+    end
+    class NC,TC raw
+    class NS,TL one
+    class TT two
+```
 
-**How discovery works.** The engine enumerates small programs bottom-up, keeps one
-representative per distinct behavior, and asks of each: *does splitting the data on you
-make the win/loss record cheaper to describe?* A concept is kept only if the bits of data
-it explains outweigh the bits its own formula costs — **Minimum Description Length**
-(Rissanen), the same "shortest program that fits" idea behind library learners like
-DreamCoder and Poesia & Goodman's [Peano](https://arxiv.org/abs/2211.15864). Kept concepts
-become size-1 building blocks for the next round — so round 1 finds *lines*, and round 2,
-folding over those lines, finds *threats*. The loop stops the moment a round no longer
-pays for itself: on Nim that's after one concept; games too sparse to support any
-(mini-chess at feasible scale) get **none** — declining is a feature.
+Nim stops at one story because the nim-sum already explains everything; Tic-Tac-Toe keeps
+climbing because threats only become *expressible* once lines exist to fold over. The
+height of the tower is decided by the data, not by a schedule.
+
+**How concepts are made — a loop whose judge is a tree.** Not a decision tree *or* an
+iterative search: an iterated loop in which each round's candidates audition inside one
+greedy decision tree, and only what the tree actually uses survives:
+
+```mermaid
+flowchart TD
+    classDef step fill:#1f2937,stroke:#475569,color:#e5e7eb
+    classDef tree fill:#0e7490,stroke:#155e75,color:#ecfeff
+    classDef gate fill:#9a3412,stroke:#7c2d12,color:#ffedd5
+    classDef out  fill:#065f46,stroke:#047857,color:#d1fae5
+    P["1 · PROPOSE<br/>enumerate every small program over the current language,<br/>keep one per distinct behavior, rank by value-variance removed"]
+    T["2 · AUDITION<br/>grow one greedy tree over library + candidates —<br/>every split must save more bits than it costs"]
+    G{"3 · did the round<br/>pay, in bits?"}
+    K["4 · PROMOTE<br/>concepts the tree used join the library:<br/>each becomes a size-1 block, its cells a foldable group"]
+    R["the last tree IS the model —<br/>its leaves are the WIN / DRAW / LOSS rules"]
+    P --> T --> G
+    G -->|"yes — the language just got richer"| K --> P
+    G -->|"no — stop"| R
+    class P,K step
+    class T tree
+    class G gate
+    class R out
+```
+
+The three stages, briefly — the full anatomy lives in
+[docs/concept-invention.md](docs/concept-invention.md) (enumeration counts, the mask/split
+data structures, a worked split, why one combinator is enough, the honest limits):
+
+- **Propose** is enumeration, not guessing: every program up to a size budget is built
+  smallest-first, the six whole-board folds always offered (`fold(⊕, board, cell)` exists
+  *before* anything knows it matters), and two formulas that behave identically on the
+  data count as one concept — on 3-pile Nim that collapses the formula space to ≈ 13,600
+  distinct behaviors, all scored in one vectorized pass.
+- **Audition**: on the data a program is a *column*, a threshold makes it a *mask*, and a
+  tree node is just an array of row indices the mask partitions. The node goes to the mask
+  saving the most bits:
+
+  $$\text{gain}(c) \;=\; \text{bits}(\text{node}) \;-\; \text{bits}(\text{node} \cap c) \;-\; \text{bits}(\text{node} \setminus c),
+  \qquad \text{bits}(\cdot) = n \cdot H(\text{outcome masses})$$
+
+- **Promote**: what the tree used becomes a size-1 block, its cells a foldable group — a
+  threat is cheap in round 2 only because round 1 already paid for the lines. A concept is
+  kept iff its savings beat its formula cost (`|c| · log₂ 12` — the **MDL** test of
+  Rissanen, DreamCoder, [Peano](https://arxiv.org/abs/2211.15864)); the loop stops the
+  moment a round can't pay. Mini-chess at feasible scale gets **none** — declining is a
+  feature.
+
+**Where the `[WIN]` / `[DRAW]` / `[LOSS]` labels come from.** No thresholds: each board's
+value splits its mass between the two **outcome anchors** it sits between — `{0, ½, 1}`,
+the game's own utility scale. A leaf pools its boards' masses; the heaviest mass names the
+leaf, and the entropy of the masses is the leaf's cost in bits:
+
+```mermaid
+flowchart LR
+    classDef v fill:#1f2937,stroke:#475569,color:#e5e7eb
+    classDef m fill:#0e7490,stroke:#155e75,color:#ecfeff
+    classDef o fill:#065f46,stroke:#047857,color:#d1fae5
+    V1["V = 0.95"] -->|"0.90 win · 0.10 draw"| POOL
+    V2["V = 0.59"] -->|"0.18 win · 0.82 draw"| POOL
+    V3["V = 0.05"] -->|"0.90 loss · 0.10 draw"| POOL
+    POOL["the leaf pools the masses<br/>LOSS 0.90 · DRAW 1.02 · WIN 1.08"]
+    POOL --> VER["label = heaviest mass → [WIN]"]
+    POOL --> COST["cost = n · H(masses)<br/>mixed → expensive → worth splitting"]
+    class V1,V2,V3 v
+    class POOL m
+    class VER,COST o
+```
+
+A value sitting *on* an anchor is pure mass (V = 1.0 is all win); anything between is
+honestly mixed. The label is for reading — play ranks moves by the leaf's *value*, never
+the word. (Hard cuts at 0.40/0.60 used to do this job; benched head-to-head, the soft
+masses matched every result with half the duplicate concepts and less junk, so the cuts
+were deleted.)
 
 **Discovery happens during training.** Each wave of self-play folds its new boards into a
 live table; the library refits cheaply every wave and runs a full search only when the
@@ -282,19 +394,17 @@ converged values produces the model that is persisted and printed. A library can
 **seeded from another game's DB** (`ConceptLibrary.seed_from`) — that's the transfer demo:
 programs carry over; their worth is re-fit locally.
 
-The deep dive — why one combinator is enough, how the move is the only perspective, what
-the honest limits are — is in [docs/concept-invention.md](docs/concept-invention.md).
-
 <details>
 <summary><b>Verified run — Nim, 2,000 self-play games</b></summary>
 
 ```text
 $ wise-explorer invent -g nim --fresh 2000
 
-══ CONCEPT INVENTION — NIM ══   (119 boards · baseline 104 bits to explain)
+══ CONCEPT INVENTION — NIM ══   (119 boards · baseline 146 bits to explain)
 
-ROUND 1  ✓ pays — saved 84 bits  vs  12 cost   (1 concept invented)
+ROUND 1  ✓ pays — saved 70 bits  vs  12 cost   (1 concept invented)
         + fold(⊕, board, cell) = 0
+          ⟺ the xor of every cell is 0
 ROUND 2  ✗ stop — saved 0 bits  vs  0 cost   (nothing new pays for itself)
 
 → stopped after round 1;  1 concept(s) kept.
@@ -302,7 +412,26 @@ ROUND 2  ✗ stop — saved 0 bits  vs  0 cost   (nothing new pays for itself)
 RULES it builds from the invented concepts:
    [WIN ] n=24    avg=0.89   fold(⊕, board, cell) = 0
    [LOSS] n=95    avg=0.08   ¬[fold(⊕, board, cell) = 0]
+
+KEY — each fold above, in plain terms (derived from the program, not asserted):
+   fold(⊕, board, cell) = 0
+      ⟺ the xor of every cell is 0
 ```
+
+Every fold is printed **side by side with a derived reading** (the `⟺` lines): the renderer
+enumerates the program over its possible inputs and states what the threshold picks out —
+derived from the program itself, never hand-labeled. The key also grounds each *group* in
+the cells it was discovered on (groups are regions, not necessarily lines — whatever cell
+arithmetic proved predictive). On Tic-Tac-Toe:
+
+```text
+groups = the board regions it discovered: (c0·c4·c8) (c2·c4·c6) (c0·c1·c2) …
+fold(max, groups, (played xor (played max empty))) = 1
+   ⟺ the top-scoring group: you 0 · empty 1 · them 2
+```
+
+— here the regions are the win-lines, so this reads: *some line holds two opponent pieces
+and one empty cell — they are one move from completing it.*
 
 The engine was never given the rules of Nim, yet it compresses its experience to the
 two-line theorem — provably correct against the nim-sum it was never told about.
@@ -315,28 +444,30 @@ two-line theorem — provably correct against the nim-sum it was never told abou
 ## Game-theoretic propagation (Bellman → N-player)
 
 The Bellman signal runs value iteration over the transition graph. After each game the
-played line is swept **backward**: to score the move that *lands* in a position, the agent
-takes the **best reply available from there** and flips it — *good for them is bad for me*,
-`score = 1 − max(replies)`. Crucially, "best reply" ranges over *every* known reply, not
-just the one played — which is how it sees through a lucky win:
+played line is swept **backward**: to score the move `a` that lands in position `s`, take
+the best reply available *from* `s` and flip it — *good for them is bad for me*:
+
+$$V(a) \;=\; 1 - \max_{b \,\in\, \text{replies}(s)} V(b)
+\qquad\begin{aligned} V(a) &= \text{the mover's value for } a\\ \text{replies}(s) &= \textit{every} \text{ known move out of } s \text{, not just the one played}\end{aligned}$$
+
+Ranging over *every* known reply is how it sees through a lucky win — watch the values
+flow up the tree:
 
 ```mermaid
-flowchart LR
+flowchart TD
     classDef me   fill:#1f2937,stroke:#475569,color:#e5e7eb
     classDef good fill:#065f46,stroke:#047857,color:#d1fae5
     classDef bad  fill:#7f1d1d,stroke:#b91c1c,color:#fee2e2
-    A["my move a"] --> S1["position s₁<br/>(opponent to move)"]
-    S1 -->|"the reply actually played"| Won["…I won this game ✦"]
-    S1 -->|"reply b′ — also available"| Force["opponent forces a win<br/>worth 1.00 to them"]
-    Force --> Sc["score(a) = 1 − max(replies)<br/>= 1 − 1.00 = <b>0.00</b><br/>a LOSS, though THIS game was won"]
-    class A,S1 me
-    class Won good
-    class Force,Sc bad
+    A["my move a → position s<br/><b>V(a) = 1 − max(0.30, 1.00) = 0.00</b><br/>a LOSS — though this game was won"] --> R1 & R2
+    R1["reply actually played · V = 0.30<br/>…and I went on to win ✦"]
+    R2["reply b′ — never played, but known<br/><b>V(b′) = 1.00 · forces their win</b>"]
+    class A bad
+    class R1 good
+    class R2 bad
 ```
 
-Raw statistics would praise move `a` for sitting on a winning line; minimax sees it walked
-into a position the opponent *could* have punished. The agent learns the move was lucky,
-not good.
+Raw statistics would praise `a` for sitting on a winning line; minimax sees the opponent
+*could* have punished it. The agent learns the move was lucky, not good.
 
 For games that aren't strictly adversarial (more than two players, or non-zero-sum), Wise
 Explorer also records every *other* player's outcome and computes an **alignment factor α**
@@ -359,25 +490,11 @@ and observers tend to do well *together* (aligned incentives); the backup is the
 
 ## Self-play training
 
-Wise Explorer learns by playing **itself** — no opponent, no dataset. A single game runs
-move by move ([`simulation/worker.py`](src/wise_explorer/simulation/worker.py)): the player
-on turn picks a move (probabilistically, to keep exploring), the move is applied, and
-`(move, board_before, player)` is appended to *that player's own* trajectory. At the end,
-each player's trajectory is recorded tagged with its own result — so the identical loop
-runs for two players or seven.
-
-Games run in **synchronized waves** so knowledge compounds instead of drifting on stale
-stats ([`simulation/runner.py`](src/wise_explorer/simulation/runner.py)):
-
-```mermaid
-flowchart LR
-    classDef step fill:#1f2937,stroke:#475569,color:#e5e7eb
-    A["play a wave<br/>N games in parallel"] --> B["commit transitions<br/>+ Bellman sweep"]
-    B --> C["consolidate anchors"]
-    C --> D["grow the concept library<br/>(invention, live)"]
-    D --> A
-    class A,B,C,D step
-```
+Wise Explorer learns by playing **itself** — no opponent, no dataset. Games run in
+**synchronized waves** ([`simulation/runner.py`](src/wise_explorer/simulation/runner.py)):
+play a wave in parallel → commit transitions + Bellman sweep → consolidate anchors → grow
+the concept library → repeat — so every wave learns from fresh statistics, and discovery
+happens *during* training, not after it.
 
 ### Why *"Wise"* Explorer
 
@@ -392,45 +509,38 @@ A naive learner only ever chases moves that look good; it never builds certainty
 Half the training budget goes to pruning — each player taking its turn as the one dragged
 through its worst lines — and half to a shared exploit phase.
 
-Within a phase, the move is a weighted draw: each candidate is weighted by **how unsure we
-are of it × how good it looks** (`se · score` to exploit, `se · (1 − score)` to prune). The
-two phases fall straight out of that — exploit leans to strong-but-unsettled moves, prune to
-weak-but-unsettled ones, and both skip moves already pinned down. It needs no dials: sampling a
-move shrinks its uncertainty, so attention drifts onward by itself, and on a fresh position
-every move is equally unsure, so the draw is uniform and coverage simply fills in.
+Within a phase, the move is a weighted draw — each candidate's weight is its uncertainty
+times the side of the value still being pinned down:
+
+$$w_{\text{exploit}} = \mathrm{se} \cdot v \qquad\qquad w_{\text{prune}} = \mathrm{se} \cdot (1 - v)$$
+
+(`se` = the move's standard error — how unsure we still are; `v` = its score; the two
+weights are mirror images summing to `se`.) Exploit leans to strong-but-unsettled moves,
+prune to weak-but-unsettled ones, both skip moves already pinned down. No dials: sampling
+a move shrinks its `se`, so attention drifts onward by itself.
 
 Deliberately playing badly is the *wisdom*: the agent that has thoroughly charted how to
-lose is the one that never stumbles into it — the same dual-curiosity as the decision tree
-keeping both branches, and the Bellman sweep distrusting a lucky win.
+lose is the one that never stumbles into it.
 
 ---
 
 ## Why it converges — the certainty frontier
 
-Three forces are in tension. The raw win/loss counts (`solo`, `anchor`) are **noisy** —
-they measure *average, mixed-quality play* (half the budget is the prune phase's deliberately
-weak moves), not best-play value, and most positions are barely seen. **Bellman** is the clean
-game-theoretic truth — *best play assumed* — but only *where it has converged*. And **exploration** is what
-makes Bellman converge. Here's how they resolve into optimal play.
+The raw counts (`solo`, `anchor`) are **noisy** — they measure average, mixed-quality play.
+**Bellman** is game-theoretic truth, but only *where it has converged* — and it converges
+from the game's **end backward**, since a position is only as reliable as everything
+explored beneath it. So a *frontier of certainty* advances from the terminal states toward
+the opening, and the middlegame clears last:
 
-**Bellman is exact at the game's end, and its certainty spreads backward.** A position is
-only as reliable as everything explored beneath it, so a *frontier of certainty* advances
-from the terminal states toward the opening as coverage fills in. The middlegame clears
-**last** — it's furthest from the end:
+| games | opening | middlegame | endgame |
+|---|---|---|---|
+| 8k | ░ foggy | ░ → ▒ converging | █ sharp |
+| 24k | ▒ converging | █ sharp | █ sharp |
 
-```
-   opening ────────────────── middlegame ─────────────── end ✦
-   8k    ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░▒▒▒▒▒██████
-   24k   ░░░░░▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒██████████████
-         ░ foggy → discrimination    ▒ converging    █ Bellman sharp
-```
-
-Left of the frontier Bellman is foggy, so the agent leans on **discrimination** — which is
-trustworthy only for the *obviously* decisive moves (an immediate win or loss) and noise
-for the subtle ones. So each move is decided by reliability first, discrimination next, a
-guess last. And the loop closes: exploration (which deliberately plays losing lines too)
-shrinks the fog → Bellman converges → competitive play trusts it first. Measured against
-perfect Tic-Tac-Toe play (800 uniformly-sampled reachable positions vs. minimax):
+Ahead of the frontier the agent leans on discrimination (trustworthy for obvious tactics,
+noise for subtle ones); behind it, Bellman decides. Exploration — which deliberately plays
+losing lines too — is what moves the frontier. Measured against perfect Tic-Tac-Toe play
+(800 uniformly-sampled reachable positions vs. minimax):
 
 | after | optimal play |
 |---|--:|
@@ -438,8 +548,8 @@ perfect Tic-Tac-Toe play (800 uniformly-sampled reachable positions vs. minimax)
 | 8,000 games | 93.1% |
 | 24,000 games | **99.9%** |
 
-So the system is **exploration-limited, not decision-limited**: give it enough coverage and
-play converges to optimal, the middlegame fog burning off last.
+The system is **exploration-limited, not decision-limited**: give it coverage and play
+converges to optimal.
 
 ---
 

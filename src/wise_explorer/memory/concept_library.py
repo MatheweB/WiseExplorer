@@ -89,13 +89,27 @@ class ConceptLibrary:
         return len(self.kept)
 
     def summary(self) -> str:
-        """A terse 'what training discovered' line, with the rules spelled out."""
+        """A terse 'what training discovered' line: the rules verbatim, then a key giving
+        each fold's derived plain-English reading alongside its formula."""
         if not self.kept:
             return "No concepts discovered yet (the data may not support any)."
         lines = [f"Discovered {len(self.kept)} concept{'s' if len(self.kept) != 1 else ''}, "
                  f"{len(self.rules)} rule{'s' if len(self.rules) != 1 else ''}:"]
         for r in self.rules:
             lines.append(f"  {r.render()}  →  {r.avg:.2f}")
+        used, seen = [], set()
+        for r in self.rules:
+            for con, _ in r.path:
+                key = str(con)
+                if key not in seen:
+                    seen.add(key); used.append(con)
+        gl = S._groups_line(used)
+        if gl:
+            lines.append(f"  {gl}")
+        for con in used:
+            gloss = S.meaning(con)
+            if gloss:
+                lines.append(f"  where {con}  ⟺  {gloss}")
         return "\n".join(lines)
 
     # ── the signal (everywhere, including read-only workers) ────────────────────
