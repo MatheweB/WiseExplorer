@@ -8,34 +8,49 @@ values for any N-player game — no heuristics, no training data, no game-specif
 &nbsp;·&nbsp; 🌐 [mathewe.com](https://www.mathewe.com)
 
 Given only a record of which moves led to wins, Wise Explorer builds four kinds of
-knowledge — raw statistics, statistical clusters, minimax values, and **symbolic
-rules you can read** — and lets the *data itself* decide which to trust, move by move.
+knowledge — raw statistics, statistical clusters, minimax values, and **invented
+concepts you can read** — and lets the *data itself* decide which to trust, move by move.
 
-## It self-discovers human-interpretable rules that solve games (like Nim)
+## It invents the theorem that solves Nim
 
 Nim has been *solved* since 1901: you win by always moving so that the bitwise **XOR of the
 pile sizes is zero** — the "nim-sum" (Bouton's theorem). **Wise Explorer was never told
-this.** Given only a record of which moves won, after playing itself it grew a decision tree
-whose very first question about *any* position is exactly that test:
+this.** Given only a record of which moves won, it *invents* that formula during training —
+as a program, built from nothing but cell reads, arithmetic, and one `fold` combinator —
+and prints it when training ends:
 
-```mermaid
-flowchart TD
-    classDef q    fill:#1f2937,stroke:#475569,color:#e5e7eb
-    classDef win  fill:#065f46,stroke:#047857,color:#d1fae5
-    classDef loss fill:#7f1d1d,stroke:#b91c1c,color:#fee2e2
-    Q{{"is xor(all piles) == 0 ?<br/>— the nim-sum —"}}
-    Q -->|"yes"| W["you left the opponent a dead position<br/><b>→ a WINNING move</b>"]
-    Q -->|"no"| L["the opponent can punish you<br/><b>→ a LOSING move</b>"]
-    class Q q
-    class W win
-    class L loss
+```text
+Discovered 1 concept, 2 rules:
+  fold(⊕, board, cell) = 0      →  0.89     # xor of all piles is zero → you left a dead position
+  ¬[fold(⊕, board, cell) = 0]   →  0.08     # otherwise → the opponent can punish you
 ```
 
-Every rule it writes refines this one question, and **on Nim every one is provably correct**
-against the theorem the agent had no knowledge of. See for yourself:
+Playing with that two-line model, it makes the optimal move in **every** winning
+position of 4-pile Nim (96/96). See it derive the theorem yourself, in about a minute:
 
 ```bash
-wise-explorer inspect -g nim --fresh 10000
+wise-explorer invent -g nim --fresh 10000
+```
+
+## …and the theorem transfers: discover small, play big
+
+Because the invented rule is a width-free **program** — `fold(⊕, board, cell)` reads
+*every* pile of whatever board it is handed — knowledge learned on a small game applies
+to a big one unchanged. The library trained only on 4-pile Nim (120 positions) plays
+**8-pile Nim** (362,880 positions, a state space ~3000× larger) **perfectly, zero-shot**:
+
+| | trained on | plays 8-pile Nim | optimal moves |
+|---|---|---|:--:|
+| **zero-shot transfer** | 4-pile only (120 positions) | with no 8-pile data at all | **400/400** |
+| from-scratch control | 8-pile, 3000 games | after seeing 1.65% of the space | 51/400 (≈ chance) |
+
+The from-scratch agent can't find the rule in a space that big — but it never needed to.
+The rule was discoverable where the game was small, and a program doesn't care how wide
+the board is. Run the whole experiment (~30 s):
+
+```bash
+python scripts/transfer_demo.py          # discover on n=4, play n=8 zero-shot
+python scripts/transfer_demo.py --full   # + the honest controls (~4 min)
 ```
 
 ---
@@ -56,7 +71,7 @@ flowchart LR
     T --> S1["① solo stats"]
     T --> S2["② anchors"]
     T --> S3["③ Bellman"]
-    T --> S4["④ rules"]
+    T --> S4["④ concepts"]
     S1 --> V{{"variance<br/>arbitration"}}
     S2 --> V
     S3 --> V
@@ -75,7 +90,7 @@ different views:
 |---|---|---|
 | **Nim** | ③ Bellman (minimax) | value is purely game-theoretic |
 | **Tic-Tac-Toe** | ② anchors (pooled stats of similar positions) | positions repeat and pool cleanly |
-| **a position never seen before** | ④ mined rules | only rules generalize from board *shape* |
+| **a position never seen before** | ④ invented concepts | only a formula generalizes from board *shape* |
 
 ---
 
@@ -94,17 +109,15 @@ wise-explorer --game minichess --self-play # watch the AI play itself
 wise-explorer --no-training                # play from existing memory only
 ```
 
-**See what it learned** — `inspect` reads the rules a game has already learned (no
-retraining), each with a board diagram, plain-language statement, and (for games with known
-theory) a *provably-correct* verdict. `--fresh N` trains a quick throwaway demo first:
+**See what it discovered** — `invent` shows the concepts and rules, with the full
+bits-saved-vs-cost ledger of how each one earned its place. `--fresh N` trains a quick
+throwaway demo first:
 
 ```bash
-wise-explorer inspect -g nim                 # rules from your trained model
-wise-explorer inspect -g nim --fresh 10000   # ← train a demo, then watch it derive the nim-sum
+wise-explorer invent -g nim                  # concepts from your trained model
+wise-explorer invent -g nim --fresh 10000    # ← train a demo, then watch it derive the nim-sum
+python scripts/transfer_demo.py              # ← discover on 4 piles, play 8 zero-shot
 ```
-
-> The standalone `python scripts/inspect_predicates.py nim 10000` still works — it's a thin
-> wrapper around the same command.
 
 <details>
 <summary><b>All CLI options</b></summary>
@@ -168,7 +181,7 @@ questions:
 | ① | **solo** | "What happened the last time I made this *exact* move?" | — |
 | ② | **anchor** | "What usually happens in positions *like* this one?" | — |
 | ③ | **Bellman** | "What's the *true game-theoretic* value of this?" | — |
-| ④ | **rules** | "Does this position match a *pattern* I've mined?" | ✅ the only one |
+| ④ | **concept** | "What does the *formula I invented* say this is worth?" | ✅ the only one |
 
 **The deciding move** — variance arbitration — is what makes the agent tick. For each
 signal it asks *"how much do you actually disagree about these moves?"* (their variance
@@ -179,7 +192,7 @@ scores every move alike is, by construction, useless for *this* decision.
 |---|:--:|:--:|:--:|:--:|:--|
 | ① solo | 0.55 | 0.52 | 0.58 | 0.0006 | 4th · nearly flat |
 | ② anchor | 0.60 | 0.58 | 0.61 | 0.0002 | 3rd · nearly flat |
-| ④ rules | 0.45 | 0.66 | 0.52 | 0.0078 | 2nd |
+| ④ concept | 0.45 | 0.66 | 0.52 | 0.0078 | 2nd |
 | **③ Bellman** | **0.00** | **1.00** | **0.50** | **0.1667** | **1st · sharp ✦** |
 
 *Ranked by the sharpest signal, ties broken by the next ⇒ the agent plays **move B**.*
@@ -220,9 +233,11 @@ explores by a different and far simpler rule, [below ↓](#self-play-training).
   ([`core/bayes.py`](src/wise_explorer/core/bayes.py)) — one shared win-rate vs. two
   separate ones — not a hand-tuned threshold.
 - **③ Bellman** — minimax value over the transition graph ([details ↓](#game-theoretic-propagation-bellman--n-player)).
-- **④ rules** — a structural prior from the predicate library ([details ↓](#learning-readable-rules-predicate-mining)).
+- **④ concept** — the value the invented rule tree assigns to the resulting board
+  ([details ↓](#inventing-concepts-the-discovery-engine)). Because a concept is a program,
+  it values boards training never visited — this is the signal behind the zero-shot result.
 - **Scoring & tie-breaks** — each move becomes a *tuple* in rank order (e.g.
-  `(bell, pred, anchor, solo)`), compared lexicographically. When a signal's evidence is
+  `(bell, concept, anchor, solo)`), compared lexicographically. When a signal's evidence is
   *unanimous and significant* it sharpens from the Bayesian mean to the exact ratio
   (`is_decisive`); and as Bellman values converge their variance grows, so game-theoretic
   truth tends to win the ranking long-run — auto-correcting any rule trusted too early.
@@ -232,94 +247,66 @@ explores by a different and far simpler rule, [below ↓](#self-play-training).
 
 ---
 
-## Learning readable rules (predicate mining)
+## Inventing concepts (the discovery engine)
 
 Most self-play agents end up as an opaque table of numbers. Wise Explorer additionally
-distills its experience into a few **symbolic rules you can read**:
+**invents the concepts** that explain its experience — as readable programs, *while it
+trains*.
 
-```
-Rule: nim-sum = 0  AND  no pile exceeds 1   →  WIN   (you left the opponent a dead position)
-Rule: nim-sum ≠ 0                           →  LOSS  (the opponent can force a win)
-```
+The whole language is three primitives — cell reads, arithmetic/bitwise operators, and one
+combinator, **`fold(op, domain, body)`**: reduce a formula over a region of the board.
+Everything it has ever discovered is some nesting of that one shape:
 
-Rules are built from a small typed language
-([`memory/predicates.py`](src/wise_explorer/memory/predicates.py)) — board reads, boolean
-**atoms** (`==`, `>`, and aggregates like `sum`/`count`/**`xor`** over rows, columns, and
-the whole board), and the logical connectives `∃ · ∧ · ¬ · ∨` — rich enough that the
-`xor`-of-all-heaps atom *is* the nim-sum that defines optimal Nim.
+| discovered concept | what it is |
+|---|---|
+| `fold(⊕, board, cell) = 0` | the **nim-sum** — xor every pile (width-free: any board size) |
+| `(c0 and (c4 and c8)) = 0` | a Tic-Tac-Toe **line** — found as a region, not given |
+| `fold(max, groups, …played…empty…) = 1` | a **threat** — "some discovered line is one move from won" |
 
-**How a rule is found.** Mining grows a small decision tree over the transitions: each carries
-a value `v ∈ [0,1]` (≈1 if the move tends to win, ≈0 if it loses), and the tree splits the
-boards on whichever atom best separates the winners from the losers.
+**How discovery works.** The engine enumerates small programs bottom-up, keeps one
+representative per distinct behavior, and asks of each: *does splitting the data on you
+make the win/loss record cheaper to describe?* A concept is kept only if the bits of data
+it explains outweigh the bits its own formula costs — **Minimum Description Length**
+(Rissanen), the same "shortest program that fits" idea behind library learners like
+DreamCoder and Poesia & Goodman's [Peano](https://arxiv.org/abs/2211.15864). Kept concepts
+become size-1 building blocks for the next round — so round 1 finds *lines*, and round 2,
+folding over those lines, finds *threats*. The loop stops the moment a round no longer
+pays for itself: on Nim that's after one concept; games too sparse to support any
+(mini-chess at feasible scale) get **none** — declining is a feature.
 
-It fits the **Bellman** value, not the raw win-rate. The [`prune` phase](#why-wise-explorer)
-deliberately throws games, which biases the raw rate; the minimax backup removes that noise.
-Where the backup hasn't converged — games too large to solve — the value stays flat, and the
-miner simply **abstains** instead of inventing rules from noise.
+**Discovery happens during training.** Each wave of self-play folds its new boards into a
+live table; the library refits cheaply every wave and runs a full search only when the
+table has doubled *and* the current concepts have stopped explaining the data — so a
+sufficient library does zero work. When training ends, one considered pass over the
+converged values produces the model that is persisted and printed. A library can also be
+**seeded from another game's DB** (`ConceptLibrary.seed_from`) — that's the transfer demo:
+programs carry over; their worth is re-fit locally.
 
-**Each split has to pay for itself, in bits.** Think of the rules as a compressed description
-of the win/loss data. A split survives only if the uncertainty it removes outweighs the cost of
-writing one more rule — naming an atom (`~log₂(#atoms)` bits) and a branch. Carving up an
-already-decided region — splitting `nim-sum = 0`, which is already all wins — buys nothing, so
-it's dropped, and only the rules the data truly demands remain. This **Minimum Description
-Length** test (Rissanen / Quinlan) is the same "shortest program that fits" idea behind library
-learners like DreamCoder and Poesia & Goodman's [Peano](https://arxiv.org/abs/2211.15864) — and
-on Nim it reaches the two-rule theorem with ~5× fewer games than a significance test would.
-
-On Nim this collapses to the theorem — one split on the nim-sum, two pure leaves:
-
-```mermaid
-flowchart TD
-    classDef q    fill:#1f2937,stroke:#475569,color:#e5e7eb
-    classDef win  fill:#065f46,stroke:#047857,color:#d1fae5
-    classDef loss fill:#7f1d1d,stroke:#b91c1c,color:#fee2e2
-    R["root · 599 transitions (mixed)"]
-    R -->|"xor(all)==0 ?  yes"| L["132 transitions · all WIN"]
-    R -->|"no"| Rr["467 transitions · all LOSS"]
-    class R q
-    class L win
-    class Rr loss
-```
-
-Richer games give more, value-graded rules (Tic-Tac-Toe ~20–30); games too large to sample
-decisively (mini-chess, `minichess`, at feasible scale) leave `Var(μ) ≈ 0` everywhere and
-**abstain** rather than invent rules from noise — declining is a feature.
+The deep dive — why one combinator is enough, how the move is the only perspective, what
+the honest limits are — is in [docs/concept-invention.md](docs/concept-invention.md).
 
 <details>
-<summary><b>The two miners</b></summary>
-
-Two miners share the atom machinery
-([`tree_miner.py`](src/wise_explorer/memory/tree_miner.py),
-[`iti_miner.py`](src/wise_explorer/memory/iti_miner.py)):
-
-- **Batch CART** — deterministic and globally optimal at each split. Builds the saved rule
-  set (end of training) and powers inspection. Atom generation and the match matrix are
-  tensor-accelerated (CPU or GPU via PyTorch).
-- **Incremental Tree Inducer (ITI)** — [Utgoff (1997)](https://doi.org/10.1023/A:1007413323501)
-  — keeps a tree updated as transitions stream in (~0.5 ms/wave) so its structure can *spur*
-  exploration during training. It trades the batch miner's optimality for that speed, so the
-  deployed rules are always rebuilt with batch CART.
-
-</details>
-
-<details>
-<summary><b>Verified run — Nim, 10,000 self-play games</b></summary>
+<summary><b>Verified run — Nim, 2,000 self-play games</b></summary>
 
 ```text
-$ wise-explorer inspect -g nim --fresh 10000
+$ wise-explorer invent -g nim --fresh 2000
 
-  ┌──────────────────────── SUMMARY ────────────────────────┐
-  │ Total predicates:    2                                   │
-  │ Provably correct:    2   ← both match the true nim-sum   │
-  └──────────────────────────────────────────────────────────┘
+══ CONCEPT INVENTION — NIM ══   (119 boards · baseline 104 bits to explain)
 
-  Rule: nim-sum = 0   →  WIN   (n=132, all matching positions are forced wins)
-  Rule: nim-sum ≠ 0   →  LOSS  (n=467, all matching positions are forced losses)
+ROUND 1  ✓ pays — saved 84 bits  vs  12 cost   (1 concept invented)
+        + fold(⊕, board, cell) = 0
+ROUND 2  ✗ stop — saved 0 bits  vs  0 cost   (nothing new pays for itself)
+
+→ stopped after round 1;  1 concept(s) kept.
+
+RULES it builds from the invented concepts:
+   [WIN ] n=24    avg=0.89   fold(⊕, board, cell) = 0
+   [LOSS] n=95    avg=0.08   ¬[fold(⊕, board, cell) = 0]
 ```
 
-The miner was never given the rules of Nim, yet it distils its experience to the two-line
-theorem — provably correct against the nim-sum. (Counts vary slightly per run; a re-mine may
-add a few refinements under the WIN branch.)
+The engine was never given the rules of Nim, yet it compresses its experience to the
+two-line theorem — provably correct against the nim-sum it was never told about.
+(Exact bit counts vary slightly per run.)
 
 </details>
 
@@ -387,7 +374,7 @@ flowchart LR
     classDef step fill:#1f2937,stroke:#475569,color:#e5e7eb
     A["play a wave<br/>N games in parallel"] --> B["commit transitions<br/>+ Bellman sweep"]
     B --> C["consolidate anchors"]
-    C --> D["update rule tree<br/>(ITI, ~0.5 ms)"]
+    C --> D["grow the concept library<br/>(invention, live)"]
     D --> A
     class A,B,C,D step
 ```
@@ -434,38 +421,22 @@ from the terminal states toward the opening as coverage fills in. The middlegame
 ```
    opening ────────────────── middlegame ─────────────── end ✦
    8k    ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░▒▒▒▒▒██████
-   32k   ░░░░░▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒██████████████
+   24k   ░░░░░▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒██████████████
          ░ foggy → discrimination    ▒ converging    █ Bellman sharp
 ```
 
 Left of the frontier Bellman is foggy, so the agent leans on **discrimination** — which is
 trustworthy only for the *obviously* decisive moves (an immediate win or loss) and noise
 for the subtle ones. So each move is decided by reliability first, discrimination next, a
-guess last:
+guess last. And the loop closes: exploration (which deliberately plays losing lines too)
+shrinks the fog → Bellman converges → competitive play trusts it first. Measured against
+perfect Tic-Tac-Toe play (800 uniformly-sampled reachable positions vs. minimax):
 
-```mermaid
-flowchart TD
-    classDef truth fill:#065f46,stroke:#047857,color:#d1fae5
-    classDef disc  fill:#0e7490,stroke:#155e75,color:#ecfeff
-    classDef fog   fill:#1f2937,stroke:#475569,color:#e5e7eb
-    Q{"is Bellman sharp here?"}
-    Q -->|"yes"| B["trust Bellman<br/>the game-theoretic answer"]
-    Q -->|"no — still foggy"| D{"does a move<br/>clearly win or lose?"}
-    D -->|"yes"| E["trust that decisive signal<br/>(obvious tactics)"]
-    D -->|"no"| F["genuine fog —<br/>explore / best guess"]
-    class B truth
-    class E disc
-    class F fog
-```
-
-And the loop closes: exploration (which deliberately plays losing lines too) shrinks the
-fog → Bellman converges → competitive play trusts it first. Measured against perfect
-Tic-Tac-Toe, optimal play marches up exactly as coverage completes:
-
-| after | move coverage | Bellman error | optimal play |
-|---|--:|--:|--:|
-| 8,000 games | 82% | 0.26 | 88% |
-| 32,000 games | 99% | 0.14 | **99.6%** |
+| after | optimal play |
+|---|--:|
+| 3,000 games | 81.8% |
+| 8,000 games | 93.1% |
+| 24,000 games | **99.9%** |
 
 So the system is **exploration-limited, not decision-limited**: give it enough coverage and
 play converges to optimal, the middlegame fog burning off last.
@@ -489,7 +460,8 @@ start_simulations(
     turn_depth=20, simulations=200,
     memory=memory, training_enabled=True,
 )
-print(memory.get_info())                      # {'anchors': ..., 'predicates': ..., 'transitions': ...}
+print(memory.get_info())                      # {'anchors': ..., 'concepts': ..., 'transitions': ...}
+print(memory.concept_library.summary())       # the rules it invented, spelled out
 memory.close()
 
 # Markov mode: only the resulting position matters, V(s)=f(s) — faster, but discards
@@ -538,8 +510,8 @@ Then add it to `GAMES` and `INITIAL_STATES` in
 
 ```
 src/wise_explorer/
-├── cli.py · api.py             # CLI (train·play·inspect) + public API (start_simulations)
-├── inspection.py               # renders learned rules (shared by CLI + script)
+├── cli.py · api.py             # CLI (train·play·invent) + public API (start_simulations)
+├── synthesis.py                # the discovery engine: fold programs, MDL, live growth
 ├── agent/agent.py              # Agent dataclass and State enum
 ├── core/                       # types.py (Bayesian scoring) · hashing.py · bayes.py (Bayes factor)
 ├── games/                      # game_base.py · tic_tac_toe.py · nim.py · minichess.py
@@ -549,15 +521,14 @@ src/wise_explorer/
 │   ├── transition_memory.py    # path-dependent memory + Bellman / N-player α
 │   ├── markov_memory.py        # path-independent (state) memory
 │   ├── anchor_manager.py       # Bayes-factor clustering
-│   ├── predicates.py           # expression language + predicate library
-│   ├── tree_miner.py           # batch CART rule miner (tensor-accelerated)
-│   └── iti_miner.py            # Incremental Tree Inducer (Utgoff 1997)
+│   └── concept_library.py      # persisted invented concepts (the live value signal)
 │
 ├── selection/                  # variance arbitration · training (explore) · inference (compete)
 ├── simulation/                 # runner.py (waves) · worker.py · training.py (prune/exploit)
-└── utils/ · debug/ · scripts/
+└── utils/ · debug/
 
-scripts/inspect_predicates.py   # thin wrapper — prefer `wise-explorer inspect`
+scripts/transfer_demo.py        # discover the nim-sum on 4 piles, play 8 piles zero-shot
+docs/concept-invention.md       # the discovery engine, in depth
 tests/                          # mirrors src/   ·   data/memory/  SQLite DBs (auto-created)
 ```
 
@@ -568,29 +539,32 @@ tests/                          # mirrors src/   ·   data/memory/  SQLite DBs (
 Beyond the 2019 thesis it re-implements, the ideas a reviewer may find notable — all
 zero-prior-knowledge and game-agnostic:
 
-1. **Interpretable rule induction from zero-knowledge self-play** — a typed predicate
-   language + CART/ITI miner that distills play into human-readable rules. On Nim it
-   independently recovers **Bouton's 1901 theorem** (the nim-sum) as the root of its
-   decision tree, every rule provably correct against a theory it was never given.
-2. **Compression-driven rule mining** — the tree fits the minimax-de-noised value and keeps a
-   split only when it pays for itself in description length (MDL), so it finds the *smallest*
-   rule set the data supports — recovering the theorem with far less play, and *abstaining*
-   rather than overfitting noise when a game is too sparsely sampled.
-3. **Variance-arbitrated multi-signal selection** — letting the data decide, per position,
-   whether statistics, clustering, game value, or a learned rule should drive the choice.
-4. **A principled N-player / non-zero-sum generalization of minimax** via an alignment
+1. **Concept invention from zero-knowledge self-play** — a program-synthesis engine
+   (cell reads, arithmetic, one `fold` combinator) that invents the features explaining
+   its experience, MDL-gated and reusing its own discoveries to build higher ones
+   (lines → threats). On Nim it independently re-derives **Bouton's 1901 theorem**.
+2. **Cross-scale knowledge transfer** — invented concepts are width-free programs, so a
+   rule discovered on a 120-position game plays a 362,880-position game perfectly with
+   zero training on it. Discover where the game is small; apply where it is big.
+3. **Invention as part of training** — the library grows during self-play (cheap refit
+   every wave; a full search only when the data has outgrown the current concepts), and
+   its value feeds move selection as a live signal — the only one that generalizes to
+   never-visited boards.
+4. **Variance-arbitrated multi-signal selection** — letting the data decide, per position,
+   whether statistics, clustering, game value, or an invented concept should drive the choice.
+5. **A principled N-player / non-zero-sum generalization of minimax** via an alignment
    factor learned from cross-player outcomes, recovering zero-sum minimax as a special case.
 
 > Re-imagined and substantially extended from my Oberlin honors thesis. The anchors,
-> predicate mining, Bellman propagation, and distribution sampling are independent research
-> since 2019.
+> concept invention, Bellman propagation, and distribution sampling are independent
+> research since 2019.
 
 ---
 
 ## Testing, troubleshooting & citation
 
 ```bash
-pytest                  # full suite   ·   pytest tests/memory/  for the mining tests
+pytest                  # full suite   ·   pytest tests/test_synthesis.py  for the engine
 ```
 
 - **Play feels weak?** Training is cumulative — keep running; strong play can take thousands of epochs.

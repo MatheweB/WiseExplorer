@@ -143,15 +143,14 @@ def start_simulations(
                 f"{info['total_samples']} samples"
             )
 
-            # Surface what training learned (terse; full view via `inspect`).
+            # Surface what training discovered (terse; full view via `invent`).
             if training_enabled:
                 try:
-                    from wise_explorer.inspection import summarize_predicates
-                    summary = summarize_predicates(memory, game.game_id())
+                    summary = memory.concept_library.summary()
                     if summary:
                         print(summary)
                 except Exception:
-                    pass  # inspection is a convenience, never fatal
+                    pass  # the summary is a convenience, never fatal
 
     except KeyboardInterrupt:
         print("\nInterrupted - shutting down...")

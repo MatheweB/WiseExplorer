@@ -1,10 +1,11 @@
 """Concept invention via MDL-guided program synthesis, with reuse.
 
-Sits above the predicate miner: instead of splitting on a fixed atom vocabulary,
-it *searches for new features to build* out of generic primitives (cell reads,
-arithmetic / bitwise ops, an equality indicator), scores them by how much they
-compress the win/loss data (MDL), reuses its own discoveries to reach richer
-concepts, and stops a round once it no longer pays for itself.
+The discovery engine: it *searches for board features to build* out of generic
+primitives (cell reads, arithmetic / bitwise ops, one fold combinator), scores
+them by how much they compress the win/loss data (MDL), reuses its own
+discoveries to reach richer concepts, and stops a round once it no longer pays
+for itself. It runs live during training (:func:`grow`, a wave at a time) and
+once more over the converged values at the end (:func:`invent_from_boards`).
 
 Public entry point: ``invent(memory, game_id)`` → :class:`InventionResult`.
 See ``docs/concept-invention.md`` and the ``invent`` CLI verb.
@@ -104,6 +105,17 @@ class CellDomain:
     def __str__(self): return "cells"
 
 
+class BoardDomain:
+    """A fold domain over the WHOLE board, width-free: its elements are *all* the cells of
+    whatever board it is handed, not a frozen list. So the nim-sum ``fold(⊕, board, cell)``
+    discovered at 4 piles is the *identical program* at 8 piles — it reads every heap, not the
+    first four — and it serialises with no width, which is what lets a concept transfer across
+    scales unchanged. (Compare ``CellDomain``, whose cell list is fixed at discovery time.)"""
+    names = ("cell",)
+    def tensor(self, B, m=None): return B[:, :, None].astype(np.int64)
+    def __str__(self): return "board"
+
+
 class GroupDomain:
     """A fold domain whose elements are groups of cells the search already discovered (the
     cell-supports of kept concepts — e.g. the lines round 1 found). Each group shows two
@@ -166,6 +178,11 @@ def _classes(V: np.ndarray, lo: float, hi: float) -> np.ndarray:
     c = np.ones(len(V), dtype=int); c[V < lo] = 0; c[V > hi] = 2; return c   # LOSS/DRAW/WIN
 
 
+# Note (measured, 2026-06): weighting each board's say by its evidence (games seen, or the
+# value's posterior precision) was benched against this unweighted fit on the n=4→n=8
+# transfer and LOST on both ends — it bloated the converged n=4 library and worsened n=8
+# play. The junk a noisy run keeps does not live on under-visited rows; it fits noise in the
+# *values* themselves, which no row-weighting can repair. One row, one vote.
 def _bits(cl: np.ndarray) -> float:
     n = len(cl)
     if n == 0:
@@ -224,23 +241,40 @@ def _candidate_concepts(seen, B, V, min_leaf) -> List[Concept]:
     S = float(V.sum()); SS = float(V2.sum())
     total_var = SS / N - (S / N) ** 2
     best: Dict[bytes, Tuple[float, Concept]] = {}
-    for vec_bytes, expr in seen.items():
-        vec = np.frombuffer(vec_bytes, dtype=np.int64)
-        vals, inv = np.unique(vec, return_inverse=True)
-        K = len(vals)
-        n1 = np.bincount(inv, minlength=K).astype(np.float64)        # size of each value-group
-        s1 = np.bincount(inv, weights=V, minlength=K)               # its Σ V
-        ss1 = np.bincount(inv, weights=V2, minlength=K)             # its Σ V²
-        n0 = N - n1; s0 = S - s1; ss0 = SS - ss1                     # the complement (value != c)
-        with np.errstate(invalid="ignore", divide="ignore"):
-            var1 = np.maximum(ss1 / n1 - (s1 / n1) ** 2, 0.0)   # clamp float roundoff at 0
+    # The errstate is hoisted to wrap the whole loop: empty value-groups produce 0/0
+    # (clamped below), and re-entering the context once per candidate is pure overhead.
+    with np.errstate(invalid="ignore", divide="ignore"):
+        for vec_bytes, expr in seen.items():
+            vec = np.frombuffer(vec_bytes, dtype=np.int64)
+            # Group V by the program's output value with a single bincount per stat — no
+            # per-vector sort. Shift to a non-negative offset so the value IS the bin index;
+            # empty bins (gaps in the value range) fall out via the min_leaf filter below.
+            lo = int(vec.min()); span = int(vec.max()) - lo + 1
+            # bincount is O(N + span) and allocates span-length arrays, so direct value-indexing
+            # stays linear while span is within a small multiple of the data (the 4 is slack,
+            # the +64 keeps tiny N dense); a wider range pays np.unique's sort instead.
+            if span <= 4 * N + 64:                                  # dense: index by value directly
+                idx = vec - lo
+                n1 = np.bincount(idx, minlength=span).astype(np.float64)   # size of each value-group
+                s1 = np.bincount(idx, weights=V, minlength=span)           # its Σ V
+                ss1 = np.bincount(idx, weights=V2, minlength=span)         # its Σ V²
+                base = lo
+            else:                                                  # pathologically wide range: fall back
+                vals, inv = np.unique(vec, return_inverse=True); K = len(vals)
+                n1 = np.bincount(inv, minlength=K).astype(np.float64)
+                s1 = np.bincount(inv, weights=V, minlength=K)
+                ss1 = np.bincount(inv, weights=V2, minlength=K)
+                base = vals                                        # value of bin k is vals[k]
+            n0 = N - n1; s0 = S - s1; ss0 = SS - ss1                # the complement (value != c)
+            var1 = np.maximum(ss1 / n1 - (s1 / n1) ** 2, 0.0)       # clamp float roundoff at 0
             var0 = np.maximum(ss0 / n0 - (s0 / n0) ** 2, 0.0)
             gain = total_var - (n1 * var1 + n0 * var0) / N
-        keep = (n1 >= min_leaf) & (n0 >= min_leaf) & (gain > 0)
-        for k in np.nonzero(keep)[0]:
-            c = int(vals[k]); mask = vec == c; sig = mask.tobytes()
-            if sig not in best or expr.size < best[sig][1].size:
-                best[sig] = (float(gain[k]), Concept(expr, "=", c, mask, expr.size))
+            keep = (n1 >= min_leaf) & (n0 >= min_leaf) & (gain > 0)
+            for k in np.nonzero(keep)[0]:
+                c = (base + int(k)) if np.isscalar(base) else int(base[k])
+                mask = vec == c; sig = mask.tobytes()
+                if sig not in best or expr.size < best[sig][1].size:
+                    best[sig] = (float(gain[k]), Concept(expr, "=", c, mask, expr.size))
     # round the gain in the tiebreak so equivalent splits prefer the SIMPLER concept
     # deterministically (float roundoff in the grouped sums must not flip the order)
     return [c for _, c in sorted(best.values(), key=lambda x: (-round(x[0], 9), x[1].size))]
@@ -262,8 +296,10 @@ def _cell_group(e: Expr) -> Tuple[int, ...]:
         elif isinstance(x, Fold):
             if isinstance(x.domain, CellDomain):
                 out.update(x.domain.cells)
-            else:
+            elif isinstance(x.domain, GroupDomain):
                 out.update(i for g in x.domain.groups for i in g)
+            # BoardDomain folds the whole board — no fixed support, so they contribute
+            # nothing here (and are correctly excluded from _supports / the group layer).
     walk(e)
     return tuple(sorted(out))
 
@@ -293,17 +329,19 @@ def _supports(kept: List[Concept]) -> List[Tuple[int, ...]]:
     return out
 
 
-def _cell_fold_terminals(n_cells: int) -> List[Expr]:
+def _board_fold_terminals() -> List[Expr]:
     """Seed each round-1 search with the whole-board fold under every monoid — e.g.
-    fold(⊕, cells, cell) is the nim-sum. Observational-equivalence keeps whichever of
-    these (or a cheaper composition) actually predicts the value; the rest are dropped."""
-    cells = CellDomain(tuple(range(n_cells)))
-    return [Fold(op, cells, Elem(0, CellDomain.names)) for op in _FOLD]
+    fold(⊕, board, cell) is the nim-sum. The domain is width-free (:class:`BoardDomain`), so a
+    fold kept here is the same program at any board width and transfers across scales unchanged.
+    Observational-equivalence keeps whichever of these (or a cheaper composition) actually
+    predicts the value; the rest are dropped."""
+    board = BoardDomain()
+    return [Fold(op, board, Elem(0, BoardDomain.names)) for op in _FOLD]
 
 
 def _residual(rules: List["Rule"], V: np.ndarray) -> np.ndarray:
     """V minus what the current rule set already predicts (each board gets its leaf's
-    mean). Scoring new predicates against this — rather than against V — rewards what
+    mean). Scoring new candidates against this — rather than against V — rewards what
     the model still *fails* to explain, so a novel concept (the threat) beats one that
     merely re-states what the kept concepts (the win-lines) already capture."""
     pred = np.zeros_like(V)
@@ -325,9 +363,9 @@ def _group_fold_candidates(supports, B: np.ndarray, target: np.ndarray, min_leaf
     if not supports:
         return []
     dom = GroupDomain(supports)
-    T = dom.tensor(B, m); N, K, W = T.shape
-    flat = T.reshape(N * K, W)
-    bodies = _synthesize([Elem(j, dom.names) for j in range(W)], flat, max_size=5, cap=None)
+    T = dom.tensor(B, m); N, K, F = T.shape
+    flat = T.reshape(N * K, F)
+    bodies = _synthesize([Elem(j, dom.names) for j in range(F)], flat, max_size=5, cap=None)
     scored = []
     for body in bodies.values():
         per = body.eval(flat).reshape(N, K)
@@ -367,19 +405,20 @@ def _build_rules(concepts: List[Concept], CL: np.ndarray, V: np.ndarray, min_lea
 
     def grow(idx, path):
         cl = CL[idx]; n = len(idx)
+        here = _bits(cl)
         verd = ["LOSS", "DRAW", "WIN"][int(np.bincount(cl, minlength=3).argmax())]
-        if n < 2 * min_leaf or _bits(cl) < 1e-6 or len(path) >= max_depth:
-            rules.append(Rule(list(path), verd, n, float(V[idx].mean()), _bits(cl))); return
+        if n < 2 * min_leaf or here < 1e-6 or len(path) >= max_depth:
+            rules.append(Rule(list(path), verd, n, float(V[idx].mean()), here)); return
         best = None
         for con in concepts:
             m = con.mask[idx]; nl = int(m.sum())
             if nl < min_leaf or n - nl < min_leaf:
                 continue
-            g = _bits(cl) - (_bits(cl[m]) + _bits(cl[~m]))
+            g = here - (_bits(cl[m]) + _bits(cl[~m]))
             if best is None or g > best[0]:
                 best = (g, con, m)
         if best is None or best[0] <= split_cost:
-            rules.append(Rule(list(path), verd, n, float(V[idx].mean()), _bits(cl))); return
+            rules.append(Rule(list(path), verd, n, float(V[idx].mean()), here)); return
         _, con, m = best
         grow(idx[m], path + [(con, True)]); grow(idx[~m], path + [(con, False)])
 
@@ -390,6 +429,17 @@ def _build_rules(concepts: List[Concept], CL: np.ndarray, V: np.ndarray, min_lea
 def _model_bits(rules: List[Rule], n_atoms: int) -> float:
     a = math.log2(max(n_atoms, 2))
     return sum(len(r.path) * a + math.log2(3) for r in rules)
+
+
+def _fit(kept: List[Concept], B, V, M, CL, min_leaf) -> Tuple[List[Rule], float, float]:
+    """Fit the existing library to this data: re-derive each concept's mask on these boards,
+    rebuild the rule tree over them, and report ``(rules, resid, model)`` — how well what we
+    already know explains what we now see."""
+    for c in kept:
+        v = c.expr.eval(B, M)
+        c.mask = (v == c.const) if c.op == "=" else (v > c.const)
+    rules = _build_rules(kept, CL, V, min_leaf, max_depth=6)
+    return rules, sum(r.resid for r in rules), _model_bits(rules, max(len(kept), 2))
 
 
 # ───────────────────────────── the reuse loop with MDL round-stop ──────────────
@@ -421,10 +471,9 @@ class InventionResult:
 _BITS_PER_SYMBOL = math.log2(12)
 
 
-def _invent_round(kept, prior_rules, resid, model, B, V, M, CL, min_leaf, base, n_cells, max_size, cap):
+def _invent_round(kept, prior_rules, resid, model, B, V, M, CL, min_leaf, base, max_size, cap):
     """One round of invention: reuse ``kept`` as size-1 building blocks, search for new
     concepts, and keep what the rule tree actually uses iff it pays for itself in bits.
-    The single source of truth shared by the full loop and the incremental grow.
     Returns (new_used, rules, resid, model, data_saved, cost, paid); on an empty round it
     returns ([], prior_rules, resid, model, 0, 0, False)."""
     POOL = 40                                          # candidates offered to the rule tree
@@ -433,7 +482,7 @@ def _invent_round(kept, prior_rules, resid, model, B, V, M, CL, min_leaf, base, 
         extra_atoms = (_group_fold_candidates(_supports(kept), B, _residual(prior_rules, V), min_leaf, M)
                        if M is not None else [])
     else:
-        library = list(base) + _cell_fold_terminals(n_cells); extra_atoms = []
+        library = list(base) + _board_fold_terminals(); extra_atoms = []
     seen = _synthesize(library, B, max_size, cap)
     cands = _candidate_concepts(seen, B, V, min_leaf)
     have = {c.mask.tobytes() for c in kept}
@@ -459,8 +508,8 @@ def _invent_round(kept, prior_rules, resid, model, B, V, M, CL, min_leaf, base, 
 
 def invent_from_boards(B: np.ndarray, V: np.ndarray, M: Optional[np.ndarray] = None, *,
                        max_rounds: int = 4, lo: float = 0.40, hi: float = 0.60,
-                       keep_per_round: int = 6, max_size: Optional[int] = None,
-                       cap="auto") -> InventionResult:
+                       max_size: Optional[int] = None, cap="auto",
+                       seed: Optional[List["Concept"]] = None) -> InventionResult:
     """Run the multi-round concept-invention loop on boards B with values V.
 
     ``M`` is the just-moved token per board (read from each board's transition); the
@@ -468,6 +517,11 @@ def invent_from_boards(B: np.ndarray, V: np.ndarray, M: Optional[np.ndarray] = N
     boards — they simply skip the group layer. ``max_size`` and ``cap`` bound the
     bottom-up search; left at their defaults they follow a board-width heuristic. Callers
     that know the target program is small (e.g. tests) can pass a tighter ``max_size``.
+
+    ``seed`` is a library to start from — known concepts (e.g. a nim-sum transferred from a
+    smaller scale, or the live library mid-training) that are carried in as building blocks and
+    never re-derived: their masks are re-evaluated on *these* boards and the rule tree is built
+    over them, so a sufficient seed yields a valid model even when no new concept is added.
     """
     N, n_cells = B.shape
     CL = _classes(V, lo, hi)
@@ -481,19 +535,20 @@ def invent_from_boards(B: np.ndarray, V: np.ndarray, M: Optional[np.ndarray] = N
     base: List[Expr] = [Cell(i) for i in range(n_cells)]
     base += [Lit(v) for v in sorted(set(int(x) for x in np.unique(B)) | {0, 1})]
 
-    library: List[Expr] = list(base)
-    kept: List[Concept] = []
     rounds: List[RoundInfo] = []
-    resid = _bits(CL)
-    baseline = resid
-    model = 0.0
-    final_rules: List[Rule] = []
+    baseline = _bits(CL)
+    # carry the seed in: fit it to THESE boards and start the model from it
+    kept: List[Concept] = list(seed) if seed else []
+    if kept:
+        final_rules, resid, model = _fit(kept, B, V, M, CL, min_leaf)
+    else:
+        final_rules, resid, model = [], baseline, 0.0
 
     for k in range(1, max_rounds + 1):
-        # Round 1 folds over cells (seeded with the whole-board folds, e.g. the nim-sum);
-        # later rounds reuse what was kept and fold over the groups it discovered.
+        # Round 1 folds over the whole board (seeding e.g. the nim-sum); later rounds reuse
+        # what was kept and fold over the groups it discovered.
         new_used, rep_rules, rep_resid, new_model, data_saved, cost, paid = _invent_round(
-            kept, final_rules, resid, model, B, V, M, CL, min_leaf, base, n_cells, max_size, cap)
+            kept, final_rules, resid, model, B, V, M, CL, min_leaf, base, max_size, cap)
         rounds.append(RoundInfo(k, new_used, rep_rules, rep_resid, data_saved, cost, paid))
         if not paid:
             break
@@ -502,48 +557,130 @@ def invent_from_boards(B: np.ndarray, V: np.ndarray, M: Optional[np.ndarray] = N
     return InventionResult(rounds, kept, final_rules, N, baseline)
 
 
-def grow_once(kept, B, V, M, prev_frac, max_size=None, cap="auto"):
-    """One incremental concept-growth step that REUSES the existing ``kept`` library — the
-    efficient, "don't re-create the wheel" path for live training. It re-evaluates the kept
-    concepts on the current boards and rebuilds the rule tree (cheap), and fires a search
-    round only when the library explains a *smaller fraction* of the data than before — i.e.
-    self-play surfaced structure it can't yet capture. Returns ``(kept, rules, unexplained_frac)``.
-    ``prev_frac`` is the library's last-accepted unexplained fraction (``None`` forces a cold
-    first search). No threshold — the trigger compares fraction to fraction."""
-    if len(B) < 8:
-        return kept, [], prev_frac
-    CL = _classes(V, 0.40, 0.60); min_leaf = max(3, len(V) // 200)   # inherited invent defaults
-    n_cells = B.shape[1]
-    if max_size is None:
-        max_size = 7 if n_cells <= 5 else 5     # reach: narrow boards may still need size-7 programs
-    if cap == "auto":
-        cap = 6000                              # but ALWAYS bound the search (cap=None was the explosion)
-    base = [Cell(i) for i in range(n_cells)]
-    base += [Lit(v) for v in sorted(set(int(x) for x in np.unique(B)) | {0, 1})]
-    for c in kept:                                       # cheap: re-derive masks on current boards
-        v = c.expr.eval(B, M)
-        c.mask = (v == c.const) if c.op == "=" else (v > c.const)
-    baseline = _bits(CL)                                 # bits to explain the data with NO concepts
-    rules = _build_rules(kept, CL, V, min_leaf, max_depth=6) if kept else []
-    resid = sum(r.resid for r in rules) if rules else baseline
-    model = _model_bits(rules, max(len(kept), 2)) if kept else 0.0
-    frac = resid / baseline if baseline > 0 else 0.0     # fraction of bits left UNEXPLAINED
-    # Compare *fractions*, not raw bits: raw residual climbs just because boards accumulate, a
-    # fraction does not — so this fires only on genuinely novel structure, with no threshold.
-    if kept and prev_frac is not None and frac <= prev_frac + 1e-9:
-        return kept, rules, frac                         # still explains the data → stay asleep
-    # Triggered (cold start, or the library now explains less of the data): run rounds until
-    # none pays, each one REUSING the growing library — so a single grow does full multi-round
-    # discovery (lines → threats → …) yet never re-searches what is already kept.
-    cur_kept, cur_rules, cur_resid, cur_model = kept, rules, resid, model
-    while True:
-        new_used, rep_rules, rep_resid, new_model, _ds, _cost, paid = _invent_round(
-            cur_kept, cur_rules, cur_resid, cur_model, B, V, M, CL, min_leaf, base, n_cells, max_size, cap)
-        if not paid:
-            break
-        cur_kept = cur_kept + new_used; cur_rules = rep_rules
-        cur_resid = rep_resid; cur_model = new_model
-    return cur_kept, cur_rules, (cur_resid / baseline if baseline > 0 else 0.0)
+# ───────────────────────────── per-wave growth over a live board table ─────────
+
+class BoardTable:
+    """The distinct-after-board table, grown a wave at a time and never rescanned.
+
+    The discovery loop never rescans history:
+    each wave folds in only the transitions self-play just touched, so the per-wave cost is
+    set by how much is *new*, not by how many games have been played. A board's value is read
+    from its smallest-``from_hash`` incoming transition — the same deterministic row choice as
+    :func:`_boards_values` — though the values themselves track the live (still-converging)
+    training signal; :meth:`ConceptLibrary.rebuild` squares everything up over the converged
+    values at the end of training.
+
+    ``cap`` bounds the table: it is a compute budget (the per-wave fit is linear in the table,
+    a search is table × programs — thousands keeps both interactive), not a tuned knob; any cap
+    comfortably above the rule tree's ``min_leaf`` floor yields the same discoveries, because a
+    concept is a *program* — a regularity visible in any fair sample, not a statistic that
+    needs every board. Small games never reach the cap, so they keep the exact full table.
+    Beyond it, uniform reservoir sampling (Vitter's Algorithm R) keeps each distinct board
+    seen so far with equal probability, evicting by slot-overwrite so row indices stay stable.
+    A board that returns after eviction re-enters the draw, so the sample tilts gently toward
+    what self-play keeps reaching — the bias *is* the exploration distribution."""
+
+    def __init__(self, cap: int = 6000) -> None:
+        self.cap = cap
+        self._seen = 0                       # distinct-board arrivals so far (drives the reservoir odds)
+        self._rng = np.random.default_rng(0)  # fixed seed: same arrivals → same retained sample
+        self._row: Dict[bytes, int] = {}     # board bytes → row index
+        self._cells: List[np.ndarray] = []   # the after-board per row
+        self._m: List[int] = []              # the token the move placed
+        self._v: List[float] = []            # current value
+        self._canon: List[str] = []          # smallest incoming from_hash (pins the value deterministically)
+
+    def __len__(self) -> int:
+        return len(self._cells)
+
+    @staticmethod
+    def _placed(boards, fh: str, after: np.ndarray) -> int:
+        if fh in boards:
+            before = np.asarray(boards[fh]).ravel()
+            placed = after[(before != after) & (after != 0)]
+            if len(placed):
+                return int(placed[0])
+        return 0
+
+    def _admit(self, after: np.ndarray, bkey: bytes) -> Optional[int]:
+        """Reservoir admission for a never-seen board: a free slot while under the cap;
+        past it, a uniformly-drawn victim slot is overwritten (or the newcomer is dropped)."""
+        self._seen += 1
+        if len(self._cells) < self.cap:
+            idx = len(self._cells)
+            self._cells.append(after); self._m.append(0); self._v.append(0.0); self._canon.append("")
+            self._row[bkey] = idx
+            return idx
+        j = int(self._rng.integers(self._seen))              # Algorithm R: keep with odds cap/seen
+        if j >= self.cap:
+            return None                                      # the newcomer loses the draw
+        del self._row[self._cells[j].tobytes()]              # evict by overwrite — indices stay stable
+        self._cells[j] = after
+        self._row[bkey] = j
+        return j
+
+    def update(self, wave_keys, boards, trans_scores) -> None:
+        """Fold this wave's touched transitions into the table: new boards get a row
+        (subject to the reservoir), known boards get their canonical value refreshed."""
+        for key in wave_keys:
+            entry = trans_scores.get(key)
+            if entry is None:
+                continue
+            fh, th = key
+            if th not in boards:
+                continue
+            _, score = entry
+            after = np.asarray(boards[th]).ravel().astype(np.int64)
+            bkey = after.tobytes()
+            idx = self._row.get(bkey)
+            if idx is None:                                  # a board never seen before
+                idx = self._admit(after, bkey)
+                if idx is None:
+                    continue
+                self._m[idx] = self._placed(boards, fh, after)
+            elif fh > self._canon[idx]:
+                continue                                     # not the canonical transition → no say
+            elif fh < self._canon[idx]:                      # a smaller from_hash → new canonical
+                self._m[idx] = self._placed(boards, fh, after)
+            self._canon[idx] = fh                            # canonical → take its value
+            self._v[idx] = float(score)
+
+    def arrays(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        if not self._cells:
+            return (np.zeros((0, 0), dtype=np.int64), np.zeros(0), np.zeros(0, dtype=np.int64))
+        return (np.array(self._cells, dtype=np.int64),
+                np.array(self._v, dtype=float),
+                np.array(self._m, dtype=np.int64))
+
+
+def grow(table: BoardTable, kept, floor, searched_n, max_size=None, cap="auto"):
+    """One per-wave growth step: refit the library to the current table (cheap, so the rule
+    leaves track the shifting Bellman values), and search only when the search is *due* (a cold
+    start, or the table has doubled since the last one — at most O(log N) searches) AND the
+    library is *insufficient* (nothing kept, or the unexplained fraction rose above ``floor``,
+    the lowest fraction the library has achieved). The search reuses ``kept`` as its seed and
+    its result is taken only if it explains at least as much — so a noisy wave can never lose
+    a good concept. A cold start searches once even when seeded; that first fit sets the floor.
+    Returns ``(kept, rules, floor, searched_n)``."""
+    B, V, M = table.arrays()
+    N = len(B)
+    if N < 8:
+        return kept, [], floor, searched_n
+    CL = _classes(V, 0.40, 0.60); min_leaf = max(3, N // 200)
+    baseline = _bits(CL)
+    rules, resid, _ = _fit(kept, B, V, M, CL, min_leaf) if kept else ([], baseline, 0.0)
+    frac = resid / baseline if baseline > 0 else 0.0
+    due = searched_n is None or N >= 2 * searched_n
+    insufficient = (not kept) or floor is None or frac > floor + 1e-9
+    if due and insufficient:
+        res = invent_from_boards(B, V, M, max_size=max_size, cap=cap, seed=kept)
+        new_resid = sum(r.resid for r in res.rules) if res.rules else baseline
+        if res.concepts and new_resid <= resid + 1e-9:       # taken only if it explains at least as much
+            kept, rules = res.concepts, res.rules
+            frac = new_resid / baseline if baseline > 0 else 0.0
+        searched_n = N
+    floor = frac if floor is None else min(floor, frac)     # the best the library has achieved
+    return kept, rules, floor, searched_n
 
 
 # ───────────────────────────── (de)serialisation for persistence ───────────────
@@ -557,8 +694,12 @@ def expr_to_dict(e: Expr) -> dict:
     if isinstance(e, Named): return {"t": "Named", "inner": expr_to_dict(e.inner)}
     if isinstance(e, Elem):  return {"t": "Elem", "j": e.j, "names": list(e.names)}
     if isinstance(e, Fold):
-        dom = ({"t": "CellDomain", "cells": list(e.domain.cells)} if isinstance(e.domain, CellDomain)
-               else {"t": "GroupDomain", "groups": [list(g) for g in e.domain.groups]})
+        if isinstance(e.domain, BoardDomain):
+            dom = {"t": "BoardDomain"}                          # width-free → the program transfers
+        elif isinstance(e.domain, CellDomain):
+            dom = {"t": "CellDomain", "cells": list(e.domain.cells)}
+        else:
+            dom = {"t": "GroupDomain", "groups": [list(g) for g in e.domain.groups]}
         return {"t": "Fold", "op": e.op, "domain": dom, "body": expr_to_dict(e.body)}
     raise TypeError(f"cannot serialise {type(e).__name__}")
 
@@ -574,8 +715,12 @@ def expr_from_dict(d: dict) -> Expr:
     if t == "Elem":  return Elem(d["j"], tuple(d["names"]))
     if t == "Fold":
         dd = d["domain"]
-        dom = (CellDomain(tuple(dd["cells"])) if dd["t"] == "CellDomain"
-               else GroupDomain([tuple(g) for g in dd["groups"]]))
+        if dd["t"] == "BoardDomain":
+            dom = BoardDomain()
+        elif dd["t"] == "CellDomain":
+            dom = CellDomain(tuple(dd["cells"]))
+        else:
+            dom = GroupDomain([tuple(g) for g in dd["groups"]])
         return Fold(d["op"], dom, expr_from_dict(d["body"]))
     raise ValueError(f"unknown expr tag {t!r}")
 
@@ -583,22 +728,29 @@ def expr_from_dict(d: dict) -> Expr:
 def _boards_values(memory) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Pull (after-board, value, just-moved token) from the stored transitions. The move
     is read straight from the before→after diff — the token the mover just placed (the
-    new non-empty value at a changed cell). Boards whose transition isn't available get
-    the guessed mover instead."""
+    new non-empty value at a changed cell); boards whose before-board isn't stored get 0."""
     boards, trans = memory._build_trans_scores()
     bv: Dict[tuple, float] = {}
     bm: Dict[tuple, int] = {}
+    canon: Dict[tuple, str] = {}                                 # board → its smallest incoming from_hash
     for (fh, th), (counts, score) in trans.items():
         if th not in boards:
             continue
         after = np.asarray(boards[th]).ravel()
         key = tuple(int(x) for x in after)
+        # A board is reached by many transitions whose scores all converge to its Bellman
+        # value; pre-convergence they can differ. Read the value from the smallest-from_hash
+        # incoming transition so the result is independent of dict iteration order — the
+        # same row choice BoardTable uses, keeping the two table builders deterministic.
+        if key in canon and fh >= canon[key]:
+            continue
+        canon[key] = fh
         bv[key] = float(score)
+        placed = []
         if fh in boards:
             before = np.asarray(boards[fh]).ravel()
-            placed = after[(before != after) & (after != 0)]   # what the move put down
-            if len(placed):
-                bm[key] = int(placed[0])
+            placed = after[(before != after) & (after != 0)]    # what the move put down
+        bm[key] = int(placed[0]) if len(placed) else 0
     keys = list(bv.keys())
     if not keys:
         return np.zeros((0, 0), dtype=np.int64), np.zeros(0), np.zeros(0, dtype=np.int64)

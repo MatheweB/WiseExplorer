@@ -20,16 +20,12 @@ from wise_explorer.core.types import Stats, Counts, OUTCOME_INDEX, OUTCOME_SCORE
 from wise_explorer.core.hashing import hash_board
 from wise_explorer.core.bayes import compatible
 from wise_explorer.memory.anchor_manager import AnchorManager
-from wise_explorer.memory.predicates import PredicateLibrary, TORCH_AVAILABLE
-from wise_explorer.memory.iti_miner import ITIMiner
-from wise_explorer.memory.tree_miner import TreeMiner
 from wise_explorer.memory.concept_library import ConceptLibrary
 
 if TYPE_CHECKING:
     from wise_explorer.agent.agent import State
     from wise_explorer.games.game_base import GameBase
 UNEXPLORED_ANCHOR_ID = -999
-PREDICATE_ANCHOR_ID = -998
 
 
 def _placed_token(from_board: np.ndarray, to_board: np.ndarray) -> int:
@@ -47,13 +43,12 @@ def _placed_token(from_board: np.ndarray, to_board: np.ndarray) -> int:
 class MoveEvaluation(NamedTuple):
     """Result of evaluate_moves: moves grouped by anchor with anchor stats.
 
-    Also carries bell and predicate scores so selection doesn't need to
+    Also carries bell and concept scores so selection doesn't need to
     re-clone games and re-query the DB for the same information.
     """
     anchors_with_moves: Dict[int, List[Tuple[np.ndarray, Stats]]]
     anchor_stats: Dict[int, Stats]
     bell_scores: Dict[tuple, Optional[float]]  # move_key -> propagated_score
-    pred_scores: Dict[tuple, Optional[float]]  # move_key -> predicate mean_score
     concept_scores: Dict[tuple, Optional[float]]  # move_key -> invented-concept value
 
 
@@ -85,10 +80,7 @@ class GameMemory(ABC):
             self.conn.commit()
 
         self.anchors = AnchorManager(self.conn, self.main_table, self.read_only)
-        self.predicate_library = PredicateLibrary(self.conn, self.read_only)
-        self.concept_library = ConceptLibrary(self.conn, self.read_only)   # value signal, persisted
-        self._batch_miner = TreeMiner()   # batch CART for end-of-training
-        self._iti_miner = ITIMiner()       # incremental for per-wave updates
+        self.concept_library = ConceptLibrary(self.conn, self.read_only)   # invented concepts, persisted
         self._cached_trans_scores: Dict[Tuple[str, str], Tuple[Counts, float]] = {}
         self._cached_boards: Dict[str, np.ndarray] = {}  # board cache (append-only)
         self._last_wave_keys: List[Tuple[str, str]] = []  # transitions touched last wave
@@ -240,7 +232,7 @@ class GameMemory(ABC):
         anchors = self.conn.execute("SELECT COUNT(*) FROM anchors").fetchone()[0]
         return {
             "anchors": anchors,
-            "predicates": self.predicate_library.count,
+            "concepts": len(self.concept_library.kept),
             **self._get_mode_specific_info(),
         }
 
@@ -252,7 +244,7 @@ class GameMemory(ABC):
         """Evaluate all valid moves and group by anchor.
 
         Uses a single batch DB query per position instead of 3 queries per move.
-        Also collects bell and predicate scores so selection doesn't need to
+        Also collects bell and concept scores so selection doesn't need to
         re-clone games and re-query.
         """
         current_board = game.get_state().board
@@ -265,12 +257,12 @@ class GameMemory(ABC):
         anchors_with_moves: Dict[int, List[Tuple[np.ndarray, Stats]]] = defaultdict(list)
         anchor_stats: Dict[int, Stats] = {}
         bell_scores: Dict[tuple, Optional[float]] = {}
-        pred_scores: Dict[tuple, Optional[float]] = {}
         concept_scores: Dict[tuple, Optional[float]] = {}
 
         for move, to_hash, to_board in self._compute_move_hashes(game, valid_moves):
             mk = tuple(move)
-            # invented-concept value of the resulting board (inert until the library is grown)
+            # invented-concept value of the resulting board (inert until the library is grown);
+            # a discovered rule values EVERY board, including ones training never visited
             concept_scores[mk] = self.concept_library.value_for(
                 to_board, _placed_token(from_board_2d, to_board))
 
@@ -282,37 +274,17 @@ class GameMemory(ABC):
                     anchors_with_moves[aid].append((move, direct_stats))
                     if aid not in anchor_stats:
                         anchor_stats[aid] = self.get_anchor_stats_by_id(aid) if aid != UNEXPLORED_ANCHOR_ID else Stats()
-
-                    # Also check predicate for the 4th signal
-                    board_2d = to_board if to_board.ndim == 2 else to_board.reshape(1, -1)
-                    ps = self.predicate_library.match(board_2d, from_board_2d)
-                    if ps is not None:
-                        a_rate = anchor_stats[aid].mean_score if aid in anchor_stats else 0.5
-                        pred_scores[mk] = ps.utility if is_decisive(ps, a_rate) else ps.mean_score
-                    else:
-                        pred_scores[mk] = None
                     continue
 
             bell_scores[mk] = None
-
-            # Unseen transition — check predicate library for a prior
-            board_2d = to_board if to_board.ndim == 2 else to_board.reshape(1, -1)
-            pred_stats = self.predicate_library.match(board_2d, from_board_2d)
-            if pred_stats is not None:
-                anchors_with_moves[PREDICATE_ANCHOR_ID].append((move, pred_stats))
-                if PREDICATE_ANCHOR_ID not in anchor_stats:
-                    anchor_stats[PREDICATE_ANCHOR_ID] = pred_stats
-                pred_scores[mk] = pred_stats.utility if is_decisive(pred_stats) else pred_stats.mean_score
-            else:
-                anchors_with_moves[UNEXPLORED_ANCHOR_ID].append((move, Stats()))
-                anchor_stats[UNEXPLORED_ANCHOR_ID] = Stats()
-                pred_scores[mk] = None
+            # Unseen transition — no stats yet; the concept score above still covers it
+            anchors_with_moves[UNEXPLORED_ANCHOR_ID].append((move, Stats()))
+            anchor_stats[UNEXPLORED_ANCHOR_ID] = Stats()
 
         return MoveEvaluation(
             anchors_with_moves=dict(anchors_with_moves),
             anchor_stats=anchor_stats,
             bell_scores=bell_scores,
-            pred_scores=pred_scores,
             concept_scores=concept_scores,
         )
 
@@ -371,7 +343,7 @@ class GameMemory(ABC):
         trajectory_keys: List[List[Tuple[str, str]]] = []
         # Cross-score accumulator: (from_hash, to_hash, observer_role) -> [score_sum, count]
         cross_scores: Dict[Tuple[str, str, int], List[float]] = defaultdict(lambda: [0.0, 0.0])
-        # Board storage: hash -> (board_bytes, rows, cols) for predicate mining
+        # Board storage: hash -> (board_bytes, rows, cols) for concept invention
         boards_to_store: Dict[str, Tuple[bytes, int, int]] = {}
 
         for stack_entry in stacks:
@@ -394,7 +366,7 @@ class GameMemory(ABC):
                 dest_board = game.get_state().board
                 to_hash = hash_board(dest_board)
 
-                # Store both boards for predicate mining (normalize to 2D)
+                # Store both boards for concept invention (normalize to 2D)
                 if from_hash not in boards_to_store:
                     fb = board if board.ndim == 2 else board.reshape(1, -1)
                     boards_to_store[from_hash] = (fb.tobytes(), fb.shape[0], fb.shape[1])
@@ -432,7 +404,7 @@ class GameMemory(ABC):
         return len(transitions), swaps
 
     def _store_boards(self, boards: Dict[str, Tuple[bytes, int, int]]) -> None:
-        """Store board arrays for predicate mining."""
+        """Store board arrays for concept invention."""
         if not boards:
             return
         cur = self.conn.cursor()
@@ -481,7 +453,7 @@ class GameMemory(ABC):
                 ).reshape(nrows, ncols).copy()
 
     def _build_trans_scores(self) -> Tuple[Dict[str, np.ndarray], Dict[Tuple[str, str], Tuple[Counts, float]]]:
-        """Build the per-transition target the predicate miner fits.
+        """Build the per-transition target the concept miner fits.
 
         The target is the minimax-propagated **Bellman** value of each transition
         — the raw win/tie/loss outcome with the prune phase's exploration noise
@@ -529,68 +501,34 @@ class GameMemory(ABC):
         }
         return boards, trans_scores
 
-    def mine_predicates(self, incremental: bool = False) -> int:
-        """Discover structural predicates from stored transitions.
+    def grow_concepts(self, incremental: bool = False) -> int:
+        """Grow the invented-concept library so the concept value signal tracks what self-play
+        has revealed.
 
-        Args:
-            incremental: If True, use ITI for fast per-wave update (~0.5ms).
-                         If False, use batch CART for full rebuild (~8ms).
-
-        Mines per-transition (from→to pairs), preserving implicit player
-        identity. Signal selection (bell vs mean) is per-from-board,
-        matching how move selection works.
-
-        Returns:
-            Number of predicates discovered.
-        """
-        if self.read_only:
-            raise RuntimeError("Cannot mine predicates in read-only mode")
-
-        # Predicate mining is transition-based (it reads the `transitions` table
-        # and uses from→to cross-board atoms). Markov memory has no such table.
-        if self.is_markov:
-            return 0
-
-        if incremental:
-            # Per-wave: only query the transitions touched this wave.
-            # Update the caches incrementally, then pass to ITI
-            # (ITI internally skips already-known transitions).
-            if not self._last_wave_keys:
-                return 0
-            self._load_new_boards()
-            self._update_trans_cache(self._cached_boards)
-            if not self._cached_trans_scores:
-                return 0
-            predicates = self._iti_miner.mine(
-                self._cached_boards, self._cached_trans_scores,
-                prune=False, wave_keys=self._last_wave_keys,
-            )
-        else:
-            # End-of-training: converge the Bellman values (full value iteration)
-            # so the bell/solo signal choice in _build_trans_scores sees the
-            # de-noised target, then rebuild the saved library with the batch
-            # CART miner — deterministic and globally optimal at each split, where
-            # the per-wave ITI trades that for incremental speed.
-            self.solve_graph()
-            boards, trans_scores = self._build_trans_scores()
-            if not trans_scores:
-                return 0
-            predicates = self._batch_miner.mine(boards, trans_scores)
-        self.predicate_library.save(predicates)
-        return len(predicates)
-
-    def grow_concepts(self) -> int:
-        """Refresh the invented-concept library from the current transitions, so the concept
-        value signal tracks what self-play has revealed. Cheap to call on the mining cadence;
-        the synthesiser reuses what it already kept rather than starting from scratch."""
+        ``incremental=True`` (the per-wave training cadence) grows from only the transitions
+        this wave touched — load the wave's new boards, refresh their scores, fold them into
+        the live board table. Local work, never a rescan of history. ``incremental=False``
+        (end of training) converges the Bellman values first (full value iteration), then
+        does the authoritative full pass over them."""
         if self.read_only or getattr(self, "is_markov", False):
             return 0
         from wise_explorer import synthesis
+        if incremental:
+            if not self._last_wave_keys:
+                return len(self.concept_library.kept)
+            self._load_new_boards()
+            self._update_trans_cache(self._cached_boards)
+            if not self._cached_trans_scores or not self._cached_boards:
+                return len(self.concept_library.kept)
+            return self.concept_library.grow(
+                self._last_wave_keys, self._cached_boards, self._cached_trans_scores)
+        self.solve_graph()                       # converge the values the considered fit reads
         B, V, M = synthesis._boards_values(self)
-        return self.concept_library.refresh(B, V, M)
+        return self.concept_library.rebuild(B, V, M)
 
     def _update_trans_cache(self, boards: Dict[str, np.ndarray]) -> None:
-        """Incrementally update cached transition scores for touched keys only."""
+        """Refresh cached transition scores for the keys this wave touched — the per-wave
+        feed for the concept library's board table."""
         import numpy as _np
 
         if not self._last_wave_keys:

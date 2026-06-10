@@ -79,6 +79,44 @@ class TestInvention:
         assert res.rounds == [] or res.stopped_after == 0
 
 
+class TestScaleInvariance:
+    """A whole-board fold is width-free: the same program runs at any board width, so a
+    concept learned at one scale transfers to another unchanged."""
+
+    def test_board_fold_reads_all_columns_at_any_width(self):
+        fold = S.Fold("⊕", S.BoardDomain(), S.Elem(0, S.BoardDomain.names))
+        assert list(fold.eval(np.array([[1, 2, 3]], dtype=np.int64))) == [1 ^ 2 ^ 3]
+        assert list(fold.eval(np.array([[1, 2, 3, 4, 5]], dtype=np.int64))) == [1 ^ 2 ^ 3 ^ 4 ^ 5]
+        assert str(fold) == "fold(⊕, board, cell)"
+
+    def test_board_fold_serialises_width_free(self):
+        fold = S.Fold("⊕", S.BoardDomain(), S.Elem(0, S.BoardDomain.names))
+        d = S.expr_to_dict(fold)
+        assert d["domain"] == {"t": "BoardDomain"}              # no width stored on disk
+        back = S.expr_from_dict(d)                              # reloaded program runs on a wider board
+        wide = np.array([[1, 2, 3, 4, 5, 6, 7, 8]], dtype=np.int64)
+        assert int(back.eval(wide)[0]) == 1 ^ 2 ^ 3 ^ 4 ^ 5 ^ 6 ^ 7 ^ 8
+
+    def test_whole_board_fold_has_no_support(self):
+        nimsum = S.Concept(S.Fold("⊕", S.BoardDomain(), S.Elem(0, S.BoardDomain.names)),
+                           "=", 0, np.zeros(4, dtype=bool), 2)
+        assert S._supports([nimsum]) == []                     # whole-board fold → skipped, like before
+
+    def test_invented_nimsum_transfers_to_a_wider_board(self, xor_invention):
+        # the nim-sum invented on 3-heap boards is a BoardDomain fold, so it classifies an
+        # 8-heap board it never saw — discover small, apply at any scale.
+        _, _, res = xor_invention
+        nimsum = next((c for c in res.concepts
+                       if isinstance(c.expr, S.Fold) and isinstance(c.expr.domain, S.BoardDomain)), None)
+        assert nimsum is not None, "expected the invented nim-sum to be a width-free BoardDomain fold"
+        wide = np.array([[1, 2, 3, 0, 0, 0, 0, 0],   # nim-sum 0
+                         [1, 2, 3, 4, 0, 0, 0, 0]],  # nim-sum 4
+                        dtype=np.int64)
+        for row in wide:
+            expected = (int(np.bitwise_xor.reduce(row)) == nimsum.const)
+            assert nimsum.holds(row) == expected
+
+
 class TestGroupCounting:
     def test_counts_played_and_empty_at_face_value(self):
         # the board is never recoded — counts compare to the move (== m) and to empty (== 0);

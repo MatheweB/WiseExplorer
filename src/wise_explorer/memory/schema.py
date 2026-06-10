@@ -17,23 +17,16 @@ Each mode has its own database file for isolation.
 They cluster fundamentally different units and converge to different equilibria.
 """
 
-_SCHEMA_PREDICATES = """
+# Raw board arrays by hash — the concept library reads these to turn stored
+# transitions back into (board, value) examples it can invent from. (Markov mode
+# stores them too but never invents — kept for schema symmetry and a future
+# markov-mode invention path.)
+_SCHEMA_BOARDS = """
 CREATE TABLE IF NOT EXISTS boards (
     board_hash TEXT PRIMARY KEY,
     board_data BLOB NOT NULL,
     board_rows INTEGER NOT NULL,
     board_cols INTEGER NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS predicates (
-    predicate_id INTEGER PRIMARY KEY AUTOINCREMENT,
-    atoms_json TEXT NOT NULL,
-    wins REAL DEFAULT 0.0,
-    ties REAL DEFAULT 0.0,
-    losses REAL DEFAULT 0.0,
-    support INTEGER DEFAULT 0,
-    score_variance REAL DEFAULT 1.0,
-    mining_score REAL DEFAULT NULL
 );
 """
 
@@ -72,7 +65,7 @@ CREATE TABLE IF NOT EXISTS metadata (
     key TEXT PRIMARY KEY,
     value TEXT
 );
-""" + _SCHEMA_PREDICATES
+""" + _SCHEMA_BOARDS
 
 SCHEMA_MARKOV = """
 CREATE TABLE IF NOT EXISTS states (
@@ -96,4 +89,4 @@ CREATE TABLE IF NOT EXISTS metadata (
     key TEXT PRIMARY KEY,
     value TEXT
 );
-""" + _SCHEMA_PREDICATES
+""" + _SCHEMA_BOARDS

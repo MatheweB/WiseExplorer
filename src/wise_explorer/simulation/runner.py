@@ -173,11 +173,9 @@ class SimulationRunner:
                 # Consolidate anchors
                 self.memory.consolidate_anchors()
 
-                # Incremental predicate update (ITI: ~0.5ms per wave)
-                self.memory.mine_predicates(incremental=True)
-                # Grow the concept library too — cheap (~4ms) re-eval each wave; the expensive
-                # search fires only when the residual rises, so the signal stays current.
-                self.memory.grow_concepts()
+                # Grow the concept library from only the boards this wave touched —
+                # discovery happens DURING training, locally, never a rescan of history.
+                self.memory.grow_concepts(incremental=True)
 
                 job_idx += len(wave_jobs)
 

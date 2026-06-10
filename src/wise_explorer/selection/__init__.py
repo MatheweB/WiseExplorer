@@ -63,12 +63,11 @@ def _rank_signals(
     bell_scores: Dict[tuple, Optional[float]],
     anchor_scores: Dict[tuple, float],
     solo_scores: Dict[tuple, float],
-    pred_scores: Optional[Dict[tuple, Optional[float]]] = None,
     concept_scores: Optional[Dict[tuple, Optional[float]]] = None,
 ) -> Tuple[str, ...]:
     """Rank signals by variance — most informative first.
 
-    Compares variance of bell, anchor, solo, predicate, and concept scores across
+    Compares variance of bell, anchor, solo, and concept scores across
     all moves. Returns signal names ordered by descending variance.
     """
     bells = [b for b in bell_scores.values() if b is not None]
@@ -80,10 +79,6 @@ def _rank_signals(
         "anchor": _fast_var(anchors),
         "solo": _fast_var(solos),
     }
-
-    if pred_scores:
-        preds = [p for p in pred_scores.values() if p is not None]
-        variances["pred"] = _fast_var(preds)
 
     if concept_scores:
         concepts = [c for c in concept_scores.values() if c is not None]
@@ -98,7 +93,6 @@ def _score_move(
     anchor_score: float,
     solo_score: float,
     signal_order: Tuple[str, ...],
-    pred_score: Optional[float] = None,
     concept_score: Optional[float] = None,
 ) -> Tuple[float, ...]:
     """Score a move as a tuple based on signal ranking.
@@ -108,9 +102,8 @@ def _score_move(
     with remaining signals as tiebreakers.
     """
     b = bell if bell is not None else anchor_score
-    p = pred_score if pred_score is not None else anchor_score
     c = concept_score if concept_score is not None else anchor_score
-    values = {"bell": b, "anchor": anchor_score, "solo": solo_score, "pred": p, "concept": c}
+    values = {"bell": b, "anchor": anchor_score, "solo": solo_score, "concept": c}
     return tuple(values[s] for s in signal_order)
 
 
@@ -150,9 +143,8 @@ def select_move(
     if not anchors_with_moves:
         return np.asarray(random.choice(valid_moves))
 
-    # Bell, predicate, and concept scores are pre-collected by evaluate_moves (no re-cloning)
+    # Bell and concept scores are pre-collected by evaluate_moves (no re-cloning)
     bell_scores = evaluation.bell_scores
-    pred_scores = evaluation.pred_scores
     concept_scores = evaluation.concept_scores
 
     # Collect anchor and solo scores per move for signal comparison
@@ -178,7 +170,7 @@ def select_move(
     # (Training keeps pure variance arbitration — it wants discriminative
     # exploration breadth, which is what makes Bellman converge in the first place.)
     signal_order = ("bell",) + tuple(
-        s for s in _rank_signals(bell_scores, anchor_scores, solo_scores, pred_scores, concept_scores)
+        s for s in _rank_signals(bell_scores, anchor_scores, solo_scores, concept_scores)
         if s != "bell"
     )
 
@@ -190,9 +182,8 @@ def select_move(
         for move, stats in moves:
             mk = tuple(move)
             bell = bell_scores.get(mk)
-            pred = pred_scores.get(mk) if pred_scores else None
             concept = concept_scores.get(mk) if concept_scores else None
-            key = _score_move(bell, a_score, _effective_score(stats, a_score), signal_order, pred, concept)
+            key = _score_move(bell, a_score, _effective_score(stats, a_score), signal_order, concept)
             move_scored.append((move, key))
 
     if pick_best:
