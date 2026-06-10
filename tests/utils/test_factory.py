@@ -118,3 +118,17 @@ class TestStateIndependence:
             
             # game2 should be unchanged (player still 1)
             assert game2.current_player() == 1
+
+class TestCreateGameSize:
+    def test_nim_size_builds_wider_game_with_distinct_id(self):
+        g = create_game("nim", size=8)
+        assert len(g.get_state().board) == 8
+        assert g.game_id() == "nim8"                 # never shares a DB with nim4
+
+    def test_default_nim_keeps_its_own_id(self):
+        assert create_game("nim").game_id() == "nim4"
+
+    def test_size_rejected_where_unsupported(self):
+        import pytest
+        with pytest.raises(ValueError, match="not supported"):
+            create_game("tic_tac_toe", size=5)

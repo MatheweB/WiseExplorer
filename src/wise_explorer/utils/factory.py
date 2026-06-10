@@ -35,12 +35,14 @@ def create_agent_swarms(
     return swarms
 
 
-def create_game(game_name: str) -> GameBase:
+def create_game(game_name: str, size: int | None = None) -> GameBase:
     """
     Create a game instance with its initial state.
 
     Args:
         game_name: Key from GAMES registry (e.g., "tic_tac_toe")
+        size: Optional board size, for games whose constructor takes one
+              (Nim: the number of piles). None uses the registry default.
 
     Returns:
         Configured game instance
@@ -50,8 +52,14 @@ def create_game(game_name: str) -> GameBase:
         raise ValueError(f"Unknown game: {game_name}. Available: {available}")
 
     game_class = GAMES[game_name]
-    initial_state: GameState = INITIAL_STATES[game_name]
 
+    if size is not None:
+        try:
+            return game_class(size)          # the constructor builds its own initial state
+        except TypeError:
+            raise ValueError(f"--size is not supported for {game_name}") from None
+
+    initial_state: GameState = INITIAL_STATES[game_name]
     game = game_class()
     game.set_state(initial_state.copy())
 

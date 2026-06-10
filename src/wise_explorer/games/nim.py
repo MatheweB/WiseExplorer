@@ -46,7 +46,9 @@ class Nim(GameBase):
         return f"H{heap_idx + 1}×{num_remove}"
 
     def game_id(self) -> str:
-        return "nim"
+        # width-explicit: a 4-pile and an 8-pile memory must never share a DB
+        # (their boards have different shapes)
+        return f"nim{self.n}"
 
     def num_players(self) -> int:
         return 2

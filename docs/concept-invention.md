@@ -311,13 +311,13 @@ value quality, not discovery.
 ## Running it
 
 ```bash
-wise-explorer invent -g nim                  # invent from the trained model
+wise-explorer invent -g nim                  # the persisted library — what play actually uses
+wise-explorer invent -g nim --remine         # re-run discovery, with the full bits ledger
 wise-explorer invent -g nim --fresh 10000    # train a throwaway demo first, then invent
-wise-explorer invent -g tic_tac_toe --fresh 6000
-python scripts/transfer_demo.py              # discover on 4 piles, play 8 piles zero-shot
+wise-explorer transfer                       # discover on 4 piles, play 8 piles zero-shot
 ```
 
-It prints, per round: the concepts invented — each formula **side by side with a derived
+With `--remine` or `--fresh` it prints, per round: the concepts invented — each formula **side by side with a derived
 plain-English reading** (`⟺` lines, enumerated from the program's possible inputs, never
 hand-labeled) — the rule set they support, the MDL ledger that decides whether to continue,
 and a closing KEY that translates every fold the rules use.

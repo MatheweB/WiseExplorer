@@ -66,8 +66,8 @@ The from-scratch agent can't find the rule in a space that big — but it never 
 found there. Discover where the game is small; apply where it is big. Run it yourself (~30 s):
 
 ```bash
-python scripts/transfer_demo.py          # discover on n=4, play n=8 zero-shot
-python scripts/transfer_demo.py --full   # + the honest controls (~4 min)
+wise-explorer transfer                    # discover on 4 piles, play 8 zero-shot (~30 s)
+wise-explorer transfer --piles 10 --full  # bigger target, plus the honest controls
 ```
 
 ---
@@ -126,14 +126,14 @@ wise-explorer --game minichess --self-play # watch the AI play itself
 wise-explorer --no-training                # play from existing memory only
 ```
 
-**See what it discovered** — `invent` shows the concepts and rules, with the full
-bits-saved-vs-cost ledger of how each one earned its place. `--fresh N` trains a quick
-throwaway demo first:
+**See what it discovered** — `invent` prints the library your trained model plays with;
+`--remine` re-runs discovery with the full bits-saved-vs-cost ledger, and `--fresh N`
+trains a quick throwaway demo first:
 
 ```bash
-wise-explorer invent -g nim                  # concepts from your trained model
+wise-explorer invent -g nim                  # the library your trained model plays with
 wise-explorer invent -g nim --fresh 10000    # ← train a demo, then watch it derive the nim-sum
-python scripts/transfer_demo.py              # ← discover on 4 piles, play 8 zero-shot
+wise-explorer transfer                       # ← discover on 4 piles, play 8 zero-shot
 ```
 
 <details>
@@ -142,6 +142,7 @@ python scripts/transfer_demo.py              # ← discover on 4 piles, play 8 z
 | Flag | Short | Description |
 |------|-------|-------------|
 | `--game` | `-g` | `tic_tac_toe`, `minichess`, `nim` (default: `tic_tac_toe`) |
+| `--size` | `-n` | Board size, for games that support it (Nim: piles; default 4) |
 | `--epochs` | `-e` | Training epochs — scales the number of self-play simulations (default: 100) |
 | `--turn-depth` | `-t` | Max turns per simulated game (default: 40) |
 | `--workers` | `-w` | Parallel worker processes (default: CPU count − 1) |
@@ -620,7 +621,7 @@ Then add it to `GAMES` and `INITIAL_STATES` in
 
 ```
 src/wise_explorer/
-├── cli.py · api.py             # CLI (train·play·invent) + public API (start_simulations)
+├── cli.py · api.py             # CLI (train·play·invent·transfer) + public API (start_simulations)
 ├── synthesis.py                # the discovery engine: fold programs, MDL, live growth
 ├── agent/agent.py              # Agent dataclass and State enum
 ├── core/                       # types.py (Bayesian scoring) · hashing.py · bayes.py (Bayes factor)
@@ -637,7 +638,7 @@ src/wise_explorer/
 ├── simulation/                 # runner.py (waves) · worker.py · training.py (prune/exploit)
 └── utils/ · debug/
 
-scripts/transfer_demo.py        # discover the nim-sum on 4 piles, play 8 piles zero-shot
+scripts/transfer_demo.py        # thin wrapper — prefer `wise-explorer transfer`
 docs/concept-invention.md       # the discovery engine, in depth
 tests/                          # mirrors src/   ·   data/memory/  SQLite DBs (auto-created)
 ```

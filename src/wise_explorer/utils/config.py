@@ -18,7 +18,9 @@ from wise_explorer.simulation import DEFAULT_WORKER_COUNT
 # ---------------------------------------------------------------------------
 
 PACKAGE_DIR = Path(__file__).parent.parent  # src/wise_explorer/
-DATA_DIR = PACKAGE_DIR / "data"
+# Trained memories live in the *working directory*, not inside the package —
+# visible, per-project, and safe for non-editable installs.
+DATA_DIR = Path.cwd() / "data"
 MEMORY_DIR = DATA_DIR / "memory"
 
 

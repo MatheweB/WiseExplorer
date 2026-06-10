@@ -24,4 +24,4 @@ settings.json
 
 # Database files
 *.db
-*.db-*
+*.db-*data/
