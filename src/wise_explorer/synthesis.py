@@ -566,130 +566,20 @@ def invent_from_boards(B: np.ndarray, V: np.ndarray, M: Optional[np.ndarray] = N
     return InventionResult(rounds, kept, final_rules, N, baseline)
 
 
-# ───────────────────────────── per-wave growth over a live board table ─────────
+# ───────────────────────────── the bounded data view ───────────────────────────
 
-class BoardTable:
-    """The distinct-after-board table, grown a wave at a time and never rescanned.
-
-    The discovery loop never rescans history:
-    each wave folds in only the transitions self-play just touched, so the per-wave cost is
-    set by how much is *new*, not by how many games have been played. A board's value is read
-    from its smallest-``from_hash`` incoming transition — the same deterministic row choice as
-    :func:`_boards_values` — though the values themselves track the live (still-converging)
-    training signal; :meth:`ConceptLibrary.rebuild` squares everything up over the converged
-    values at the end of training.
-
-    ``cap`` bounds the table: it is a compute budget (the per-wave fit is linear in the table,
-    a search is table × programs — thousands keeps both interactive), not a tuned knob; any cap
-    comfortably above the rule tree's ``min_leaf`` floor yields the same discoveries, because a
-    concept is a *program* — a regularity visible in any fair sample, not a statistic that
-    needs every board. Small games never reach the cap, so they keep the exact full table.
-    Beyond it, uniform reservoir sampling (Vitter's Algorithm R) keeps each distinct board
-    seen so far with equal probability, evicting by slot-overwrite so row indices stay stable.
-    A board that returns after eviction re-enters the draw, so the sample tilts gently toward
-    what self-play keeps reaching — the bias *is* the exploration distribution."""
-
-    def __init__(self, cap: int = 6000) -> None:
-        self.cap = cap
-        self._seen = 0                       # distinct-board arrivals so far (drives the reservoir odds)
-        self._rng = np.random.default_rng(0)  # fixed seed: same arrivals → same retained sample
-        self._row: Dict[bytes, int] = {}     # board bytes → row index
-        self._cells: List[np.ndarray] = []   # the after-board per row
-        self._m: List[int] = []              # the token the move placed
-        self._v: List[float] = []            # current value
-        self._canon: List[str] = []          # smallest incoming from_hash (pins the value deterministically)
-
-    def __len__(self) -> int:
-        return len(self._cells)
-
-    @staticmethod
-    def _placed(boards, fh: str, after: np.ndarray) -> int:
-        if fh in boards:
-            before = np.asarray(boards[fh]).ravel()
-            placed = after[(before != after) & (after != 0)]
-            if len(placed):
-                return int(placed[0])
-        return 0
-
-    def _admit(self, after: np.ndarray, bkey: bytes) -> Optional[int]:
-        """Reservoir admission for a never-seen board: a free slot while under the cap;
-        past it, a uniformly-drawn victim slot is overwritten (or the newcomer is dropped)."""
-        self._seen += 1
-        if len(self._cells) < self.cap:
-            idx = len(self._cells)
-            self._cells.append(after); self._m.append(0); self._v.append(0.0); self._canon.append("")
-            self._row[bkey] = idx
-            return idx
-        j = int(self._rng.integers(self._seen))              # Algorithm R: keep with odds cap/seen
-        if j >= self.cap:
-            return None                                      # the newcomer loses the draw
-        del self._row[self._cells[j].tobytes()]              # evict by overwrite — indices stay stable
-        self._cells[j] = after
-        self._row[bkey] = j
-        return j
-
-    def update(self, wave_keys, boards, trans_scores) -> None:
-        """Fold this wave's touched transitions into the table: new boards get a row
-        (subject to the reservoir), known boards get their canonical value refreshed."""
-        for key in wave_keys:
-            entry = trans_scores.get(key)
-            if entry is None:
-                continue
-            fh, th = key
-            if th not in boards:
-                continue
-            _, score = entry
-            after = np.asarray(boards[th]).ravel().astype(np.int64)
-            bkey = after.tobytes()
-            idx = self._row.get(bkey)
-            if idx is None:                                  # a board never seen before
-                idx = self._admit(after, bkey)
-                if idx is None:
-                    continue
-                self._m[idx] = self._placed(boards, fh, after)
-            elif fh > self._canon[idx]:
-                continue                                     # not the canonical transition → no say
-            elif fh < self._canon[idx]:                      # a smaller from_hash → new canonical
-                self._m[idx] = self._placed(boards, fh, after)
-            self._canon[idx] = fh                            # canonical → take its value
-            self._v[idx] = float(score)
-
-    def arrays(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-        if not self._cells:
-            return (np.zeros((0, 0), dtype=np.int64), np.zeros(0), np.zeros(0, dtype=np.int64))
-        return (np.array(self._cells, dtype=np.int64),
-                np.array(self._v, dtype=float),
-                np.array(self._m, dtype=np.int64))
-
-
-def grow(table: BoardTable, kept, floor, searched_n, max_size=None, cap="auto"):
-    """One per-wave growth step: refit the library to the current table (cheap, so the rule
-    leaves track the shifting Bellman values), and search only when the search is *due* (a cold
-    start, or the table has doubled since the last one — at most O(log N) searches) AND the
-    library is *insufficient* (nothing kept, or the unexplained fraction rose above ``floor``,
-    the lowest fraction the library has achieved). The search reuses ``kept`` as its seed and
-    its result is taken only if it explains at least as much — so a noisy wave can never lose
-    a good concept. A cold start searches once even when seeded; that first fit sets the floor.
-    Returns ``(kept, rules, floor, searched_n)``."""
-    B, V, M = table.arrays()
-    N = len(B)
-    if N < 8:
-        return kept, [], floor, searched_n
-    min_leaf = max(3, N // 200)
-    baseline = _bits(V)
-    rules, resid, _ = _fit(kept, B, V, M, min_leaf) if kept else ([], baseline, 0.0)
-    frac = resid / baseline if baseline > 0 else 0.0
-    due = searched_n is None or N >= 2 * searched_n
-    insufficient = (not kept) or floor is None or frac > floor + 1e-9
-    if due and insufficient:
-        res = invent_from_boards(B, V, M, max_size=max_size, cap=cap, seed=kept)
-        new_resid = sum(r.resid for r in res.rules) if res.rules else baseline
-        if res.concepts and new_resid <= resid + 1e-9:       # taken only if it explains at least as much
-            kept, rules = res.concepts, res.rules
-            frac = new_resid / baseline if baseline > 0 else 0.0
-        searched_n = N
-    floor = frac if floor is None else min(floor, frac)     # the best the library has achieved
-    return kept, rules, floor, searched_n
+# Discovery runs over at most this many boards. It is a compute budget (a fit is linear
+# in the table, a search is table × programs — thousands keeps both interactive), not a
+# tuned knob: any cap comfortably above the rule tree's ``min_leaf`` floor yields the
+# same discoveries, because a concept is a *program* — a regularity visible in any fair
+# sample, not a statistic that needs every board. Small games come in under it whole;
+# bigger ones are uniformly subsampled by :meth:`ConceptLibrary.rebuild`.
+# (A per-wave reservoir + live refit over this budget was built, benched, and deleted:
+# training-time selection never reads the concept signal, so the live fit's only consumer
+# was the value loop's heal — where a noisy mid-wave refit could transiently collapse the
+# tree and poison one healing pass. Discovery now happens only where completed values
+# exist: at the loop's boundaries.)
+CAP = 6000
 
 
 # ───────────────────────────── (de)serialisation for persistence ───────────────
@@ -749,8 +639,7 @@ def _boards_values(memory) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         key = tuple(int(x) for x in after)
         # A board is reached by many transitions whose scores all converge to its Bellman
         # value; pre-convergence they can differ. Read the value from the smallest-from_hash
-        # incoming transition so the result is independent of dict iteration order — the
-        # same row choice BoardTable uses, keeping the two table builders deterministic.
+        # incoming transition so the result is independent of dict iteration order.
         if key in canon and fh >= canon[key]:
             continue
         canon[key] = fh

@@ -81,9 +81,6 @@ class GameMemory(ABC):
 
         self.anchors = AnchorManager(self.conn, self.main_table, self.read_only)
         self.concept_library = ConceptLibrary(self.conn, self.read_only)   # invented concepts, persisted
-        self._cached_trans_scores: Dict[Tuple[str, str], Tuple[Counts, float]] = {}
-        self._cached_boards: Dict[str, np.ndarray] = {}  # board cache (append-only)
-        self._last_wave_keys: List[Tuple[str, str]] = []  # transitions touched last wave
 
     # -------------------------------------------------------------------------
     # Abstract Methods (subclasses must implement)
@@ -398,9 +395,6 @@ class GameMemory(ABC):
         self._record_cross_scores(cross_scores)
         self._propagate_bellman(trajectory_keys)
 
-        # Track which transitions were touched for incremental mining
-        self._last_wave_keys = list(transitions.keys())
-
         return len(transitions), swaps
 
     def _store_boards(self, boards: Dict[str, Tuple[bytes, int, int]]) -> None:
@@ -425,32 +419,6 @@ class GameMemory(ABC):
             board = np.frombuffer(data, dtype=np.int8).reshape(nrows, ncols).copy()
             result[h] = board
         return result
-
-    def _load_new_boards(self) -> None:
-        """Load only boards not already in cache (boards table is append-only)."""
-        if not self._cached_boards:
-            # First call: load everything
-            self._cached_boards = self._load_boards()
-            return
-        # Only load new boards by checking which hashes from last wave are missing
-        needed = set()
-        for fh, th in self._last_wave_keys:
-            if fh not in self._cached_boards:
-                needed.add(fh)
-            if th not in self._cached_boards:
-                needed.add(th)
-        if not needed:
-            return
-        for h in needed:
-            row = self.conn.execute(
-                "SELECT board_data, board_rows, board_cols FROM boards WHERE board_hash=?",
-                (h,),
-            ).fetchone()
-            if row:
-                data, nrows, ncols = row
-                self._cached_boards[h] = np.frombuffer(
-                    data, dtype=np.int8,
-                ).reshape(nrows, ncols).copy()
 
     def _build_trans_scores(self) -> Tuple[Dict[str, np.ndarray], Dict[Tuple[str, str], Tuple[Counts, float]]]:
         """Build the per-transition target the concept miner fits.
@@ -501,79 +469,40 @@ class GameMemory(ABC):
         }
         return boards, trans_scores
 
-    def grow_concepts(self, incremental: bool = False) -> int:
-        """Grow the invented-concept library so the concept value signal tracks what self-play
-        has revealed.
+    def grow_concepts(self, game=None) -> int:
+        """Turn the value loop's wheel once: evidence → heal → distill → re-heal.
 
-        ``incremental=True`` (the per-wave training cadence) grows from only the transitions
-        this wave touched — load the wave's new boards, refresh their scores, fold them into
-        the live board table. Local work, never a rescan of history. ``incremental=False``
-        (end of training) converges the Bellman values first (full value iteration), then
-        does the authoritative full pass over them."""
+        ``solve_graph`` re-derives every value from raw counts (evidence re-anchors the
+        loop each cycle), ``complete_values`` lets the library price the legal replies
+        nobody has played so the backup stops trusting blind spots, and ``rebuild`` then
+        fits discovery on the completed values — the system's best current belief — before
+        a final heal with the rules just distilled. (Measured, seeded 8-pile Nim: fitting
+        on evidence-only values instead collapses play 80→32/200 — at 1% coverage the
+        un-healed backup is mostly noise and the refit shreds the transferred rules.
+        Fitting on healed values holds ~94%. The guard against self-echo is the evidence
+        re-anchor plus the MDL gate, not starving discovery of its own signal.)
+
+        This is discovery's only venue — between calls the library is the last considered
+        fit. Without a ``game`` the heals are skipped (values stay evidence-only)."""
         if self.read_only or getattr(self, "is_markov", False):
             return 0
         from wise_explorer import synthesis
-        if incremental:
-            if not self._last_wave_keys:
-                return len(self.concept_library.kept)
-            self._load_new_boards()
-            self._update_trans_cache(self._cached_boards)
-            if not self._cached_trans_scores or not self._cached_boards:
-                return len(self.concept_library.kept)
-            return self.concept_library.grow(
-                self._last_wave_keys, self._cached_boards, self._cached_trans_scores)
-        self.solve_graph()                       # converge the values the considered fit reads
+        self.solve_graph()
+        if game is not None and not self.concept_library.rules:
+            # bootstrap: completion can't lend prices from an empty head. On the first
+            # boundary (cold start, or a freshly seeded library whose rules are cleared)
+            # read the notebook once to mint a provisional fit; the rebuild below then
+            # re-distills properly from the completed values. (Measured: skipping this
+            # leaves the first boundary's fit on raw evidence AND heals with it —
+            # 87/200 on seeded 8-pile Nim vs ~199 once rules exist.)
+            self.concept_library.rebuild(*synthesis._boards_values(self))
+        if game is not None:
+            self.complete_values(game)
         B, V, M = synthesis._boards_values(self)
-        return self.concept_library.rebuild(B, V, M)
-
-    def _update_trans_cache(self, boards: Dict[str, np.ndarray]) -> None:
-        """Refresh cached transition scores for the keys this wave touched — the per-wave
-        feed for the concept library's board table."""
-        import numpy as _np
-
-        if not self._last_wave_keys:
-            return
-
-        # Query only the touched transitions
-        touched = set(self._last_wave_keys)
-        placeholders = ",".join(["(?,?)"] * len(touched))
-        params = [v for k in touched for v in k]
-
-        try:
-            rows = self.conn.execute(
-                f"SELECT from_hash, to_hash, wins, ties, losses, propagated_score "
-                f"FROM transitions WHERE (from_hash, to_hash) IN (VALUES {placeholders})",
-                params,
-            ).fetchall()
-        except Exception:
-            # Fallback: query all (some SQLite versions don't support VALUES)
-            rows = self.conn.execute(
-                "SELECT from_hash, to_hash, wins, ties, losses, propagated_score "
-                "FROM transitions"
-            ).fetchall()
-
-        # Group touched transitions by from_hash for signal selection
-        from_groups: Dict[str, list] = {}
-        for from_hash, to_hash, w, t, l, bell in rows:
-            if to_hash not in boards or from_hash not in boards:
-                continue
-            s = Stats(w, t, l)
-            if s.total <= 0:
-                continue
-            if from_hash not in from_groups:
-                from_groups[from_hash] = []
-            from_groups[from_hash].append((to_hash, (w, t, l), bell, s.mean_score))
-
-        for from_hash, transitions in from_groups.items():
-            bell_vals = [t[2] for t in transitions if t[2] is not None]
-            mean_vals = [t[3] for t in transitions]
-            bell_var = float(_np.var(bell_vals)) if len(bell_vals) >= 2 else 0.0
-            mean_var = float(_np.var(mean_vals)) if len(mean_vals) >= 2 else 0.0
-            use_bell = bell_var > mean_var and len(bell_vals) > len(transitions) * 0.5
-
-            for to_hash, counts, bell, mean in transitions:
-                score = bell if (use_bell and bell is not None) else mean
-                self._cached_trans_scores[(from_hash, to_hash)] = (counts, score)
+        kept = self.concept_library.rebuild(B, V, M)
+        if game is not None:
+            self.complete_values(game)           # re-price with the rules just distilled
+        return kept
 
     def _record_cross_scores(self, cross_scores: Dict) -> None:
         """Hook for recording cross-scores. No-op for Markov memory."""
@@ -585,6 +514,10 @@ class GameMemory(ABC):
 
     def solve_graph(self, epsilon: float = 1e-6, max_iters: int = 200) -> int:
         """Full value iteration on the game graph. No-op for Markov memory."""
+        return 0
+
+    def complete_values(self, game) -> int:
+        """Library-completed value pass. No-op for Markov memory."""
         return 0
 
     def _commit(self, transitions: Dict[Tuple[str, str], List[float]]) -> int:

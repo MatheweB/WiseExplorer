@@ -1,4 +1,4 @@
-"""Tests for the persistent, incremental concept library (the live value signal)."""
+"""Tests for the persistent concept library and the value loop it powers."""
 import itertools
 import sqlite3
 
@@ -31,14 +31,6 @@ class TestSerialization:
             assert np.array_equal(e.eval(B, m), e2.eval(B, m))
 
 
-def _xor_wave():
-    """The xor data shaped as one training wave: per-transition keys, boards, scores."""
-    B, V, _ = _xor_data()
-    boards = {f"t{i}": B[i] for i in range(len(B))}
-    trans = {(f"f{i}", f"t{i}"): ((1, 0, 0), float(V[i])) for i in range(len(B))}
-    return list(trans.keys()), boards, trans
-
-
 class TestConceptLibrary:
     def test_rebuild_persist_reload(self):
         B, V, M = _xor_data()
@@ -53,22 +45,13 @@ class TestConceptLibrary:
         assert len(reloaded.rules) == len(lib.rules)
         assert reloaded.value_for(np.array([0, 0, 0])) == win
 
-    def test_regrow_on_same_wave_is_stable(self):
-        keys, boards, trans = _xor_wave()
-        lib = ConceptLibrary(sqlite3.connect(":memory:"))
-        n1 = lib.grow(keys, boards, trans, max_size=5)            # cold start → one search
-        assert n1 >= 1 and lib.rules
-        n2 = lib.grow(keys, boards, trans, max_size=5)            # same data → no re-search
-        assert n1 == n2
-
-    def test_tiny_wave_on_resumed_db_keeps_rules(self):
-        # a resumed run whose first wave holds <8 boards must not wipe the persisted model
+    def test_tiny_rebuild_keeps_the_loaded_model(self):
+        # a rebuild over <8 boards (a near-empty resumed run) must not wipe the persisted model
         B, V, M = _xor_data()
         conn = sqlite3.connect(":memory:")
         ConceptLibrary(conn).rebuild(B, V, M, max_size=5)
-        resumed = ConceptLibrary(conn)                            # reload: live table starts empty
-        keys, boards, trans = _xor_wave()
-        resumed.grow(keys[:2], boards, trans)                     # 2 boards < 8
+        resumed = ConceptLibrary(conn)
+        resumed.rebuild(B[:2], V[:2], M[:2], max_size=5)          # 2 boards < 8
         assert resumed.rules and ConceptLibrary(conn, read_only=True).rules
 
     def test_seed_from_carries_programs_only(self):
@@ -78,36 +61,71 @@ class TestConceptLibrary:
         dst = ConceptLibrary(sqlite3.connect(":memory:"))
         assert dst.seed_from(src) >= 1
         assert dst.kept and not dst.rules                         # structure transfers, worth doesn't
-        assert dst.value_for(np.array([0, 0, 0])) is None         # inert until the first grow fits it
+        assert dst.value_for(np.array([0, 0, 0])) is None         # inert until a rebuild fits it
 
     def test_empty_library_is_inert(self):
         lib = ConceptLibrary(sqlite3.connect(":memory:"))
         assert lib.value_for(np.array([1, 2, 3])) is None         # nothing discovered → no signal
 
 
-class TestBoardTableReservoir:
-    @staticmethod
-    def _offer(table, lo, hi):
-        """Offer boards [i, i, i] for i in [lo, hi) as one wave."""
-        boards = {f"t{i}": np.array([i, i, i]) for i in range(lo, hi)}
-        trans = {(f"f{i}", f"t{i}"): ((1, 0, 0), 0.5) for i in range(lo, hi)}
-        table.update(list(trans.keys()), boards, trans)
+class TestBoundedRebuild:
+    def test_rebuild_subsamples_past_the_cap(self, monkeypatch):
+        # discovery's data view is bounded: past the cap, rebuild fits a uniform sample
+        monkeypatch.setattr(S, "CAP", 32)
+        B, V, M = _xor_data()                                      # 64 rows > 32
+        lib = ConceptLibrary(sqlite3.connect(":memory:"))
+        assert lib.rebuild(B, V, M, max_size=5) >= 1               # nim-sum still found in the sample
+        assert lib.value_for(np.array([0, 0, 0])) > lib.value_for(np.array([1, 0, 0]))
 
-    def test_under_cap_keeps_every_board(self):
-        t = S.BoardTable(cap=50)
-        self._offer(t, 0, 30)
-        assert len(t) == 30
 
-    def test_over_cap_is_bounded_and_consistent(self):
-        t = S.BoardTable(cap=20)
-        self._offer(t, 0, 500)
-        assert len(t) == 20                                        # bounded
-        B, V, M = t.arrays()
-        assert len(B) == len(V) == len(M) == 20                    # parallel lists stay in step
-        for bkey, idx in t._row.items():                           # index ↔ rows never desync
-            assert t._cells[idx].astype(np.int64).tobytes() == bkey
+class TestValueLoop:
+    """The loop's two pieces: batched pricing, and library-completed Bellman backups."""
 
-    def test_same_arrivals_same_sample(self):
-        a, b = S.BoardTable(cap=20), S.BoardTable(cap=20)
-        self._offer(a, 0, 500); self._offer(b, 0, 500)
-        assert np.array_equal(a.arrays()[0], b.arrays()[0])        # seeded draw → reproducible
+    def test_values_for_matches_value_for(self):
+        B, V, M = _xor_data()
+        lib = ConceptLibrary(sqlite3.connect(":memory:"))
+        lib.rebuild(B, V, M, max_size=5)
+        for row, m, got in zip(B, M, lib.values_for(B, M)):
+            assert got == lib.value_for(row, int(m))
+
+    def test_values_for_empty_library_is_all_nan(self):
+        lib = ConceptLibrary(sqlite3.connect(":memory:"))
+        assert np.isnan(lib.values_for(np.zeros((3, 3), dtype=np.int64))).all()
+
+    def test_complete_values_heals_an_unplayed_refutation(self, tmp_path):
+        """Evidence-only backups call [0,1,2] safe because the one reply anyone PLAYED
+        loses — the winning reply [0,1,1] was never visited. The library (which knows
+        the nim-sum) prices it, and the completed backup flips the verdict."""
+        from wise_explorer.core.hashing import hash_board
+        from wise_explorer.games.nim import Nim
+        from wise_explorer.memory import TransitionMemory
+
+        mem = TransitionMemory(tmp_path / "nim3.db")
+        B, V, M = _xor_data()
+        mem.concept_library.rebuild(B, V, M, max_size=5)           # the library knows nim-sum
+
+        boards = [np.array(b, dtype=np.int8) for b in ([0, 2, 2], [0, 1, 2], [0, 0, 2], [0, 0, 0])]
+        h22, h12, h02, h00 = (hash_board(b) for b in boards)
+        cur = mem.conn.cursor()
+        cur.executemany(
+            "INSERT INTO boards (board_hash, board_data, board_rows, board_cols) VALUES (?,?,?,?)",
+            [(hash_board(b), b.reshape(1, -1).tobytes(), 1, 3) for b in boards])
+        cur.executemany(
+            "INSERT INTO transitions (from_hash, to_hash, wins, ties, losses) VALUES (?,?,?,?,?)",
+            [(h22, h12, 0, 0, 8), (h12, h02, 0, 0, 8), (h02, h00, 8, 0, 0)])
+        mem.conn.commit()
+
+        mem.solve_graph()
+        assert mem.get_propagated_score(h22, h12) > 0.8            # the blind spot: "[0,1,2] is safe"
+        priced = mem.complete_values(Nim(3))
+        assert priced >= 4                                         # the never-played replies got prices
+        assert mem.get_propagated_score(h22, h12) < 0.1            # healed: the refutation now counts
+        assert mem.get_propagated_score(h02, h00) > 0.9            # sound values stay sound
+        mem.close()
+
+    def test_complete_values_is_inert_without_rules(self, tmp_path):
+        from wise_explorer.games.nim import Nim
+        from wise_explorer.memory import TransitionMemory
+        mem = TransitionMemory(tmp_path / "empty.db")
+        assert mem.complete_values(Nim(3)) == 0                    # no concepts → nothing to lend
+        mem.close()

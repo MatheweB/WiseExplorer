@@ -1,4 +1,4 @@
-"""A persistent, growing library of invented concepts, used as a live value signal.
+"""A persistent library of invented concepts, used as a value signal.
 
 Holds the concepts the synthesiser has discovered (the nim-sum, the lines, threats…) and the
 rule tree over them, and turns *any* board into a value through that tree — including boards
@@ -7,12 +7,13 @@ every position, not just the visited ones.
 
 It persists the discovered programs (not their board-dependent masks) to SQLite, so the
 separate, read-only worker processes that generate self-play can reload exactly the same
-concepts. During training it grows per wave via :func:`synthesis.grow` — folding only the
-transitions the wave touched into a live :class:`synthesis.BoardTable`, refitting what it
-already kept, and searching only when the library stops explaining the data — and at the end
-of training :meth:`rebuild` re-derives everything over the converged values. An empty library
-is inert (every value is ``None``), so its selection signal has no effect until concepts have
-actually been discovered.
+concepts. Discovery has one venue: :meth:`rebuild`, called at each training-cycle boundary
+by the value loop (docs/value-loop.md) over the completed values — between boundaries the
+library simply *is* the last considered fit. (A per-wave live refit existed and was deleted:
+nothing reads the concept signal during training, and a refit over still-drifting values
+could transiently collapse the tree right where the loop's healing pass would read it.)
+An empty library is inert (every value is ``None``), so its selection signal has no effect
+until concepts have actually been discovered.
 """
 import json
 import sqlite3
@@ -41,50 +42,28 @@ class ConceptLibrary:
         self.read_only = read_only
         self.kept: List[S.Concept] = []     # the concepts discovered so far (carried forward)
         self.rules: List[S.Rule] = []       # the value model: rule paths with leaf values
-        self.floor: Optional[float] = None  # lowest unexplained fraction achieved (search trigger)
-        self.table = S.BoardTable()         # the live board table, grown a wave at a time
-        self._searched_n = None             # table size at the last search (bounds the search cadence)
         if not read_only:
             self.conn.executescript(_SCHEMA)
         self._load()
 
-    # ── per-wave growth (main process, local to the wave) ───────────────────────
-    def grow(self, wave_keys, boards, trans_scores, max_size=None, cap="auto") -> int:
-        """Grow from only the transitions this wave touched: fold them into the board table,
-        refit the library, and search only when :func:`synthesis.grow` says the library
-        stopped explaining the data. Never rescans history, so per-wave cost tracks what
-        changed, not how many games have run. :meth:`rebuild` still does the authoritative
-        end-of-training pass."""
-        if self.read_only or not wave_keys:
-            return len(self.kept)
-        self.table.update(wave_keys, boards, trans_scores)
-        if len(self.table) < 8:
-            return len(self.kept)            # too little data yet — leave the loaded model alone
-        self.kept, self.rules, self.floor, self._searched_n = S.grow(
-            self.table, self.kept, self.floor, self._searched_n, max_size, cap)
-        self.save()
-        return len(self.kept)
-
-    # ── authoritative full rebuild (end of training, over converged values) ─────
+    # ── discovery (the value loop's distillation beat) ──────────────────────────
     def rebuild(self, B: np.ndarray, V: np.ndarray, M: np.ndarray,
                 max_size=None, cap="auto") -> int:
-        """Re-run discovery over the converged table. Run once at the end of training so the
-        persisted rules reflect the converged values — the per-wave path is a fast live
-        approximation; this is the considered fit. The search is seeded with the current
+        """Re-run discovery over the given boards and values — called at each training-cycle
+        boundary, on the loop's completed values. The search is seeded with the current
         library: knowledge carries forward (a transferred concept survives even when this
         game's data alone couldn't re-derive it), and the fit decides what the rules actually
-        use. When the table outgrows the per-wave budget (``table.cap``), discovery runs over
-        a uniform sample of it instead: a concept is a program, visible in any fair sample."""
+        use. A sufficient seed self-limits — the MDL gate finds nothing left that pays.
+        Beyond the data budget (:data:`synthesis.CAP`), discovery runs over a uniform sample:
+        a concept is a program, visible in any fair sample."""
         if self.read_only:
             return len(self.kept)
-        if len(B) > self.table.cap:
-            keep = np.random.default_rng(0).choice(len(B), self.table.cap, replace=False)
+        if len(B) > S.CAP:
+            keep = np.random.default_rng(0).choice(len(B), S.CAP, replace=False)
             B, V, M = B[keep], V[keep], M[keep]
         if len(B) >= 8:
             res = S.invent_from_boards(B, V, M, max_size=max_size, cap=cap, seed=self.kept)
             self.kept, self.rules = res.concepts, res.rules
-            self.floor = (sum(r.resid for r in res.rules) / res.baseline_bits
-                          if res.baseline_bits > 0 else 0.0)
         self.save()
         return len(self.kept)
 
@@ -117,10 +96,27 @@ class ConceptLibrary:
         """The library's value for a board: the leaf its rule-path lands in. ``None`` when the
         library is empty or no rule matches. ``m`` is the just-played token (used only by
         move-relative concepts; cell-only ones ignore it)."""
+        v = self.values_for(np.asarray(board).reshape(1, -1),
+                            None if m is None else np.array([m]))[0]
+        return None if np.isnan(v) else float(v)
+
+    def values_for(self, B: np.ndarray, M: Optional[np.ndarray] = None) -> np.ndarray:
+        """One value per row of ``B`` (NaN where no rule matches), via a single batched
+        rule-walk. ``M`` gives each row's just-played token. This is what lets the value
+        loop price thousands of never-visited boards in one pass."""
+        out = np.full(len(B), np.nan)
+        if not self.rules or not len(B):
+            return out
+        unmatched = np.ones(len(B), dtype=bool)
         for r in self.rules:
-            if all(c.holds(board, m) == sense for c, sense in r.path):
-                return r.avg
-        return None
+            hit = np.ones(len(B), dtype=bool)
+            for con, sense in r.path:
+                v = con.expr.eval(B, M)
+                holds = (v == con.const) if con.op == "=" else (v > con.const)
+                hit &= (holds == sense)
+            out[unmatched & hit] = r.avg
+            unmatched &= ~hit
+        return out
 
     # ── persistence (programs only — masks are board-order-dependent) ───────────
     def save(self) -> None:
@@ -161,15 +157,14 @@ class ConceptLibrary:
 
     def seed_from(self, conn: sqlite3.Connection) -> int:
         """Seed this library with the concepts another game/scale already discovered. Carries
-        the *programs* in as building blocks — their masks are re-derived on the first wave
-        over the local boards, and the rule tree (the *worth* of each concept) is rebuilt
-        natively, so only the transferable structure crosses over. A width-free nim-sum learned
-        at 4 piles thus arrives ready to explain 8 piles. Any local rules are cleared, so the
-        library stays inert (``value_for`` is ``None``) until the first grow fits the seed."""
+        the *programs* in as building blocks — their masks are re-derived over the local
+        boards, and the rule tree (the *worth* of each concept) is rebuilt natively, so only
+        the transferable structure crosses over. A width-free nim-sum learned at 4 piles thus
+        arrives ready to explain 8 piles. Any local rules are cleared, so the library stays
+        inert (``value_for`` is ``None``) until the first rebuild fits the seed."""
         concepts = self._concepts_from(conn)
         self.kept = [concepts[k] for k in sorted(concepts)]
         self.rules = []
-        self.floor = None
         return len(self.kept)
 
     def _load(self) -> None:

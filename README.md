@@ -46,6 +46,7 @@ only on 4-pile Nim (120 positions) plays **8-pile Nim** (362,880 positions, a st
 |---|---|---|:--:|
 | **zero-shot transfer** | 4-pile only (120 positions) | with no 8-pile data at all | **400/400** |
 | from-scratch control | 8-pile, 3000 games | after seeing 1.65% of the space | 51/400 (≈ chance) |
+| **seeded, then retrained** | 4-pile seed + 3000 8-pile games | the [value loop](docs/value-loop.md) keeps the rule in charge | **400/400** |
 
 ```mermaid
 flowchart LR
@@ -387,13 +388,13 @@ the word. (Hard cuts at 0.40/0.60 used to do this job; benched head-to-head, the
 masses matched every result with half the duplicate concepts and less junk, so the cuts
 were deleted.)
 
-**Discovery happens during training.** Each wave of self-play folds its new boards into a
-live table; the library refits cheaply every wave and runs a full search only when the
-table has doubled *and* the current concepts have stopped explaining the data — so a
-sufficient library does zero work. When training ends, one considered pass over the
-converged values produces the model that is persisted and printed. A library can also be
-**seeded from another game's DB** (`ConceptLibrary.seed_from`) — that's the transfer demo:
-programs carry over; their worth is re-fit locally.
+**Discovery runs where the values are trustworthy.** At each training-cycle boundary the
+[value loop](docs/value-loop.md) solves the graph from raw evidence, heals it with the
+current library, and runs discovery over those completed values; a sufficient library
+self-limits (the MDL search finds nothing left that pays). The persisted model is always
+the last considered fit. A library can also be **seeded from another game's DB**
+(`ConceptLibrary.seed_from`) — that's the transfer demo: programs carry over; their worth
+is re-fit locally.
 
 <details>
 <summary><b>Verified run — Nim, 2,000 self-play games</b></summary>
@@ -493,9 +494,10 @@ and observers tend to do well *together* (aligned incentives); the backup is the
 
 Wise Explorer learns by playing **itself** — no opponent, no dataset. Games run in
 **synchronized waves** ([`simulation/runner.py`](src/wise_explorer/simulation/runner.py)):
-play a wave in parallel → commit transitions + Bellman sweep → consolidate anchors → grow
-the concept library → repeat — so every wave learns from fresh statistics, and discovery
-happens *during* training, not after it.
+play a wave in parallel → commit transitions + Bellman sweep → consolidate anchors →
+repeat — so every wave learns from fresh statistics. Whenever the evidence has doubled,
+the [value loop](docs/value-loop.md) turns: values re-solved, healed by the concepts,
+concepts re-distilled — so discovery happens *during* training, not after it.
 
 ### Why *"Wise"* Explorer
 
@@ -551,6 +553,41 @@ losing lines too — is what moves the frontier. Measured against perfect Tic-Ta
 
 The system is **exploration-limited, not decision-limited**: give it coverage and play
 converges to optimal.
+
+---
+
+## The value loop: discoveries repair the evidence
+
+And where coverage *can't* be given, the discovered concepts hand it back. A Bellman
+backup can only take its max over replies somebody **played** — so at 1% coverage, a
+position whose refutation was never visited *looks safe*, and that false safety
+propagates into the exact signal competitive play trusts first. The value loop closes
+the leak with the library's own discoveries: every time the evidence has doubled, the
+backup is re-run over **all** legal replies, with the never-played ones priced by the
+concepts.
+
+```mermaid
+flowchart LR
+    classDef ev fill:#0e7490,stroke:#155e75,color:#ecfeff
+    classDef he fill:#9a3412,stroke:#7c2d12,color:#ffedd5
+    classDef di fill:#065f46,stroke:#047857,color:#d1fae5
+    classDef pl fill:#1f2937,stroke:#475569,color:#e5e7eb
+    P(["self-play<br/>writes evidence"]):::pl --> S["values re-derived<br/>from raw counts"]:::ev
+    S --> H["concepts price the<br/>replies nobody played"]:::he
+    H --> D["concepts re-distilled from<br/>the completed values"]:::di
+    D --> H2["values re-healed<br/>with the fresh rules"]:::he
+    H2 --> P
+```
+
+Each role keeps the next honest: evidence is always re-derived from raw counts (the
+library never overwrites a count), discovery only ever fits the completed values, and
+training itself stays concept-blind — its uncertainty-driven exploration is what keeps
+the evidence independent of the theory it feeds. Measured on 8-pile Nim seeded with the
+4-pile library: without the loop, continued training is a coin flip that eventually
+destroys the library it started with; with it, **seeded-then-retrained play is 400/400 —
+indistinguishable from the zero-shot rule**. The full anatomy — equations, a richer
+diagram, the self-distillation guard rails, and the honest costs — is in
+[docs/value-loop.md](docs/value-loop.md).
 
 ---
 
@@ -640,6 +677,7 @@ src/wise_explorer/
 
 scripts/transfer_demo.py        # thin wrapper — prefer `wise-explorer transfer`
 docs/concept-invention.md       # the discovery engine, in depth
+docs/value-loop.md              # how discoveries repair the value graph
 tests/                          # mirrors src/   ·   data/memory/  SQLite DBs (auto-created)
 ```
 
@@ -657,16 +695,16 @@ zero-prior-knowledge and game-agnostic:
 2. **Cross-scale knowledge transfer** — invented concepts are width-free programs, so a
    rule discovered on a 120-position game plays a 362,880-position game perfectly with
    zero training on it. Discover where the game is small; apply where it is big.
-3. **Invention as part of training** — the library grows during self-play (cheap refit
-   every wave; a full search only when the data has outgrown the current concepts), and
-   its value feeds move selection as a live signal — the only one that generalizes to
-   never-visited boards.
+3. **The value loop** — discoveries feed back into the value graph: Bellman backups
+   range over *all* legal replies, with never-played ones priced by the invented
+   concepts. Self-distillation anchored by raw evidence and the MDL gate; at 1%
+   coverage it keeps retraining at 400/400 where the unhealed system collapses.
 4. **Variance-arbitrated multi-signal selection** — letting the data decide, per position,
    whether statistics, clustering, game value, or an invented concept should drive the choice.
 5. **A principled N-player / non-zero-sum generalization of minimax** via an alignment
    factor learned from cross-player outcomes, recovering zero-sum minimax as a special case.
 
-> Re-imagined and substantially extended from my Oberlin honors thesis. The anchors,
+> Re-imagined and extended from my Oberlin honors thesis. The anchors,
 > concept invention, Bellman propagation, and distribution sampling are independent
 > research since 2019.
 

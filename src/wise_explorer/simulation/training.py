@@ -61,8 +61,9 @@ def run_training(
             prune_players=set(),
         )
 
-    # Rebuild the concept library on the converged values (the considered fit)
-    runner.memory.grow_concepts()
+    # Discover from the converged values, then let the library heal the value
+    # graph's blind spots (the value loop)
+    runner.memory.grow_concepts(game=game)
 
     return total
 
@@ -119,7 +120,8 @@ def run_training_interleaved(
         remaining -= batch
         phase = (phase + 1) % (num_players + 1)
 
-    # Rebuild the concept library on the converged values (the considered fit)
-    runner.memory.grow_concepts()
+    # Discover from the converged values, then let the library heal the value
+    # graph's blind spots (the value loop)
+    runner.memory.grow_concepts(game=game)
 
     return total

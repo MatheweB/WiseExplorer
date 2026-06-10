@@ -92,6 +92,7 @@ class SimulationRunner:
         self.memory = memory
         self.num_workers = num_workers
         self._pool: Optional[Pool] = None
+        self._wheel_turned_at = 0           # graph size at the last value-loop turn
 
         _active_runners.append(self)
         register_memory(memory)
@@ -169,13 +170,21 @@ class SimulationRunner:
                 # Write results
                 transitions, _swaps = self._commit(wave_results)
                 total_transitions += transitions
-                
+
                 # Consolidate anchors
                 self.memory.consolidate_anchors()
 
-                # Grow the concept library from only the boards this wave touched —
-                # discovery happens DURING training, locally, never a rescan of history.
-                self.memory.grow_concepts(incremental=True)
+                # Turn the value loop's wheel whenever the evidence graph has doubled
+                # (docs/value-loop.md): solve → heal → distill → re-heal. O(log N) turns
+                # per run, so early knowledge starts healing the backup long before the
+                # end-of-run turn — measured on seeded 8-pile Nim: a single end-of-run
+                # turn after 3,000 games leaves bell unhealed throughout and scores
+                # 176/400 optimal; chunked turns hold ~200/200 per chunk.
+                graph = self.memory.conn.execute(
+                    f"SELECT COUNT(*) FROM {self.memory.main_table}").fetchone()[0]
+                if graph >= 2 * max(self._wheel_turned_at, 4):
+                    self.memory.grow_concepts(game=game)
+                    self._wheel_turned_at = graph
 
                 job_idx += len(wave_jobs)
 

@@ -9,9 +9,10 @@ This note describes the **concept-invention** engine (`wise_explorer/synthesis.p
 the `wise-explorer invent` command) — the system's one discovery mechanism. Instead of splitting
 on a fixed vocabulary of board features, it **searches for new features to build** out of
 generic primitives, scores them by how much they compress the win/loss data, and reuses its own
-discoveries to reach concepts that were out of reach from scratch. It runs live while the agent
-trains, and its discoveries feed move selection as the only signal that generalizes to boards
-training never visited.
+discoveries to reach concepts that were out of reach from scratch. It runs inside the
+[value loop](value-loop.md) — whenever the evidence graph has doubled — and its
+discoveries feed competitive move selection as the only signal that generalizes to
+boards training never visited.
 
 ## The one idea
 
@@ -270,22 +271,23 @@ The nim-sum already explains everything; round 2 saves nothing → stop after ro
 The savings collapse while the concept cost climbs; the moment cost overtakes saving, the
 round stops paying. (Exact numbers vary per run.)
 
-## It runs during training, not after
+## When it runs: the loop's boundaries
 
-Discovery is part of the training loop, not a post-hoc analysis. Each wave of self-play
-folds only the boards it just touched into a live table (`BoardTable`); the library refits
-its rule tree to that table every wave — cheap, so the concept signal always tracks the
-current values — and runs an actual *search* only when two things are both true:
+Discovery has exactly one teacher and one venue: whenever the evidence graph has doubled
+(and once more at the end of training), the [value loop](value-loop.md) solves the game
+graph from raw counts, heals it with the current library, and *then* runs discovery over
+those completed values — the system's best current belief. The search is seeded with the current concepts, so knowledge carries
+forward, and a sufficient library self-limits: the MDL gate finds nothing left that pays,
+and the search stops itself. Between boundaries the library simply is the last considered
+fit. Discovery's data view is bounded (`synthesis.CAP`, a compute budget, not a knob):
+past it, the fit runs over a uniform sample — a concept is a program, visible in any fair
+sample.
 
-- **due** — the table has doubled since the last search (at most a handful of searches per
-  run, no tuned interval), and
-- **insufficient** — the unexplained fraction of the data rose above the best the library
-  has ever achieved. A library that still explains the data does **zero** search.
-
-A search reuses the current concepts as its starting point and its result is accepted only
-if it explains at least as much — so a noisy wave can never lose a good concept. When
-training ends, one considered pass over the converged Bellman values produces the model
-that is persisted (and printed as the post-training summary).
+(A continuous per-wave variant — live table, refit every wave, due-and-insufficient search
+trigger — was built, benched, and deleted: training-time move selection never reads the
+concept signal, so the live fit's only consumer was the loop's healing pass, exactly where
+a refit over still-drifting values could transiently collapse the tree and poison one
+heal. Measured in docs/value-loop.md.)
 
 ## Knowledge transfers across scales
 

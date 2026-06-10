@@ -274,7 +274,8 @@ def run_transfer(argv: list[str]) -> None:
     o, w = optimal_sampled(by_memory(memc, n), n)
     found = any("⊕" in str(c) for c in memc.concept_library.kept)
     print(f"  optimal {o}/{w} — {'found' if found else 'never found'} the rule "
-          f"(saw {len(memc.concept_library.table):,} of {space(n):,} positions)\n")
+          f"(saw {memc.conn.execute('SELECT COUNT(*) FROM boards').fetchone()[0]:,}"
+          f" of {space(n):,} positions)\n")
     memc.close()
 
     print(f"ACT 3b — seeded: start {n}-pile training FROM the 4-pile library")
@@ -283,9 +284,12 @@ def run_transfer(argv: list[str]) -> None:
     train(mem8, n, 3000)
     o, w = optimal_sampled(by_memory(mem8, n), n)
     survives = any(str(c) == "fold(⊕, board, cell) = 0" for c in mem8.concept_library.kept)
-    print(f"  optimal {o}/{w} — the nim-sum {'survives' if survives else 'was LOST'}, but"
-          " refitting on unconverged values dilutes play below the zero-shot rule.")
-    print("  Transfer beats retrain: the bottleneck at scale is value quality, not discovery.")
+    print(f"  optimal {o}/{w} — the nim-sum {'survives' if survives else 'was LOST'}. Training"
+          " at ~1% coverage would")
+    print("  normally bury the rule under coverage-biased Bellman backups; the value loop"
+          " instead uses the")
+    print("  rule to price the replies training never played, healing that signal"
+          " (docs/value-loop.md).")
     mem8.close()
 
 
