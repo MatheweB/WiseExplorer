@@ -29,10 +29,10 @@ Discovered 1 concept, 2 rules:
 ```
 
 Playing with that two-line model, it makes the optimal move in **every** winning
-position of 4-pile Nim (96/96). See it derive the theorem yourself, in about a minute:
+position of 4-pile Nim (96/96). See it derive the theorem yourself, in under a minute:
 
 ```bash
-wise-explorer invent -g nim --fresh 10000
+wise-explorer invent -g nim --fresh 2000
 ```
 
 ## …and the theorem transfers: discover small, play big
@@ -138,7 +138,7 @@ trains a quick throwaway demo first:
 
 ```bash
 wise-explorer invent -g nim                  # the library your trained model plays with
-wise-explorer invent -g nim --fresh 10000    # ← train a demo, then watch it derive the nim-sum
+wise-explorer invent -g nim --fresh 2000     # ← train a demo, then watch it derive the nim-sum
 wise-explorer transfer                       # ← discover on 4 piles, play 8 zero-shot
 ```
 
@@ -750,9 +750,11 @@ If you use Wise Explorer in research, please cite the thesis:
 }
 ```
 
+*LLM-based tools were used to assist with code generation and debugging during this project. All generated code and results are reviewed, modified, and validated by the author.*
+
 Licensed under **Apache 2.0** — see [LICENSE](LICENSE). Contributions welcome (fork, branch,
 `pytest`, PR); for bugs and ideas, [open an issue](https://github.com/MatheweB/WiseExplorer/issues).
 
 ---
 
-*Built with curiosity and a willingness to take the path less traveled by.*
+Built with curiosity and a willingness to take the path less traveled by.

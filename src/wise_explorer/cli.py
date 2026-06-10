@@ -144,7 +144,7 @@ def run_invent(argv: list[str]) -> None:
     if not db_path.exists():
         print(f"No trained model for '{label}' at {db_path}.")
         print(f"  Train one:     wise-explorer -g {a.game} -e 2000")
-        print(f"  Or quick demo: wise-explorer invent -g {a.game} --fresh 10000")
+        print(f"  Or quick demo: wise-explorer invent -g {a.game} --fresh 2000")
         return
 
     mem = Memory.for_game(game, base_dir=MEMORY_DIR, read_only=True)

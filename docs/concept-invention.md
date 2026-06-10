@@ -315,7 +315,7 @@ Measured (run `wise-explorer transfer --full`):
 ```bash
 wise-explorer invent -g nim                  # the persisted library — what play actually uses
 wise-explorer invent -g nim --remine         # re-run discovery, with the full bits ledger
-wise-explorer invent -g nim --fresh 10000    # train a throwaway demo first, then invent
+wise-explorer invent -g nim --fresh 2000     # train a throwaway demo first, then invent
 wise-explorer invent -g nim --expand         # every formula fully spelled out (the chaos)
 wise-explorer transfer                       # discover on 4 piles, play 8 piles zero-shot
 ```
