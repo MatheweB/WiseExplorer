@@ -127,7 +127,8 @@ class TestMeaning:
         assert S.meaning(c) == "the xor of every cell is 0"
 
     def test_threat_gloss_is_derived_not_asserted(self):
-        e = lambda j: S.Elem(j, S.GroupDomain.names)
+        def e(j):
+            return S.Elem(j, S.GroupDomain.names)
         body = S.BinOp("⊕", e(0), S.BinOp("max", e(0), e(1)))      # played xor (played max empty)
         fold = S.Fold("max", S.GroupDomain([(0, 1, 2), (3, 4, 5)]), body)
         c = S.Concept(fold, "=", 1, np.zeros(2, dtype=bool), fold.size)
@@ -135,7 +136,8 @@ class TestMeaning:
 
     def test_gloss_adapts_to_any_group_size(self):
         # 4-cell groups (e.g. a connect-four-like game): the enumeration follows the size
-        e = lambda j: S.Elem(j, S.GroupDomain.names)
+        def e(j):
+            return S.Elem(j, S.GroupDomain.names)
         body = S.BinOp("∣·∣", e(0), S.BinOp("min", e(0), e(1)))    # played dist (played min empty)
         fold = S.Fold("max", S.GroupDomain([(0, 1, 2, 3)]), body)
         c = S.Concept(fold, "=", 4, np.zeros(2, dtype=bool), fold.size)
@@ -154,7 +156,8 @@ class TestMeaning:
         assert S.meaning(c, tokens=(1, 3)) is None
 
     def test_or_of_chains_glosses_each_region(self):
-        line = lambda a, b, k: S.BinOp("&", S.Cell(a), S.BinOp("&", S.Cell(b), S.Cell(k)))
+        def line(a, b, k):
+            return S.BinOp("&", S.Cell(a), S.BinOp("&", S.Cell(b), S.Cell(k)))
         e = S.BinOp("|", line(0, 1, 2), S.BinOp("⊕", line(3, 4, 5), line(6, 7, 8)))
         c = S.Concept(e, "=", 0, np.zeros(2, dtype=bool), 17)
         m = S.meaning(c, tokens=(1, 2))
@@ -163,7 +166,8 @@ class TestMeaning:
 
     def test_count_fold_glosses_as_a_count(self):
         # a 0/1-valued body makes the +-fold a plain count, not a score table
-        e = lambda j: S.Elem(j, S.GroupDomain.names)
+        def e(j):
+            return S.Elem(j, S.GroupDomain.names)
         body = S.BinOp("min", e(0), e(1))                # min(played, empty) ∈ {0,1} on 2-cell groups
         fold = S.Fold("+", S.GroupDomain([(0, 1), (2, 3)]), body)
         c = S.Concept(fold, "=", 2, np.zeros(2, dtype=bool), fold.size)
@@ -171,7 +175,8 @@ class TestMeaning:
         assert m.startswith("how many groups are") and m.endswith("the count is 2")
 
     def test_gt_threshold_glosses_too(self):
-        e = lambda j: S.Elem(j, S.GroupDomain.names)
+        def e(j):
+            return S.Elem(j, S.GroupDomain.names)
         fold = S.Fold("max", S.GroupDomain([(0, 1, 2)]), e(0))   # max played over groups
         c = S.Concept(fold, ">", 2, np.zeros(2, dtype=bool), fold.size)
         assert S.meaning(c) == "some group is you 3 · empty 0 · them 0"
@@ -210,6 +215,14 @@ class TestPrettyRender:
         text = "\n".join(lines)
         assert text.count("fold(⊕, board, cell)") == 1            # the split, printed once
         assert "├─ yes → [WIN ]" in text and "└─ no  → [LOSS]" in text
+
+    def test_render_survives_an_empty_model(self):
+        # too little signal: no round pays, no rules exist — render must not crash
+        B = np.array([[i % 3, (i // 3) % 3, i % 2] for i in range(24)], dtype=np.int64)
+        V = np.full(24, 0.5)
+        res = S.invent_from_boards(B, V, np.zeros(24, dtype=np.int64), max_size=3)
+        out = S.render(res)
+        assert "no rules" in out or "RULES" in out      # graceful either way
 
     def test_render_modes_share_the_facts(self):
         res = self._fit()

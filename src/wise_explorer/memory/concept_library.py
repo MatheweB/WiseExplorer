@@ -17,7 +17,6 @@ until concepts have actually been discovered.
 """
 import json
 import sqlite3
-from typing import List, Optional
 
 import numpy as np
 
@@ -41,8 +40,8 @@ class ConceptLibrary:
     def __init__(self, conn: sqlite3.Connection, read_only: bool = False) -> None:
         self.conn = conn
         self.read_only = read_only
-        self.kept: List[S.Concept] = []     # the concepts discovered so far (carried forward)
-        self.rules: List[S.Rule] = []       # the value model: rule paths with leaf values
+        self.kept: list[S.Concept] = []     # the concepts discovered so far (carried forward)
+        self.rules: list[S.Rule] = []       # the value model: rule paths with leaf values
         if not read_only:
             self.conn.executescript(_SCHEMA)
             for col in ("verdict TEXT DEFAULT ''", "n INTEGER DEFAULT 0"):
@@ -116,7 +115,7 @@ class ConceptLibrary:
         return tuple(toks), (int(rows[0][1]), int(rows[0][2]))
 
     # ── the signal (everywhere, including read-only workers) ────────────────────
-    def value_for(self, board: np.ndarray, m: Optional[int] = None) -> Optional[float]:
+    def value_for(self, board: np.ndarray, m: int | None = None) -> float | None:
         """The library's value for a board: the leaf its rule-path lands in. ``None`` when the
         library is empty or no rule matches. ``m`` is the just-played token (used only by
         move-relative concepts; cell-only ones ignore it)."""
@@ -124,7 +123,7 @@ class ConceptLibrary:
                             None if m is None else np.array([m]))[0]
         return None if np.isnan(v) else float(v)
 
-    def values_for(self, B: np.ndarray, M: Optional[np.ndarray] = None) -> np.ndarray:
+    def values_for(self, B: np.ndarray, M: np.ndarray | None = None) -> np.ndarray:
         """One value per row of ``B`` (NaN where no rule matches), via a single batched
         rule-walk. ``M`` gives each row's just-played token. This is what lets the value
         loop price thousands of never-visited boards in one pass."""

@@ -24,7 +24,8 @@ class TestSerialization:
             S.Fold("max", S.GroupDomain([(0, 1, 2)]),
                    S.BinOp("min", S.Elem(0, S.GroupDomain.names), S.Elem(1, S.GroupDomain.names))),
         ]
-        B = np.array([[1, 2, 3], [0, 1, 2]], dtype=np.int64); m = np.array([1, 1])
+        B = np.array([[1, 2, 3], [0, 1, 2]], dtype=np.int64)
+        m = np.array([1, 1])
         for e in progs:
             e2 = S.expr_from_dict(S.expr_to_dict(e))
             assert str(e2) == str(e)

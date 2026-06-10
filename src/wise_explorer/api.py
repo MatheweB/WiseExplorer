@@ -12,7 +12,7 @@ Usage:
 
 from __future__ import annotations
 
-from typing import Dict, List, Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 import numpy as np
 
@@ -26,10 +26,10 @@ if TYPE_CHECKING:
 
 
 def _ai_turn(
-    game: "GameBase",
+    game: GameBase,
     memory: GameMemory,
     debug: bool = False
-) -> Optional[np.ndarray]:
+) -> np.ndarray | None:
     """AI selects and applies move. Returns move or None if no valid moves."""
     if len(game.valid_moves()) == 0:
         return None
@@ -39,7 +39,7 @@ def _ai_turn(
     return move
 
 
-def _human_turn(game: "GameBase") -> np.ndarray:
+def _human_turn(game: GameBase) -> np.ndarray:
     """Prompt human for move, apply it, return move."""
     valid = game.valid_moves()
     if len(valid) > 0:
@@ -63,14 +63,14 @@ def _human_turn(game: "GameBase") -> np.ndarray:
 
 
 def start_simulations(
-    agent_swarms: Dict[int, List["Agent"]],
-    game: "GameBase",
+    agent_swarms: dict[int, list[Agent]],
+    game: GameBase,
     turn_depth: int,
     simulations: int,
     memory: GameMemory,
     num_workers: int = DEFAULT_WORKER_COUNT,
     training_enabled: bool = True,
-    human_players: Optional[List[int]] = None,
+    human_players: list[int] | None = None,
     debug_move_statistics: bool = True,
 ) -> None:
     """

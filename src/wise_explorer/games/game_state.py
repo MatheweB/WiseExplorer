@@ -25,6 +25,6 @@ class GameState:
         self.board = board
         self.current_player = current_player
 
-    def copy(self) -> "GameState":
+    def copy(self) -> GameState:
         """Fast copy - board.copy() is optimized for contiguous int arrays."""
         return GameState(self.board.copy(), self.current_player)

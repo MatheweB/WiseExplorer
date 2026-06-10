@@ -219,7 +219,8 @@ def run_transfer(argv: list[str]) -> None:
                 continue
             tried += 1
             mv = pick(h)
-            nh = h.copy(); nh[int(mv[0])] -= int(mv[1])
+            nh = h.copy()
+            nh[int(mv[0])] -= int(mv[1])
             opt += nim_sum(nh) == 0
         return opt, tried
 
@@ -248,7 +249,8 @@ def run_transfer(argv: list[str]) -> None:
         g = Nim(n=n)
         g.set_state(GameState(h.copy(), current_player=1))
         for mv in g.valid_moves():
-            nh = h.copy(); nh[int(mv[0])] -= int(mv[1])
+            nh = h.copy()
+            nh[int(mv[0])] -= int(mv[1])
             v = lib.value_for(nh.astype(np.int64))
             if v is not None and v > bestv:
                 best, bestv = mv, v

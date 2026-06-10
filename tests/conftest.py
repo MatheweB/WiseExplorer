@@ -9,7 +9,7 @@ Design principles:
 
 import tempfile
 from pathlib import Path
-from typing import Dict, Generator, List, Tuple
+from typing import Generator
 
 import numpy as np
 import pytest
@@ -95,9 +95,9 @@ def two_player_game() -> GameBase:
 # =============================================================================
 
 @pytest.fixture
-def agent_swarms(two_player_game: GameBase) -> Dict[int, List[Agent]]:
+def agent_swarms(two_player_game: GameBase) -> dict[int, list[Agent]]:
     """Agent swarms for a 2-player game."""
-    swarms: Dict[int, List[Agent]] = {}
+    swarms: dict[int, list[Agent]] = {}
     for pid in range(1, two_player_game.num_players() + 1):
         swarms[pid] = [Agent() for _ in range(4)]
         for agent in swarms[pid]:
@@ -149,7 +149,7 @@ def any_memory(request, temp_db_path: Path) -> Generator[GameMemory, None, None]
 # =============================================================================
 
 @pytest.fixture
-def anchor_stats_varied() -> Dict[int, Stats]:
+def anchor_stats_varied() -> dict[int, Stats]:
     """Anchor stats with varied win/tie/loss distributions."""
     return {
         0: Stats(100, 10, 10),
@@ -160,7 +160,7 @@ def anchor_stats_varied() -> Dict[int, Stats]:
 
 
 @pytest.fixture
-def moves_with_stats() -> List[Tuple[np.ndarray, Stats]]:
+def moves_with_stats() -> list[tuple[np.ndarray, Stats]]:
     """Move arrays paired with Stats."""
     return [
         (np.array([0, 0]), Stats(50, 10, 5)),

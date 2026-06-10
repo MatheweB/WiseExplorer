@@ -7,7 +7,7 @@ Alternates between:
 """
 
 from __future__ import annotations
-from typing import Dict, List, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from wise_explorer.agent.agent import Agent
@@ -16,9 +16,9 @@ if TYPE_CHECKING:
 
 
 def run_training(
-    runner: "SimulationRunner",
-    swarms: Dict[int, List["Agent"]],
-    game: "GameBase",
+    runner: SimulationRunner,
+    swarms: dict[int, list[Agent]],
+    game: GameBase,
     simulations: int,
     turn_depth: int,
 ) -> int:

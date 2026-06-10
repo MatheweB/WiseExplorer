@@ -2,7 +2,6 @@
 Factory functions for creating games and agent swarms.
 """
 
-from typing import Dict, List
 
 from wise_explorer.agent.agent import Agent
 from wise_explorer.games.game_base import GameBase
@@ -11,9 +10,9 @@ from wise_explorer.utils.config import GAMES, INITIAL_STATES
 
 
 def create_agent_swarms(
-    players: List[int],
+    players: list[int],
     agents_per_player: int,
-) -> Dict[int, List[Agent]]:
+) -> dict[int, list[Agent]]:
     """
     Create a swarm of agents for each player.
 
@@ -24,7 +23,7 @@ def create_agent_swarms(
     Returns:
         Dict mapping player ID to list of agents
     """
-    swarms: Dict[int, List[Agent]] = {}
+    swarms: dict[int, list[Agent]] = {}
 
     for pid in players:
         swarm = [Agent() for _ in range(agents_per_player)]

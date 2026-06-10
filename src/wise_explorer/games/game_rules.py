@@ -7,7 +7,6 @@ All operations avoid ambiguous None broadcasts and dangerous NumPy views.
 
 from __future__ import annotations
 
-from typing import List
 
 import numpy as np
 
@@ -40,7 +39,7 @@ def all_equal(line: np.ndarray) -> bool:
         return all(x == first for x in line)
 
 
-def get_rows(board: np.ndarray) -> List[np.ndarray]:
+def get_rows(board: np.ndarray) -> list[np.ndarray]:
     """
     Fast row extraction.
     Uses slicing, but slices are copied to avoid shared memory issues.
@@ -48,7 +47,7 @@ def get_rows(board: np.ndarray) -> List[np.ndarray]:
     return [row.copy() for row in board]
 
 
-def get_cols(board: np.ndarray) -> List[np.ndarray]:
+def get_cols(board: np.ndarray) -> list[np.ndarray]:
     """
     Fast column extraction using slicing on board.T.
     board.T does create a view, but copying each column removes risk.
@@ -57,7 +56,7 @@ def get_cols(board: np.ndarray) -> List[np.ndarray]:
     return [col.copy() for col in bt]
 
 
-def get_diagonals(board: np.ndarray) -> List[np.ndarray]:
+def get_diagonals(board: np.ndarray) -> list[np.ndarray]:
     """
     Optimized diagonal extraction using NumPy's diagonal efficiently.
     board.diagonal() is a *view* in most cases, so we explicitly copy it.

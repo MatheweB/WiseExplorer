@@ -11,7 +11,6 @@ hot path functions.
 from __future__ import annotations
 
 import math
-from typing import Tuple
 
 # Try to import numba, fall back to pure Python if not available
 try:
@@ -36,7 +35,7 @@ def _lgamma(x: float) -> float:
 
 
 @njit
-def _log_dm_marginal(counts: Tuple[float, float, float], prior: float = 1.0) -> float:
+def _log_dm_marginal(counts: tuple[float, float, float], prior: float = 1.0) -> float:
     """
     Log marginal likelihood under Dirichlet-Multinomial model.
     
@@ -134,7 +133,7 @@ def _similarity_impl(
 # Public API (tuple-based wrappers)
 # =============================================================================
 
-def log_bayes_factor(a: Tuple[float, float, float], b: Tuple[float, float, float], prior: float = 1.0) -> float:
+def log_bayes_factor(a: tuple[float, float, float], b: tuple[float, float, float], prior: float = 1.0) -> float:
     """
     Log Bayes factor for "same distribution" vs "different distributions".
     
@@ -144,7 +143,7 @@ def log_bayes_factor(a: Tuple[float, float, float], b: Tuple[float, float, float
     return _log_bayes_factor_impl(a[0], a[1], a[2], b[0], b[1], b[2], prior)
 
 
-def compatible(a: Tuple[float, float, float], b: Tuple[float, float, float]) -> bool:
+def compatible(a: tuple[float, float, float], b: tuple[float, float, float]) -> bool:
     """
     Check if two distributions are statistically compatible.
     
@@ -153,7 +152,7 @@ def compatible(a: Tuple[float, float, float], b: Tuple[float, float, float]) -> 
     return _compatible_impl(a[0], a[1], a[2], b[0], b[1], b[2])
 
 
-def similarity(a: Tuple[float, float, float], b: Tuple[float, float, float]) -> float:
+def similarity(a: tuple[float, float, float], b: tuple[float, float, float]) -> float:
     """
     Similarity score between two distributions.
     

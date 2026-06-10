@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import sqlite3
 from collections import defaultdict
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 from wise_explorer.core.types import Stats, Counts
 from wise_explorer.memory.game_memory import GameMemory
@@ -44,14 +44,14 @@ class MarkovMemory(GameMemory):
     def _cache_key(self, from_hash: str, to_hash: str) -> str:
         return to_hash
 
-    def _fetch_anchor_id(self, from_hash: str, to_hash: str) -> Optional[int]:
+    def _fetch_anchor_id(self, from_hash: str, to_hash: str) -> int | None:
         row = self.conn.execute(
             "SELECT anchor_id FROM states WHERE state_hash=?",
             (to_hash,)
         ).fetchone()
         return row[0] if row else None
 
-    def batch_get_anchor_ids(self, keys: List[str], cur: sqlite3.Cursor) -> Dict[str, Optional[int]]:
+    def batch_get_anchor_ids(self, keys: list[str], cur: sqlite3.Cursor) -> dict[str, int | None]:
         if not keys:
             return {}
         placeholders = ','.join('?' * len(keys))
@@ -70,22 +70,22 @@ class MarkovMemory(GameMemory):
     def key_to_repr(self, key: str) -> str:
         return key[:16]
 
-    def collect_units(self) -> List[Tuple[str, Counts]]:
+    def collect_units(self) -> list[tuple[str, Counts]]:
         rows = self.conn.execute(
             "SELECT state_hash, wins, ties, losses FROM states WHERE wins+ties+losses > 0"
         ).fetchall()
         return [(h, (w, t, l)) for h, w, t, l in rows]
 
-    def write_anchor_ids(self, membership: Dict[str, int], cur: sqlite3.Cursor) -> None:
+    def write_anchor_ids(self, membership: dict[str, int], cur: sqlite3.Cursor) -> None:
         cur.executemany(
             "UPDATE states SET anchor_id=? WHERE state_hash=?",
             [(aid, key) for key, aid in membership.items()]
         )
 
-    def _commit_outcomes(self, transitions: Dict[Tuple[str, str], List[float]], cur: sqlite3.Cursor) -> Tuple[List, Dict]:
+    def _commit_outcomes(self, transitions: dict[tuple[str, str], list[float]], cur: sqlite3.Cursor) -> tuple[list, dict]:
         """Commit outcomes and return keys/deltas for anchor manager."""
         # Aggregate by destination state
-        state_updates: Dict[str, List[float]] = defaultdict(lambda: [0.0, 0.0, 0.0])
+        state_updates: dict[str, list[float]] = defaultdict(lambda: [0.0, 0.0, 0.0])
         for (_, to_hash), counts in transitions.items():
             state_updates[to_hash][0] += counts[0]
             state_updates[to_hash][1] += counts[1]
@@ -105,7 +105,7 @@ class MarkovMemory(GameMemory):
         deltas = {k: (v[0], v[1], v[2]) for k, v in state_updates.items()}
         return keys, deltas
 
-    def _get_mode_specific_info(self) -> Dict[str, Any]:
+    def _get_mode_specific_info(self) -> dict[str, Any]:
         states = self.conn.execute("SELECT COUNT(*) FROM states").fetchone()[0]
         samples = self.conn.execute("SELECT COALESCE(SUM(wins+ties+losses), 0) FROM states").fetchone()[0]
         return {

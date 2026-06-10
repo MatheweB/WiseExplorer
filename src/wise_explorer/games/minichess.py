@@ -75,14 +75,14 @@ class MiniChess(GameBase):
     def num_players(self) -> int:
         return 2
 
-    def clone(self) -> "MiniChess":
+    def clone(self) -> MiniChess:
         g = MiniChess.__new__(MiniChess)
         g.state = self.state
         g.winner = self.winner
         g.move_count = self.move_count
         return g
 
-    def deep_clone(self) -> "MiniChess":
+    def deep_clone(self) -> MiniChess:
         g = MiniChess.__new__(MiniChess)
         g.state = self.state.copy()
         g.winner = self.winner

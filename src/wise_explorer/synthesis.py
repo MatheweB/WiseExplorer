@@ -13,8 +13,7 @@ See ``docs/concept-invention.md`` and the ``invent`` CLI verb.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from dataclasses import dataclass
 
 import numpy as np
 
@@ -45,20 +44,25 @@ class Expr:
 
 
 class Cell(Expr):
-    def __init__(self, i: int): self.i = i; self.size = 1
+    def __init__(self, i: int):
+        self.i = i
+        self.size = 1
     def eval(self, B, m=None): return B[:, self.i]
     def __str__(self): return f"c{self.i}"
 
 
 class Lit(Expr):
-    def __init__(self, v: int): self.v = v; self.size = 1
+    def __init__(self, v: int):
+        self.v = v
+        self.size = 1
     def eval(self, B, m=None): return np.full(B.shape[0], self.v, dtype=np.int64)
     def __str__(self): return str(self.v)
 
 
 class BinOp(Expr):
     def __init__(self, op: str, a: Expr, b: Expr):
-        self.op, self.a, self.b = op, a, b; self.size = 1 + a.size + b.size
+        self.op, self.a, self.b = op, a, b
+        self.size = 1 + a.size + b.size
     def eval(self, B, m=None):
         return _OPS[self.op](self.a.eval(B, m), self.b.eval(B, m)).astype(np.int64)
     def __str__(self): return f"({self.a} {_WORD.get(self.op, self.op)} {self.b})"
@@ -68,7 +72,8 @@ class Named(Expr):
     """A promoted concept reused as a single building block (its formula is kept
     for rendering, but it costs size 1 to compose with — that is what 'reuse' buys)."""
     def __init__(self, inner: Expr, vec: np.ndarray):
-        self.inner, self._vec = inner, vec; self.size = 1
+        self.inner, self._vec = inner, vec
+        self.size = 1
     def eval(self, B, m=None):
         if B.shape[0] == len(self._vec):
             return self._vec
@@ -90,7 +95,7 @@ class Elem(Expr):
     cell offers one feature (its value, ``cell``); a line offers two (``played`` / ``empty``
     counts). Only ever evaluated inside a Fold, which feeds it the items one at a time as a
     flat (rows, width) table — never a board. ``names[j]`` is for rendering only."""
-    def __init__(self, j: int, names: Tuple[str, ...]):
+    def __init__(self, j: int, names: tuple[str, ...]):
         self.j, self.names, self.size = j, names, 1
     def eval(self, E, m=None): return E[:, self.j]
     def __str__(self): return self.names[self.j]
@@ -100,7 +105,7 @@ class CellDomain:
     """A fold domain whose elements are cells; each element exposes one feature —
     its token value. (The move ``m`` is irrelevant here — cell arithmetic ignores it.)"""
     names = ("cell",)
-    def __init__(self, cells: Tuple[int, ...]): self.cells = tuple(cells)
+    def __init__(self, cells: tuple[int, ...]): self.cells = tuple(cells)
     def tensor(self, B, m=None): return B[:, list(self.cells)][:, :, None].astype(np.int64)
     def __str__(self): return "cells"
 
@@ -204,10 +209,10 @@ def _bits(v: np.ndarray) -> float:
 
 # ───────────────────────────── bottom-up synthesis (obs-equivalence) ───────────
 
-def _synthesize(terminals: List[Expr], B: np.ndarray, max_size: int, cap: Optional[int]):
+def _synthesize(terminals: list[Expr], B: np.ndarray, max_size: int, cap: int | None):
     """Return {value_bytes: Expr} — one smallest program per distinct behaviour."""
-    seen: Dict[bytes, Expr] = {}
-    by_size: Dict[int, List[Tuple[Expr, np.ndarray]]] = {s: [] for s in range(1, max_size + 1)}
+    seen: dict[bytes, Expr] = {}
+    by_size: dict[int, list[tuple[Expr, np.ndarray]]] = {s: [] for s in range(1, max_size + 1)}
 
     def add(e: Expr):
         vec = e.eval(B).astype(np.int64)
@@ -237,7 +242,7 @@ def _synthesize(terminals: List[Expr], B: np.ndarray, max_size: int, cap: Option
 
 # ───────────────────────────── concept selection (MDL, per round) ──────────────
 
-def _candidate_concepts(seen, B, V, min_leaf) -> List[Concept]:
+def _candidate_concepts(seen, B, V, min_leaf) -> list[Concept]:
     """Derive boolean atoms (feature == c) and keep the best per yes/no partition.
 
     The variance-reduction gain of every (program, value) split is computed from *grouped
@@ -248,9 +253,10 @@ def _candidate_concepts(seen, B, V, min_leaf) -> List[Concept]:
     the simpler per-program form stays.)"""
     N = len(V)
     V2 = V * V
-    S = float(V.sum()); SS = float(V2.sum())
+    S = float(V.sum())
+    SS = float(V2.sum())
     total_var = SS / N - (S / N) ** 2
-    best: Dict[bytes, Tuple[float, Concept]] = {}
+    best: dict[bytes, tuple[float, Concept]] = {}
     # The errstate is hoisted to wrap the whole loop: empty value-groups produce 0/0
     # (clamped below), and re-entering the context once per candidate is pure overhead.
     with np.errstate(invalid="ignore", divide="ignore"):
@@ -259,7 +265,8 @@ def _candidate_concepts(seen, B, V, min_leaf) -> List[Concept]:
             # Group V by the program's output value with a single bincount per stat — no
             # per-vector sort. Shift to a non-negative offset so the value IS the bin index;
             # empty bins (gaps in the value range) fall out via the min_leaf filter below.
-            lo = int(vec.min()); span = int(vec.max()) - lo + 1
+            lo = int(vec.min())
+            span = int(vec.max()) - lo + 1
             # bincount is O(N + span) and allocates span-length arrays, so direct value-indexing
             # stays linear while span is within a small multiple of the data (the 4 is slack,
             # the +64 keeps tiny N dense); a wider range pays np.unique's sort instead.
@@ -270,19 +277,23 @@ def _candidate_concepts(seen, B, V, min_leaf) -> List[Concept]:
                 ss1 = np.bincount(idx, weights=V2, minlength=span)         # its Σ V²
                 base = lo
             else:                                                  # pathologically wide range: fall back
-                vals, inv = np.unique(vec, return_inverse=True); K = len(vals)
+                vals, inv = np.unique(vec, return_inverse=True)
+                K = len(vals)
                 n1 = np.bincount(inv, minlength=K).astype(np.float64)
                 s1 = np.bincount(inv, weights=V, minlength=K)
                 ss1 = np.bincount(inv, weights=V2, minlength=K)
                 base = vals                                        # value of bin k is vals[k]
-            n0 = N - n1; s0 = S - s1; ss0 = SS - ss1                # the complement (value != c)
+            n0 = N - n1
+            s0 = S - s1
+            ss0 = SS - ss1                # the complement (value != c)
             var1 = np.maximum(ss1 / n1 - (s1 / n1) ** 2, 0.0)       # clamp float roundoff at 0
             var0 = np.maximum(ss0 / n0 - (s0 / n0) ** 2, 0.0)
             gain = total_var - (n1 * var1 + n0 * var0) / N
             keep = (n1 >= min_leaf) & (n0 >= min_leaf) & (gain > 0)
             for k in np.nonzero(keep)[0]:
                 c = (base + int(k)) if np.isscalar(base) else int(base[k])
-                mask = vec == c; sig = mask.tobytes()
+                mask = vec == c
+                sig = mask.tobytes()
                 if sig not in best or expr.size < best[sig][1].size:
                     best[sig] = (float(gain[k]), Concept(expr, "=", c, mask, expr.size))
     # round the gain in the tiebreak so equivalent splits prefer the SIMPLER concept
@@ -292,7 +303,7 @@ def _candidate_concepts(seen, B, V, min_leaf) -> List[Concept]:
 
 # ───────────────────────────── structural reuse (counting + threats) ───────────
 
-def _cell_group(e: Expr) -> Tuple[int, ...]:
+def _cell_group(e: Expr) -> tuple[int, ...]:
     """The distinct cells a concept's program reads (its support), seen through
     Named (reuse) and Fold (the fold's domain)."""
     out: set = set()
@@ -300,7 +311,8 @@ def _cell_group(e: Expr) -> Tuple[int, ...]:
         if isinstance(x, Cell):
             out.add(x.i)
         elif isinstance(x, BinOp):
-            walk(x.a); walk(x.b)
+            walk(x.a)
+            walk(x.b)
         elif isinstance(x, Named):
             walk(x.inner)
         elif isinstance(x, Fold):
@@ -324,7 +336,7 @@ def _is_atomic(e: Expr) -> bool:
     return isinstance(e, (Cell, Lit))
 
 
-def _supports(kept: List[Concept]) -> List[Tuple[int, ...]]:
+def _supports(kept: list[Concept]) -> list[tuple[int, ...]]:
     """The groups to fold over next are the cell-supports of the *atomic* concepts the
     search has kept — the regions it found directly from cells. Unions glued from earlier
     concepts and whole-board folds are skipped, so every fold counts over one coherent
@@ -335,11 +347,12 @@ def _supports(kept: List[Concept]) -> List[Tuple[int, ...]]:
             continue
         g = _cell_group(c.expr)
         if len(g) >= 2 and g not in seen:
-            seen.add(g); out.append(g)
+            seen.add(g)
+            out.append(g)
     return out
 
 
-def _board_fold_terminals() -> List[Expr]:
+def _board_fold_terminals() -> list[Expr]:
     """Seed each round-1 search with the whole-board fold under every monoid — e.g.
     fold(⊕, board, cell) is the nim-sum. The domain is width-free (:class:`BoardDomain`), so a
     fold kept here is the same program at any board width and transfers across scales unchanged.
@@ -349,7 +362,7 @@ def _board_fold_terminals() -> List[Expr]:
     return [Fold(op, board, Elem(0, BoardDomain.names)) for op in _FOLD]
 
 
-def _residual(rules: List["Rule"], V: np.ndarray) -> np.ndarray:
+def _residual(rules: list[Rule], V: np.ndarray) -> np.ndarray:
     """V minus what the current rule set already predicts (each board gets its leaf's
     mean). Scoring new candidates against this — rather than against V — rewards what
     the model still *fails* to explain, so a novel concept (the threat) beats one that
@@ -363,7 +376,7 @@ def _residual(rules: List["Rule"], V: np.ndarray) -> np.ndarray:
     return V - pred
 
 
-def _group_fold_candidates(supports, B: np.ndarray, target: np.ndarray, min_leaf: int, m) -> List[Concept]:
+def _group_fold_candidates(supports, B: np.ndarray, target: np.ndarray, min_leaf: int, m) -> list[Concept]:
     """Discover threats and forks over the discovered groups (``supports`` — the cells the
     kept concepts read). Search per-group bodies over the (played, empty) counts with the
     same synthesiser, then fold each body over the groups two ways: ``max`` (∃ a group
@@ -373,7 +386,8 @@ def _group_fold_candidates(supports, B: np.ndarray, target: np.ndarray, min_leaf
     if not supports:
         return []
     dom = GroupDomain(supports)
-    T = dom.tensor(B, m); N, K, F = T.shape
+    T = dom.tensor(B, m)
+    N, K, F = T.shape
     flat = T.reshape(N * K, F)
     bodies = _synthesize([Elem(j, dom.names) for j in range(F)], flat, max_size=5, cap=None)
     scored = []
@@ -384,7 +398,8 @@ def _group_fold_candidates(supports, B: np.ndarray, target: np.ndarray, min_leaf
             vec = fn.reduce(per, axis=1, initial=ident).astype(np.int64)
             fold = Fold(op, dom, body)
             for c in np.unique(vec):                      # outer threshold also discovered
-                mask = vec == c; n1 = int(mask.sum())
+                mask = vec == c
+                n1 = int(mask.sum())
                 if n1 < min_leaf or N - n1 < min_leaf:
                     continue
                 gain = target.var() - (n1/N*target[mask].var() + (N-n1)/N*target[~mask].var())
@@ -398,7 +413,7 @@ def _group_fold_candidates(supports, B: np.ndarray, target: np.ndarray, min_leaf
 
 @dataclass
 class Rule:
-    path: List[Tuple[Concept, bool]]
+    path: list[tuple[Concept, bool]]
     verdict: str
     n: int
     avg: float
@@ -413,42 +428,47 @@ def _verdict(v: np.ndarray) -> str:
     return ["LOSS", "DRAW", "WIN"][int(_soft_counts(v).argmax())]   # heaviest outcome mass
 
 
-def _build_rules(concepts: List[Concept], V: np.ndarray, min_leaf: int):
-    rules: List[Rule] = []
+def _build_rules(concepts: list[Concept], V: np.ndarray, min_leaf: int):
+    rules: list[Rule] = []
     split_cost = math.log2(max(len(concepts), 2)) + 2.0   # MDL: a split must beat its own description
 
     def grow(idx, path):
-        v = V[idx]; n = len(idx)
+        v = V[idx]
+        n = len(idx)
         here = _bits(v)
         verd = _verdict(v)
         # a node whose total bits don't exceed the cost of naming one split can never
         # pay — this single derived test is the whole leaf condition (it also bounds the
         # depth: every split must pay >= split_cost out of a finite bit budget)
         if here <= split_cost:
-            rules.append(Rule(list(path), verd, n, float(v.mean()), here)); return
+            rules.append(Rule(list(path), verd, n, float(v.mean()), here))
+            return
         best = None
         for con in concepts:
-            m = con.mask[idx]; nl = int(m.sum())
+            m = con.mask[idx]
+            nl = int(m.sum())
             if nl < min_leaf or n - nl < min_leaf:
                 continue
             g = here - (_bits(v[m]) + _bits(v[~m]))
             if best is None or g > best[0]:
                 best = (g, con, m)
         if best is None or best[0] <= split_cost:
-            rules.append(Rule(list(path), verd, n, float(v.mean()), here)); return
+            rules.append(Rule(list(path), verd, n, float(v.mean()), here))
+            return
         _, con, m = best
-        grow(idx[m], path + [(con, True)]); grow(idx[~m], path + [(con, False)])
+        grow(idx[m], path + [(con, True)])
+        grow(idx[~m], path + [(con, False)])
 
     grow(np.arange(len(V)), [])
     return rules
 
 
-def _model_bits(rules: List[Rule], n_atoms: int) -> float:
+def _model_bits(rules: list[Rule], n_atoms: int) -> float:
     a = math.log2(max(n_atoms, 2))
     return sum(len(r.path) * a + math.log2(3) for r in rules)
 
 
-def _fit(kept: List[Concept], B, V, M, min_leaf) -> Tuple[List[Rule], float, float]:
+def _fit(kept: list[Concept], B, V, M, min_leaf) -> tuple[list[Rule], float, float]:
     """Fit the existing library to this data: re-derive each concept's mask on these boards,
     rebuild the rule tree over them, and report ``(rules, resid, model)`` — how well what we
     already know explains what we now see."""
@@ -464,8 +484,8 @@ def _fit(kept: List[Concept], B, V, M, min_leaf) -> Tuple[List[Rule], float, flo
 @dataclass
 class RoundInfo:
     number: int
-    new_concepts: List[Concept]
-    rules: List[Rule]
+    new_concepts: list[Concept]
+    rules: list[Rule]
     residual: float
     data_saved: float
     cost: float
@@ -474,13 +494,13 @@ class RoundInfo:
 
 @dataclass
 class InventionResult:
-    rounds: List[RoundInfo]
-    concepts: List[Concept]        # everything kept across rounds
-    rules: List[Rule]              # final rule set (last paying round)
+    rounds: list[RoundInfo]
+    concepts: list[Concept]        # everything kept across rounds
+    rules: list[Rule]              # final rule set (last paying round)
     n_boards: int
     baseline_bits: float
-    tokens: Tuple[int, ...] = ()   # nonzero cell values seen — lets glosses enumerate honestly
-    shape: Optional[Tuple[int, int]] = None  # native board shape — lets regions earn place-names
+    tokens: tuple[int, ...] = ()   # nonzero cell values seen — lets glosses enumerate honestly
+    shape: tuple[int, int] | None = None  # native board shape — lets regions earn place-names
     @property
     def stopped_after(self) -> int:
         paid = [r.number for r in self.rounds if r.kept]
@@ -501,7 +521,8 @@ def _invent_round(kept, prior_rules, resid, model, B, V, M, min_leaf, base, max_
         extra_atoms = (_group_fold_candidates(_supports(kept), B, _residual(prior_rules, V), min_leaf, M)
                        if M is not None else [])
     else:
-        library = list(base) + _board_fold_terminals(); extra_atoms = []
+        library = list(base) + _board_fold_terminals()
+        extra_atoms = []
     seen = _synthesize(library, B, max_size, cap)
     cands = _candidate_concepts(seen, B, V, min_leaf)
     have = {c.mask.tobytes() for c in kept}
@@ -514,7 +535,8 @@ def _invent_round(kept, prior_rules, resid, model, B, V, M, min_leaf, base, max_
         for con, _ in r.path:
             key = con.mask.tobytes()
             if key not in used_keys:
-                used_keys.add(key); used.append(con)
+                used_keys.add(key)
+                used.append(con)
     new_used = [c for c in used if c.mask.tobytes() not in have]
     if not new_used:
         return [], prior_rules, resid, model, 0.0, 0.0, False
@@ -525,9 +547,9 @@ def _invent_round(kept, prior_rules, resid, model, B, V, M, min_leaf, base, max_
     return new_used, rules, new_resid, new_model, data_saved, cost, data_saved > cost
 
 
-def invent_from_boards(B: np.ndarray, V: np.ndarray, M: Optional[np.ndarray] = None, *,
-                       max_rounds: int = 32, max_size: Optional[int] = None, cap="auto",
-                       seed: Optional[List["Concept"]] = None) -> InventionResult:
+def invent_from_boards(B: np.ndarray, V: np.ndarray, M: np.ndarray | None = None, *,
+                       max_rounds: int = 32, max_size: int | None = None, cap="auto",
+                       seed: list[Concept] | None = None) -> InventionResult:
     """Run the multi-round concept-invention loop on boards B with values V.
 
     ``M`` is the just-moved token per board (read from each board's transition); the
@@ -551,13 +573,13 @@ def invent_from_boards(B: np.ndarray, V: np.ndarray, M: Optional[np.ndarray] = N
     min_leaf = math.ceil((math.log2(cap) + 2) / math.log2(3))
 
     # base building blocks: cell reads + the small integer literals on the board
-    base: List[Expr] = [Cell(i) for i in range(n_cells)]
+    base: list[Expr] = [Cell(i) for i in range(n_cells)]
     base += [Lit(v) for v in sorted(set(int(x) for x in np.unique(B)) | {0, 1})]
 
-    rounds: List[RoundInfo] = []
+    rounds: list[RoundInfo] = []
     baseline = _bits(V)
     # carry the seed in: fit it to THESE boards and start the model from it
-    kept: List[Concept] = list(seed) if seed else []
+    kept: list[Concept] = list(seed) if seed else []
     if kept:
         final_rules, resid, model = _fit(kept, B, V, M, min_leaf)
     else:
@@ -571,7 +593,10 @@ def invent_from_boards(B: np.ndarray, V: np.ndarray, M: Optional[np.ndarray] = N
         rounds.append(RoundInfo(k, new_used, rep_rules, rep_resid, data_saved, cost, paid))
         if not paid:
             break
-        kept = kept + new_used; resid = rep_resid; model = new_model; final_rules = rep_rules
+        kept = kept + new_used
+        resid = rep_resid
+        model = new_model
+        final_rules = rep_rules
 
     return InventionResult(rounds, kept, final_rules, N, baseline,
                            tuple(int(t) for t in np.unique(B) if t != 0))
@@ -603,11 +628,16 @@ MIN_BOARDS = 8
 def expr_to_dict(e: Expr) -> dict:
     """Serialise a feature program to a plain dict (for SQLite). The program is what's
     board-order-independent and reusable; masks/value-vectors are never stored."""
-    if isinstance(e, Cell):  return {"t": "Cell", "i": e.i}
-    if isinstance(e, Lit):   return {"t": "Lit", "v": e.v}
-    if isinstance(e, BinOp): return {"t": "BinOp", "op": e.op, "a": expr_to_dict(e.a), "b": expr_to_dict(e.b)}
-    if isinstance(e, Named): return {"t": "Named", "inner": expr_to_dict(e.inner)}
-    if isinstance(e, Elem):  return {"t": "Elem", "j": e.j, "names": list(e.names)}
+    if isinstance(e, Cell):
+        return {"t": "Cell", "i": e.i}
+    if isinstance(e, Lit):
+        return {"t": "Lit", "v": e.v}
+    if isinstance(e, BinOp):
+        return {"t": "BinOp", "op": e.op, "a": expr_to_dict(e.a), "b": expr_to_dict(e.b)}
+    if isinstance(e, Named):
+        return {"t": "Named", "inner": expr_to_dict(e.inner)}
+    if isinstance(e, Elem):
+        return {"t": "Elem", "j": e.j, "names": list(e.names)}
     if isinstance(e, Fold):
         if isinstance(e.domain, BoardDomain):
             dom = {"t": "BoardDomain"}                          # width-free → the program transfers
@@ -623,11 +653,16 @@ def expr_from_dict(d: dict) -> Expr:
     """Rebuild a feature program from :func:`expr_to_dict`. A reloaded program runs on any
     board (via ``eval``), which is how a discovered concept reaches the worker processes."""
     t = d["t"]
-    if t == "Cell":  return Cell(d["i"])
-    if t == "Lit":   return Lit(d["v"])
-    if t == "BinOp": return BinOp(d["op"], expr_from_dict(d["a"]), expr_from_dict(d["b"]))
-    if t == "Named": return Named(expr_from_dict(d["inner"]), np.empty(0, dtype=np.int64))
-    if t == "Elem":  return Elem(d["j"], tuple(d["names"]))
+    if t == "Cell":
+        return Cell(d["i"])
+    if t == "Lit":
+        return Lit(d["v"])
+    if t == "BinOp":
+        return BinOp(d["op"], expr_from_dict(d["a"]), expr_from_dict(d["b"]))
+    if t == "Named":
+        return Named(expr_from_dict(d["inner"]), np.empty(0, dtype=np.int64))
+    if t == "Elem":
+        return Elem(d["j"], tuple(d["names"]))
     if t == "Fold":
         dd = d["domain"]
         if dd["t"] == "BoardDomain":
@@ -640,16 +675,16 @@ def expr_from_dict(d: dict) -> Expr:
     raise ValueError(f"unknown expr tag {t!r}")
 
 
-def _boards_values(memory, boards=None) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+def _boards_values(memory, boards=None) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Pull (after-board, value, just-moved token) from the stored transitions. The move
     is read straight from the before→after diff — the token the mover just placed (the
     new non-empty value at a changed cell); boards whose before-board isn't stored get 0.
     ``boards`` skips the reload when the caller already holds the boards table."""
     boards, trans = memory._build_trans_scores(boards)
-    bv: Dict[tuple, float] = {}
-    bm: Dict[tuple, int] = {}
-    canon: Dict[tuple, str] = {}                                 # board → its smallest incoming from_hash
-    for (fh, th), (counts, score) in trans.items():
+    bv: dict[tuple, float] = {}
+    bm: dict[tuple, int] = {}
+    canon: dict[tuple, str] = {}                                 # board → its smallest incoming from_hash
+    for (fh, th), (_counts, score) in trans.items():
         if th not in boards:
             continue
         after = np.asarray(boards[th]).ravel()
@@ -675,7 +710,7 @@ def _boards_values(memory, boards=None) -> Tuple[np.ndarray, np.ndarray, np.ndar
     return B, V, M
 
 
-def invent(memory, game_id: Optional[str] = None, **kw) -> InventionResult:
+def invent(memory, game_id: str | None = None, **kw) -> InventionResult:
     """Invent concepts from a trained memory's stored transitions."""
     B, V, M = _boards_values(memory)
     if len(B) < MIN_BOARDS:
@@ -685,14 +720,14 @@ def invent(memory, game_id: Optional[str] = None, **kw) -> InventionResult:
     return res
 
 
-def _board_shape(memory) -> Optional[Tuple[int, int]]:
+def _board_shape(memory) -> tuple[int, int] | None:
     row = memory.conn.execute(
         "SELECT board_rows, board_cols FROM boards LIMIT 1").fetchone()
     return (int(row[0]), int(row[1])) if row else None
 
 
-def meaning(c: Concept, tokens: Tuple[int, ...] = (), brief: bool = False,
-            names: Optional[Dict[str, str]] = None) -> Optional[str]:
+def meaning(c: Concept, tokens: tuple[int, ...] = (), brief: bool = False,
+            names: dict[str, str] | None = None) -> str | None:
     """A plain-English reading of a concept, side by side with its formula.
 
     Derived, never asserted: a fold body over g-cell lines has only the (played, empty)
@@ -717,7 +752,7 @@ def meaning(c: Concept, tokens: Tuple[int, ...] = (), brief: bool = False,
     g = sizes.pop()
     pairs = [(p, emp) for p in range(g + 1) for emp in range(g + 1 - p)]
     vals = e.body.eval(np.array(pairs, dtype=np.int64))
-    by_val: Dict[int, List[str]] = {}
+    by_val: dict[int, list[str]] = {}
     for (p, emp), v in zip(pairs, vals):
         by_val.setdefault(int(v), []).append(f"you {p} · empty {emp} · them {g - p - emp}")
     # the gloss speaks the program's own vocabulary: the formula says "groups" (the regions
@@ -755,7 +790,7 @@ def meaning(c: Concept, tokens: Tuple[int, ...] = (), brief: bool = False,
 
 # ───────────────────────────── derived readings for cell-lattice chains ────────
 
-def _chain(e: Expr, op: str) -> List[Expr]:
+def _chain(e: Expr, op: str) -> list[Expr]:
     """Flatten a BinOp chain of one associative op into its operand list."""
     if isinstance(e, BinOp) and e.op == op:
         return _chain(e.a, op) + _chain(e.b, op)
@@ -766,7 +801,7 @@ def _strip(e: Expr) -> Expr:
     return e.inner if isinstance(e, Named) else e
 
 
-def _chain_cells(e: Expr, op: str) -> Optional[List[int]]:
+def _chain_cells(e: Expr, op: str) -> list[int] | None:
     """The cell indices of a pure ``op``-chain over cell reads, else None."""
     cells = []
     for part in _chain(_strip(e), op):
@@ -777,7 +812,7 @@ def _chain_cells(e: Expr, op: str) -> Optional[List[int]]:
     return None if len(cells) < 2 else cells
 
 
-def _uniform_chain(e: Expr, tokens: Tuple[int, ...]) -> Optional[List[int]]:
+def _uniform_chain(e: Expr, tokens: tuple[int, ...]) -> list[int] | None:
     """If ``e`` is an &-chain over cells whose value — enumerated over the actual token
     alphabet — is nonzero exactly when all its cells hold the same nonzero token, return
     the cells. This is the derivation behind "all one player's"; with overlapping bit
@@ -798,7 +833,7 @@ def _cells_str(cells) -> str:
     return "·".join(f"c{i}" for i in cells)
 
 
-def _xor_pair(e: Expr, tokens) -> Optional[str]:
+def _xor_pair(e: Expr, tokens) -> str | None:
     """"A and B carry equal values" for an ⊕ of two uniform chains."""
     e = _strip(e)
     if isinstance(e, BinOp) and e.op == "⊕":
@@ -808,8 +843,8 @@ def _xor_pair(e: Expr, tokens) -> Optional[str]:
     return None
 
 
-def _lattice_meaning(e: Expr, op: str, const: int, tokens: Tuple[int, ...],
-                     names: Optional[Dict[str, str]] = None) -> Optional[str]:
+def _lattice_meaning(e: Expr, op: str, const: int, tokens: tuple[int, ...],
+                     names: dict[str, str] | None = None) -> str | None:
     """Readings for and/or/xor chains over cells — the region concepts and their
     combinations. Everything here is an identity of the lattice ops (an |-chain is 0 iff
     every part is; an ⊕-pair is 0 iff the parts are equal) or an enumeration over the
@@ -846,7 +881,7 @@ def _lattice_meaning(e: Expr, op: str, const: int, tokens: Tuple[int, ...],
     return out or None
 
 
-def _fold_groups(concepts) -> List[Tuple[int, ...]]:
+def _fold_groups(concepts) -> list[tuple[int, ...]]:
     """The distinct cell-regions the group-folds among ``concepts`` walk, in first-seen
     order — so a reading like "the top-scoring group" can be grounded in actual cells."""
     out, seen = [], set()
@@ -855,7 +890,8 @@ def _fold_groups(concepts) -> List[Tuple[int, ...]]:
         if isinstance(e, Fold) and isinstance(e.domain, GroupDomain):
             for g in e.domain.groups:
                 if g not in seen:
-                    seen.add(g); out.append(g)
+                    seen.add(g)
+                    out.append(g)
     return out
 
 
@@ -869,11 +905,11 @@ def _fold_groups(concepts) -> List[Tuple[int, ...]]:
 _SUB = str.maketrans("0123456789", "₀₁₂₃₄₅₆₇₈₉")
 
 
-def _handles(concepts: List[Concept]) -> Dict[str, str]:
+def _handles(concepts: list[Concept]) -> dict[str, str]:
     """Program-text → handle, in library (round) order. Keyed by the *full* formula text so
     a Named reuse deep inside a later concept finds the earlier program's name. Handles
     name programs, not thresholds: two concepts sharing a program share its K."""
-    names: Dict[str, str] = {}
+    names: dict[str, str] = {}
     for c in concepts:
         key = str(_strip(c.expr))
         if key not in names:
@@ -881,7 +917,7 @@ def _handles(concepts: List[Concept]) -> Dict[str, str]:
     return names
 
 
-def _pretty(e: Expr, names: Dict[str, str]) -> str:
+def _pretty(e: Expr, names: dict[str, str]) -> str:
     """Render a program one floor deep: any subprogram with a handle prints as the handle;
     associative chains print flat (associativity is what makes them folds)."""
     s = str(e)
@@ -899,7 +935,7 @@ def _pretty(e: Expr, names: Dict[str, str]) -> str:
     return s
 
 
-def _region_geometry(g: Tuple[int, ...], shape) -> Optional[str]:
+def _region_geometry(g: tuple[int, ...], shape) -> str | None:
     """A derived place-name for a cell region, when the board's stored shape supports one
     (same row, same column, or a contiguous diagonal). Anything else — and any 1-D board —
     stays a plain cell list; geometry is read from data, never assumed."""
@@ -920,13 +956,13 @@ def _region_geometry(g: Tuple[int, ...], shape) -> Optional[str]:
     return None
 
 
-def _used_programs(rules: List[Rule], concepts: List[Concept]) -> List[Concept]:
+def _used_programs(rules: list[Rule], concepts: list[Concept]) -> list[Concept]:
     """One concept per program the rules rely on, in library order — the programs the
     rule paths test, plus (transitively) every promoted program inside their bodies."""
     by_text = {}
     for c in concepts:
         by_text.setdefault(str(_strip(c.expr)), c)
-    needed: List[str] = []
+    needed: list[str] = []
 
     def need(text):
         if text in by_text and text not in needed:
@@ -935,11 +971,13 @@ def _used_programs(rules: List[Rule], concepts: List[Concept]) -> List[Concept]:
 
     def walk(e, top=False):
         if not top and str(e) in by_text:
-            need(str(e)); return
+            need(str(e))
+            return
         if isinstance(e, Named):
             walk(e.inner)
         elif isinstance(e, BinOp):
-            walk(e.a); walk(e.b)
+            walk(e.a)
+            walk(e.b)
         elif isinstance(e, Fold):
             walk(e.body)
 
@@ -950,11 +988,11 @@ def _used_programs(rules: List[Rule], concepts: List[Concept]) -> List[Concept]:
     return [by_text[t] for t in sorted(needed, key=lambda t: order.get(t, 1 << 30))]
 
 
-def _tree_lines(rules: List[Rule], cond) -> List[str]:
+def _tree_lines(rules: list[Rule], cond) -> list[str]:
     """Print the rule tree as a tree — each split once, leaves on their branches. The
     leaves carry root-to-leaf paths, so the tree is rebuilt from their shared prefixes.
     ``cond(concept)`` renders one split line."""
-    out: List[str] = []
+    out: list[str] = []
 
     def leaf(r):
         if not r.verdict:                                # a pre-verdict DB: values only
@@ -975,6 +1013,8 @@ def _tree_lines(rules: List[Rule], cond) -> List[str]:
                 out.append(branch)
                 rec(sub, depth + 1, pre + ("   " if last else "│  "))
 
+    if not rules:
+        return ["(no rules — no concept explained the data)"]
     if len(rules) == 1 and not rules[0].path:
         return [f"→ {leaf(rules[0])}   (no split pays)"]
     rec(list(rules), 0, "")
@@ -986,12 +1026,13 @@ def render(res: InventionResult, label: str = "", expand: bool = False) -> str:
     floor deep under a K-handle, rules print as one tree, and the KEY defines each floor
     in the floor below's names — with derived ⟺ readings throughout. ``expand=True``
     prints every formula fully spelled out instead."""
-    out: List[str] = []
+    out: list[str] = []
     out.append("")
     out.append(f"══ CONCEPT INVENTION{(' — ' + label.upper()) if label else ''} ══"
                f"   ({res.n_boards} boards · baseline {res.baseline_bits:,.0f} bits to explain)")
     if not res.rounds:
-        out.append("  (not enough data to invent from)"); return "\n".join(out)
+        out.append("  (not enough data to invent from)")
+        return "\n".join(out)
     names = {} if expand else _handles(res.concepts)
     toks = res.tokens
 
@@ -1046,7 +1087,7 @@ def render(res: InventionResult, label: str = "", expand: bool = False) -> str:
     return "\n".join(out)
 
 
-def _key_lines(rules, concepts, names, toks, shape=None, expand=False) -> List[str]:
+def _key_lines(rules, concepts, names, toks, shape=None, expand=False) -> list[str]:
     """The KEY: the discovered regions (named, with derived geometry where the board's
     shape supports it), then one definition per program the rules use — each written one
     floor deep, with its derived readings."""
@@ -1072,7 +1113,7 @@ def _key_lines(rules, concepts, names, toks, shape=None, expand=False) -> List[s
                 out.append(f"      ⟺ {m}")
         return out
     # collect each program's thresholds actually tested by the rules
-    tests: Dict[str, List[Concept]] = {}
+    tests: dict[str, list[Concept]] = {}
     seen_tests = set()
     for r in rules:
         for con, _ in r.path:

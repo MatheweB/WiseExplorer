@@ -3,7 +3,6 @@ GameBase - abstract base class for all board games.
 """
 
 from abc import ABC, abstractmethod
-from typing import List, Optional
 
 from numpy.typing import NDArray
 
@@ -63,7 +62,7 @@ class GameBase(ABC):
         pass
 
     @abstractmethod
-    def valid_moves(self) -> List[NDArray]:
+    def valid_moves(self) -> list[NDArray]:
         """
         Return all legal moves from the current state.
         Example (TicTacToe): [(row, col), ...]
@@ -109,6 +108,6 @@ class GameBase(ABC):
         """Pretty string representation of the state."""
         pass
 
-    def move_str(self, move: NDArray) -> Optional[str]:
+    def move_str(self, move: NDArray) -> str | None:
         """Optional human-readable move string. Return None to use default formatting."""
         return None

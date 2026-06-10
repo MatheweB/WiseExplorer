@@ -109,7 +109,9 @@ class TestSelectMoveForTraining:
         def draws():
             return [_as_key(select_move_for_training(g, mem, is_prune=False)) for _ in range(20)]
 
-        random.seed(123); first = draws()
-        random.seed(123); second = draws()
+        random.seed(123)
+        first = draws()
+        random.seed(123)
+        second = draws()
         assert first == second
         mem.close()

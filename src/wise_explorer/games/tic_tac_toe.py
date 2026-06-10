@@ -44,13 +44,13 @@ class TicTacToe(GameBase):
     def num_players(self) -> int:
         return 2
 
-    def clone(self) -> "TicTacToe":
+    def clone(self) -> TicTacToe:
         g = TicTacToe.__new__(TicTacToe)
         g.state = self.state
         g.winner = self.winner
         return g
 
-    def deep_clone(self) -> "TicTacToe":
+    def deep_clone(self) -> TicTacToe:
         g = TicTacToe.__new__(TicTacToe)
         g.state = self.state.copy()
         g.winner = self.winner

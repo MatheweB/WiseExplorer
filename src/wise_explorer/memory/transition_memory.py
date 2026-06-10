@@ -9,7 +9,7 @@ More precise but requires more data to converge.
 from __future__ import annotations
 
 import sqlite3
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 from collections import defaultdict
 
@@ -39,20 +39,20 @@ class TransitionMemory(GameMemory):
         ).fetchone()
         return Stats(*row) if row else Stats()
 
-    def get_stats_by_key(self, key: Tuple[str, str]) -> Stats:
+    def get_stats_by_key(self, key: tuple[str, str]) -> Stats:
         return self.get_move_stats(key[0], key[1])
 
-    def _cache_key(self, from_hash: str, to_hash: str) -> Tuple[str, str]:
+    def _cache_key(self, from_hash: str, to_hash: str) -> tuple[str, str]:
         return (from_hash, to_hash)
 
-    def _fetch_anchor_id(self, from_hash: str, to_hash: str) -> Optional[int]:
+    def _fetch_anchor_id(self, from_hash: str, to_hash: str) -> int | None:
         row = self.conn.execute(
             "SELECT anchor_id FROM transitions WHERE from_hash=? AND to_hash=?",
             (from_hash, to_hash)
         ).fetchone()
         return row[0] if row else None
 
-    def batch_get_anchor_ids(self, keys: List[Tuple[str, str]], cur: sqlite3.Cursor) -> Dict[Tuple[str, str], Optional[int]]:
+    def batch_get_anchor_ids(self, keys: list[tuple[str, str]], cur: sqlite3.Cursor) -> dict[tuple[str, str], int | None]:
         result = {}
         for from_hash, to_hash in keys:
             row = cur.execute(
@@ -62,28 +62,28 @@ class TransitionMemory(GameMemory):
             result[(from_hash, to_hash)] = row[0] if row else None
         return result
 
-    def set_anchor_id(self, key: Tuple[str, str], anchor_id: int, cur: sqlite3.Cursor) -> None:
+    def set_anchor_id(self, key: tuple[str, str], anchor_id: int, cur: sqlite3.Cursor) -> None:
         cur.execute(
             "UPDATE transitions SET anchor_id=? WHERE from_hash=? AND to_hash=?",
             (anchor_id, key[0], key[1])
         )
 
-    def key_to_repr(self, key: Tuple[str, str]) -> str:
+    def key_to_repr(self, key: tuple[str, str]) -> str:
         return f"{key[0][:8]}→{key[1][:8]}"
 
-    def collect_units(self) -> List[Tuple[Tuple[str, str], Counts]]:
+    def collect_units(self) -> list[tuple[tuple[str, str], Counts]]:
         rows = self.conn.execute(
             "SELECT from_hash, to_hash, wins, ties, losses FROM transitions WHERE wins+ties+losses > 0"
         ).fetchall()
         return [((fh, th), (w, t, l)) for fh, th, w, t, l in rows]
 
-    def write_anchor_ids(self, membership: Dict[Tuple[str, str], int], cur: sqlite3.Cursor) -> None:
+    def write_anchor_ids(self, membership: dict[tuple[str, str], int], cur: sqlite3.Cursor) -> None:
         cur.executemany(
             "UPDATE transitions SET anchor_id=? WHERE from_hash=? AND to_hash=?",
             [(aid, key[0], key[1]) for key, aid in membership.items()]
         )
 
-    def _commit_outcomes(self, transitions: Dict[Tuple[str, str], List[float]], cur: sqlite3.Cursor) -> Tuple[List, Dict]:
+    def _commit_outcomes(self, transitions: dict[tuple[str, str], list[float]], cur: sqlite3.Cursor) -> tuple[list, dict]:
         """Commit outcomes and return keys/deltas for anchor manager."""
         cur.executemany(
             """INSERT INTO transitions (from_hash, to_hash, wins, ties, losses)
@@ -99,7 +99,7 @@ class TransitionMemory(GameMemory):
         deltas = {k: (c[0], c[1], c[2]) for k, c in transitions.items()}
         return keys, deltas
 
-    def _record_cross_scores(self, cross_scores: Dict) -> None:
+    def _record_cross_scores(self, cross_scores: dict) -> None:
         """Write accumulated cross-scores to the database."""
         if not cross_scores:
             return
@@ -115,12 +115,12 @@ class TransitionMemory(GameMemory):
         )
         self.conn.commit()
 
-    def _propagate_bellman(self, trajectory_keys: List[List[Tuple[str, str]]]) -> None:
+    def _propagate_bellman(self, trajectory_keys: list[list[tuple[str, str]]]) -> None:
         """Run Bellman backward sweep along each played trajectory."""
         for stack_keys in trajectory_keys:
             self.propagate_bellman(stack_keys)
 
-    def _get_mode_specific_info(self) -> Dict[str, Any]:
+    def _get_mode_specific_info(self) -> dict[str, Any]:
         trans = self.conn.execute("SELECT COUNT(*) FROM transitions").fetchone()[0]
         samples = self.conn.execute("SELECT COALESCE(SUM(wins+ties+losses), 0) FROM transitions").fetchone()[0]
         from_states = self.conn.execute("SELECT COUNT(DISTINCT from_hash) FROM transitions").fetchone()[0]
@@ -137,7 +137,7 @@ class TransitionMemory(GameMemory):
     # Transition-Specific Methods
     # -------------------------------------------------------------------------
 
-    def get_transitions_from(self, from_hash: str) -> Dict[str, Stats]:
+    def get_transitions_from(self, from_hash: str) -> dict[str, Stats]:
         """Get all transitions from a given state."""
         rows = self.conn.execute(
             "SELECT to_hash, wins, ties, losses FROM transitions WHERE from_hash=?",
@@ -149,7 +149,7 @@ class TransitionMemory(GameMemory):
     # Bellman Propagation
     # -------------------------------------------------------------------------
 
-    def get_propagated_score(self, from_hash: str, to_hash: str) -> Optional[float]:
+    def get_propagated_score(self, from_hash: str, to_hash: str) -> float | None:
         """Get the propagated minimax score for a transition, or None if not computed."""
         row = self.conn.execute(
             "SELECT propagated_score FROM transitions WHERE from_hash=? AND to_hash=?",
@@ -159,7 +159,7 @@ class TransitionMemory(GameMemory):
             return row[0]
         return None
 
-    def batch_get_moves_from(self, from_hash: str) -> Dict[str, Tuple[Stats, Optional[int], Optional[float]]]:
+    def batch_get_moves_from(self, from_hash: str) -> dict[str, tuple[Stats, int | None, float | None]]:
         """Fetch stats, anchor_id, and bell score for ALL transitions from a position.
 
         Returns {to_hash: (Stats, anchor_id, propagated_score)} in a single query.
@@ -215,7 +215,7 @@ class TransitionMemory(GameMemory):
 
         return max(0.0, mu_cross + mu_mover - 1.0)
 
-    def get_alpha(self, from_hash: str, to_hash: str) -> Optional[float]:
+    def get_alpha(self, from_hash: str, to_hash: str) -> float | None:
         """
         Get the α that would be used when propagating a transition.
 
@@ -282,7 +282,7 @@ class TransitionMemory(GameMemory):
         )
         return prop
 
-    def propagate_bellman(self, trajectory_keys: List[Tuple[str, str]]) -> None:
+    def propagate_bellman(self, trajectory_keys: list[tuple[str, str]]) -> None:
         """
         Backward Bellman sweep along a played trajectory.
 
@@ -322,9 +322,9 @@ class TransitionMemory(GameMemory):
             return 0
 
         # Build adjacency and stats caches
-        children: Dict[str, List[Tuple[str, Stats]]] = defaultdict(list)
+        children: dict[str, list[tuple[str, Stats]]] = defaultdict(list)
         all_boards: set = set()
-        stats_cache: Dict[Tuple[str, str], Stats] = {}
+        stats_cache: dict[tuple[str, str], Stats] = {}
 
         for fh, th, w, t, l in rows:
             s = Stats(w, t, l)
@@ -334,9 +334,9 @@ class TransitionMemory(GameMemory):
             all_boards.add(th)
 
         # Load cross-scores for alpha computation
-        cross_cache: Dict[Tuple[str, str], float] = {}
+        cross_cache: dict[tuple[str, str], float] = {}
         try:
-            cross_agg: Dict[Tuple[str, str], List[float]] = defaultdict(
+            cross_agg: dict[tuple[str, str], list[float]] = defaultdict(
                 lambda: [0.0, 0.0]
             )
             for fh, th, ss, sc in self.conn.execute(
@@ -364,7 +364,7 @@ class TransitionMemory(GameMemory):
         terminal = all_boards - set(children.keys())
 
         # Initialize V[board]
-        V: Dict[str, float] = {}
+        V: dict[str, float] = {}
         for b in all_boards:
             if b in terminal:
                 incoming = [s for fh in children for th, s in children[fh] if th == b]
@@ -373,13 +373,13 @@ class TransitionMemory(GameMemory):
                 V[b] = 0.5
 
         # Topological sort (Kahn's algorithm)
-        in_degree: Dict[str, int] = defaultdict(int)
-        for parent, kids in children.items():
+        in_degree: dict[str, int] = defaultdict(int)
+        for kids in children.values():
             for child, _ in kids:
                 in_degree[child] += 1
 
         queue = [b for b in children if in_degree.get(b, 0) == 0]
-        topo_order: List[str] = []
+        topo_order: list[str] = []
         while queue:
             b = queue.pop()
             topo_order.append(b)
@@ -439,7 +439,7 @@ class TransitionMemory(GameMemory):
         self.conn.commit()
         return n_iters
 
-    def reply_graph(self, game) -> Optional[dict]:
+    def reply_graph(self, game) -> dict | None:
         """Enumerate every stored board's full legal reply set — the structural half of
         :meth:`complete_values`. A pure function of (stored boards, game rules), and the
         loop never adds boards or transitions between its beats, so one boundary builds
@@ -458,11 +458,11 @@ class TransitionMemory(GameMemory):
         shape = game.get_state().board.shape            # stored boards are 2-D-normalized
         V0 = np.full(n, 0.5)
         fixed = np.zeros(n, dtype=bool)                 # terminals hold their value
-        parents: List[int] = []                         # one row per (board, legal reply)
-        known: List[int] = []                           # reply's row index, or -1
-        novel_of: List[int] = []                        # candidate row of each novel reply
-        novel_boards: List[np.ndarray] = []
-        novel_parents: List[np.ndarray] = []
+        parents: list[int] = []                         # one row per (board, legal reply)
+        known: list[int] = []                           # reply's row index, or -1
+        novel_of: list[int] = []                        # candidate row of each novel reply
+        novel_boards: list[np.ndarray] = []
+        novel_parents: list[np.ndarray] = []
 
         for i, h in enumerate(hashes):
             board = boards[h].reshape(shape)
@@ -520,7 +520,7 @@ class TransitionMemory(GameMemory):
             "edges": self.conn.execute("SELECT from_hash, to_hash FROM transitions").fetchall(),
         }
 
-    def complete_values(self, game, graph: Optional[dict] = None) -> int:
+    def complete_values(self, game, graph: dict | None = None) -> int:
         """Complete the value graph with the concept library — the value loop's healing step.
 
         :meth:`solve_graph` can only take its max over replies somebody has *played*, so
@@ -565,7 +565,8 @@ class TransitionMemory(GameMemory):
                 best[has_kids] = np.maximum.reduceat(cand, starts[has_kids])
             newV = np.where(has_kids & np.isfinite(best), 1.0 - best, V)
             if np.allclose(newV, V, atol=1e-9):
-                V = newV; break
+                V = newV
+                break
             V = newV
 
         self.conn.cursor().executemany(

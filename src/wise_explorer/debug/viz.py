@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import re
 from collections import defaultdict
-from typing import Any, Dict, List, Optional, Sequence, Tuple, TYPE_CHECKING
+from typing import Any, Sequence, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from wise_explorer.memory.game_memory import GameMemory
@@ -107,7 +107,7 @@ def is_empty(val: Any) -> bool:
     return val in EmptyVals
 
 
-def normalize_pos(pos: Any) -> Tuple[int, ...]:
+def normalize_pos(pos: Any) -> tuple[int, ...]:
     """
     Normalize a position into a coordinate tuple.
 
@@ -120,7 +120,7 @@ def normalize_pos(pos: Any) -> Tuple[int, ...]:
     return (int(pos),)
 
 
-def fmt_piece(val: Any, cell_strings: Optional[Dict[int, str]] = None) -> str:
+def fmt_piece(val: Any, cell_strings: dict[int, str] | None = None) -> str:
     """Format a board value using the cell_strings dict. Returns '' for empty/None."""
     if is_empty(val):
         return ""
@@ -133,10 +133,10 @@ def fmt_piece(val: Any, cell_strings: Optional[Dict[int, str]] = None) -> str:
 # Diff analysis
 # ═══════════════════════════════════════════════════════════════════════════════
 
-Change = Dict[str, Any]  # {"before": v, "after": v, "type": "arr"|"dep"|"cap"}
+Change = dict[str, Any]  # {"before": v, "after": v, "type": "arr"|"dep"|"cap"}
 
 
-def analyze_diff(diff: List[Sequence]) -> Dict[Tuple[int, ...], Change]:
+def analyze_diff(diff: list[Sequence]) -> dict[tuple[int, ...], Change]:
     """
     Normalize and classify a list of diffs.
 
@@ -150,7 +150,7 @@ def analyze_diff(diff: List[Sequence]) -> Dict[Tuple[int, ...], Change]:
       - "cap": piece -> different piece (capture / replacement)
     No-op entries where before == after are ignored.
     """
-    out: Dict[Tuple[int, ...], Change] = {}
+    out: dict[tuple[int, ...], Change] = {}
     for entry in diff:
         if not entry or len(entry) < 3:
             continue
@@ -179,7 +179,7 @@ def analyze_diff(diff: List[Sequence]) -> Dict[Tuple[int, ...], Change]:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
-def normalize_move_to_steps(move: Any) -> List[Tuple[Tuple[int, ...], Tuple[int, ...]]]:
+def normalize_move_to_steps(move: Any) -> list[tuple[tuple[int, ...], tuple[int, ...]]]:
     """
     Normalize various move shapes into a list of (origin_tuple, dest_tuple) steps.
 
@@ -190,7 +190,7 @@ def normalize_move_to_steps(move: Any) -> List[Tuple[Tuple[int, ...], Tuple[int,
       - A short placement: [r,c] -> treated as single step with origin=(), dest=(r,c)
     Returns: list of (origin_tuple, dest_tuple)
     """
-    steps: List[Tuple[Tuple[int, ...], Tuple[int, ...]]] = []
+    steps: list[tuple[tuple[int, ...], tuple[int, ...]]] = []
 
     # If already a list of steps (first element iterable and not a scalar)
     if isinstance(move, list) and move and hasattr(move[0], "__iter__") and not isinstance(move[0], (str, bytes)):
@@ -235,7 +235,7 @@ def normalize_move_to_steps(move: Any) -> List[Tuple[Tuple[int, ...], Tuple[int,
     return steps
 
 
-def _is_capture_at(diff_map: Dict[Tuple[int, ...], Change], dest: Tuple[int, ...]) -> Optional[Any]:
+def _is_capture_at(diff_map: dict[tuple[int, ...], Change], dest: tuple[int, ...]) -> Any | None:
     """Return captured piece (before) at dest if dest is a capture, else None."""
     ch = diff_map.get(dest)
     if ch and ch["type"] == "cap":
@@ -243,14 +243,14 @@ def _is_capture_at(diff_map: Dict[Tuple[int, ...], Change], dest: Tuple[int, ...
     return None
 
 
-def _coords_to_str(coords: Tuple[int, ...]) -> str:
+def _coords_to_str(coords: tuple[int, ...]) -> str:
     """Return comma-joined coords or '' for empty origin."""
     if not coords:
         return ""
     return ",".join(str(int(x)) for x in coords)
 
 
-def move_str_from_array(move: Any, diff: List[Sequence], cell_strings: Dict[int, str]) -> str:
+def move_str_from_array(move: Any, diff: list[Sequence], cell_strings: dict[int, str]) -> str:
     """
     Build a concise human move string from an array (game-agnostic).
     Uses normalize_move_to_steps to handle all supported shapes.
@@ -261,7 +261,7 @@ def move_str_from_array(move: Any, diff: List[Sequence], cell_strings: Dict[int,
 
     diff_map = analyze_diff(diff or [])
 
-    parts: List[str] = []
+    parts: list[str] = []
     for origin, dest in steps:
         orig_s = _coords_to_str(origin) if origin else "place"
         dest_s = _coords_to_str(dest)
@@ -273,7 +273,7 @@ def move_str_from_array(move: Any, diff: List[Sequence], cell_strings: Dict[int,
     return " → ".join(parts)
 
 
-def move_str_from_diff(diff: List[Sequence], cell_strings: Dict[int, str]) -> str:
+def move_str_from_diff(diff: list[Sequence], cell_strings: dict[int, str]) -> str:
     """
     Build a move string from a diff only (when move array isn't available).
     Uses counts & classifications to create a reasonable string (unchanged behavior).
@@ -314,7 +314,7 @@ def pos_str(pos: Sequence) -> str:
     return ",".join(str(int(x)) for x in p)
 
 
-def get_move_str(row: Dict, cell_strings: Dict[int, str], game: Optional["GameBase"] = None) -> str:
+def get_move_str(row: dict, cell_strings: dict[int, str], game: GameBase | None = None) -> str:
     move = row.get("move")
     if move is not None and game is not None:
         custom = game.move_str(move)
@@ -326,7 +326,7 @@ def get_move_str(row: Dict, cell_strings: Dict[int, str], game: Optional["GameBa
     return move_str_from_diff(diff, cell_strings)
 
 
-def get_move_desc(row: Dict, cell_strings: Dict[int, str]) -> str:
+def get_move_desc(row: dict, cell_strings: dict[int, str]) -> str:
     """
     Human-readable move description for header. Prefer move array if available,
     otherwise fall back to a diff-based description.
@@ -404,7 +404,7 @@ def wlt_bar(win_pct: float, loss_pct: float, width: int = 10) -> str:
     return f"{FG['green']}{'█' * w}{FG['red']}{'█' * l}{FG['yellow']}{'█' * t}{RESET}"
 
 
-def render_table(rows: List[Dict], rank: int, cell_strings: Dict[int, str], game: Optional["GameBase"] = None) -> List[str]:
+def render_table(rows: list[dict], rank: int, cell_strings: dict[int, str], game: GameBase | None = None) -> list[str]:
     """Render one anchor group as a table (compact, readable)."""
     first = rows[0]
     aid = first.get("anchor_id")
@@ -417,7 +417,7 @@ def render_table(rows: List[Dict], rank: int, cell_strings: Dict[int, str], game
     best = rank == 0
     style = f"{BOLD}{FG['green']}" if best else ""
 
-    lines: List[str] = []
+    lines: list[str] = []
     lines.append(hline(CORNERS["tl"], CORNERS["tr"], style))
     marker = f"{FG['green']}★ BEST{RESET}" if best else f"{FG['gray']}#{rank + 1}{RESET}"
     equiv = f" ({len(rows)} equiv)" if len(rows) > 1 else ""
@@ -508,7 +508,7 @@ def render_table(rows: List[Dict], rank: int, cell_strings: Dict[int, str], game
 # Board rendering
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def render_board(board: np.ndarray, rows: List[Dict], cell_strings: Dict[int, str]) -> List[str]:
+def render_board(board: np.ndarray, rows: list[dict], cell_strings: dict[int, str]) -> list[str]:
     """Render the game board with move visualization (selected move + candidates)."""
     arr = np.atleast_2d(np.array(board))
     if arr.ndim == 1:
@@ -521,9 +521,9 @@ def render_board(board: np.ndarray, rows: List[Dict], cell_strings: Dict[int, st
     cw = 7  # cell width
 
     # find selected changes and candidate destination scores
-    sel_changes: Optional[Dict[Tuple[int, ...], Change]] = None
-    sel_row: Optional[Dict] = None
-    candidates: Dict[Tuple[int, ...], float] = {}
+    sel_changes: dict[tuple[int, ...], Change] | None = None
+    sel_row: dict | None = None
+    candidates: dict[tuple[int, ...], float] = {}
 
     for row in rows:
         dmap = analyze_diff(row.get("diff", []))
@@ -569,7 +569,7 @@ def render_board(board: np.ndarray, rows: List[Dict], cell_strings: Dict[int, st
         return f"{bg_gray(2)}{FG['gray']}{pad('·', cw, 'center')}{RESET}"
 
     # Build the ASCII board
-    lines: List[str] = ["", f"  {BOLD}Board{RESET}", f"  {'─' * 5}"]
+    lines: list[str] = ["", f"  {BOLD}Board{RESET}", f"  {'─' * 5}"]
     if sel_row:
         lines.append(f"  {FG['cyan']}Selected:{RESET} {get_move_desc(sel_row, cell_strings)}")
     lines.append("")
@@ -594,10 +594,10 @@ def render_board(board: np.ndarray, rows: List[Dict], cell_strings: Dict[int, st
 
 def render_debug(
     board: np.ndarray,
-    debug_rows: List[Dict[str, Any]],
-    cell_strings: Dict[int, str],
+    debug_rows: list[dict[str, Any]],
+    cell_strings: dict[int, str],
     show_board: bool = True,
-    game: Optional["GameBase"] = None,
+    game: GameBase | None = None,
 ) -> str:
     """
     Render the full move analysis output (tables + optional board).
@@ -610,14 +610,14 @@ def render_debug(
         return ""
 
     # Group rows by anchor id
-    groups: Dict[Any, List[Dict]] = defaultdict(list)
+    groups: dict[Any, list[dict]] = defaultdict(list)
     for row in debug_rows:
         groups[row.get("anchor_id")].append(row)
 
     # Sort anchor groups by anchor_score (best first)
     sorted_groups = sorted(groups.values(), key=lambda g: g[0].get("anchor_score", 0), reverse=True)
 
-    out_lines: List[str] = ["", f"  {BOLD}MOVE ANALYSIS{RESET}", f"  {'─' * 13}"]
+    out_lines: list[str] = ["", f"  {BOLD}MOVE ANALYSIS{RESET}", f"  {'─' * 13}"]
     for rank, group in enumerate(sorted_groups):
         out_lines.append("")
         out_lines.extend(render_table(group, rank, cell_strings, game))
@@ -639,10 +639,10 @@ def render_debug(
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def debug_move_selection(
-    memory: "GameMemory",
-    game: "GameBase",
-    valid_moves: List[np.ndarray],
-    chosen_move: Optional[np.ndarray] = None,
+    memory: GameMemory,
+    game: GameBase,
+    valid_moves: list[np.ndarray],
+    chosen_move: np.ndarray | None = None,
 ) -> None:
     """Display debug visualization for move selection.
 

@@ -4,7 +4,6 @@ Configuration and game registry.
 
 import math
 from pathlib import Path
-from typing import Optional
 
 import numpy as np
 
@@ -71,7 +70,7 @@ class Config:
         turn_depth: int = 40,
         num_workers: int = DEFAULT_WORKER_COUNT,
         gamma: float = 1.0,
-        max_ply: Optional[int] = None,
+        max_ply: int | None = None,
     ):
         self.game_name = game_name
         self.turn_depth = turn_depth

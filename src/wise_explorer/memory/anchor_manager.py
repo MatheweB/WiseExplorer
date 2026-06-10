@@ -13,7 +13,7 @@ from __future__ import annotations
 import math
 import sqlite3
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable
 
 from wise_explorer.core.bayes import compatible, similarity
 from wise_explorer.core.types import Counts
@@ -64,7 +64,7 @@ class AnchorManager:
     # Queries
     # -------------------------------------------------------------------------
 
-    def get_details(self) -> List[dict]:
+    def get_details(self) -> list[dict]:
         """Get detailed information about all anchors."""
         rows = self._conn.execute(
             f"""SELECT a.anchor_id, a.repr_key, a.wins, a.ties, a.losses,
@@ -115,12 +115,12 @@ class AnchorManager:
 
     def update(
         self,
-        changed_stats: Dict[Any, Counts],
-        deltas: Dict[Any, Counts],
-        existing_aids: Dict[Any, Optional[int]],
+        changed_stats: dict[Any, Counts],
+        deltas: dict[Any, Counts],
+        existing_aids: dict[Any, int | None],
         key_to_repr: Callable[[Any], str],
         cur: sqlite3.Cursor,
-    ) -> Tuple[Dict[Any, int], int]:
+    ) -> tuple[dict[Any, int], int]:
         """
         Update anchor assignments and stats incrementally.
 
@@ -141,7 +141,7 @@ class AnchorManager:
         anchors = self._load_anchors(cur)
         max_id = max(anchors.keys(), default=-1)
 
-        assignments: Dict[Any, int] = {}
+        assignments: dict[Any, int] = {}
         swaps = 0
         for key, counts in changed_stats.items():
             old_aid = existing_aids.get(key)
@@ -184,7 +184,7 @@ class AnchorManager:
 
         return assignments, swaps
 
-    def _update_anchor_stats(self, aid: int, delta: Counts, anchors: Dict[int, Anchor], cur: sqlite3.Cursor) -> None:
+    def _update_anchor_stats(self, aid: int, delta: Counts, anchors: dict[int, Anchor], cur: sqlite3.Cursor) -> None:
         """Update anchor stats in DB and cache."""
         if delta == (0, 0, 0):
             return
@@ -195,7 +195,7 @@ class AnchorManager:
         if aid in anchors:
             anchors[aid].add(delta)
 
-    def _load_anchors(self, cur: sqlite3.Cursor) -> Dict[int, Anchor]:
+    def _load_anchors(self, cur: sqlite3.Cursor) -> dict[int, Anchor]:
         """Load all anchors from database."""
         return {
             aid: Anchor((w, t, l), repr_key)
@@ -207,10 +207,10 @@ class AnchorManager:
     def _find_compatible_anchor(
         self,
         counts: Counts,
-        anchors: Dict[int, Anchor],
-        exclude_aid: Optional[int] = None,
-        exclude_stats: Optional[Counts] = None
-    ) -> Optional[int]:
+        anchors: dict[int, Anchor],
+        exclude_aid: int | None = None,
+        exclude_stats: Counts | None = None
+    ) -> int | None:
         """Find most similar compatible anchor."""
         best_aid, best_sim = None, -1.0
 
@@ -270,7 +270,7 @@ class AnchorManager:
             cur.execute("ROLLBACK")
             raise
 
-    def _merge_anchors(self, aid1: int, aid2: int, anchors: Dict[int, Anchor], cur: sqlite3.Cursor) -> None:
+    def _merge_anchors(self, aid1: int, aid2: int, anchors: dict[int, Anchor], cur: sqlite3.Cursor) -> None:
         """Merge two anchors, keeping the larger one."""
         survivor, absorbed = (aid1, aid2) if anchors[aid1].total >= anchors[aid2].total else (aid2, aid1)
 
@@ -288,10 +288,10 @@ class AnchorManager:
 
     def rebuild(
         self,
-        units: List[Tuple[Any, Counts]],
+        units: list[tuple[Any, Counts]],
         key_to_repr: Callable[[Any], str],
         cur: sqlite3.Cursor,
-    ) -> Tuple[int, Dict[Any, int]]:
+    ) -> tuple[int, dict[Any, int]]:
         """
         Full rebuild of anchor clustering.
 
@@ -321,12 +321,12 @@ class AnchorManager:
 
     def _cluster_units(
         self,
-        units: List[Tuple[Any, Counts]],
+        units: list[tuple[Any, Counts]],
         key_to_repr: Callable[[Any], str],
-    ) -> Tuple[List[Anchor], Dict[Any, int]]:
+    ) -> tuple[list[Anchor], dict[Any, int]]:
         """Cluster units into anchors."""
-        anchors: List[Anchor] = []
-        membership: Dict[Any, int] = {}
+        anchors: list[Anchor] = []
+        membership: dict[Any, int] = {}
 
         for key, counts in units:
             best_idx = None

@@ -22,7 +22,7 @@ if TYPE_CHECKING:
 
 
 def for_game(
-    game: "GameBase",
+    game: GameBase,
     base_dir: str | Path = "data/memory",
     markov: bool = False,
     **kwargs

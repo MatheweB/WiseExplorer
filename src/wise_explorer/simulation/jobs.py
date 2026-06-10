@@ -8,7 +8,7 @@ by worker processes.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, List, Set, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 import numpy as np
 
@@ -33,10 +33,10 @@ class GameJob:
     Contains everything needed to run a single game simulation
     without requiring shared state.
     """
-    game: "GameBase"
-    player_map: Dict[int, int]  # player_id -> agent_index
+    game: GameBase
+    player_map: dict[int, int]  # player_id -> agent_index
     max_turns: int
-    prune_players: Set[int]  # Player IDs that should play worst moves
+    prune_players: set[int]  # Player IDs that should play worst moves
 
 
 @dataclass
@@ -47,7 +47,7 @@ class JobResult:
     Contains all moves made and outcomes for each player,
     ready to be committed to memory.
     """
-    moves: Dict[int, List[MoveRecord]]
-    outcomes: Dict[int, "State"]
-    player_map: Dict[int, int]
+    moves: dict[int, list[MoveRecord]]
+    outcomes: dict[int, State]
+    player_map: dict[int, int]
     game_class: type

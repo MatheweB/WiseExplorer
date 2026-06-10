@@ -8,13 +8,13 @@ This module contains the fundamental types used throughout the game AI system:
 from __future__ import annotations
 
 import math
-from typing import NamedTuple, Tuple
+from typing import NamedTuple
 
 import numpy as np
 
 from wise_explorer.agent.agent import State
 
-Counts = Tuple[float, float, float]
+Counts = tuple[float, float, float]
 
 
 # ---------------------------------------------------------------------------
@@ -46,7 +46,7 @@ class Stats(NamedTuple):
     ties: float = 0
     losses: float = 0
 
-    def as_tuple(self) -> Tuple[float, float, float]:
+    def as_tuple(self) -> tuple[float, float, float]:
         return (self.wins, self.ties, self.losses)
 
     @property
@@ -54,13 +54,13 @@ class Stats(NamedTuple):
         return self.wins + self.ties + self.losses
 
     @property
-    def distribution(self) -> Tuple[float, float, float]:
+    def distribution(self) -> tuple[float, float, float]:
         t = self.total
         if t == 0:
             return (0.0, 0.0, 0.0)
         return (self.wins / t, self.ties / t, self.losses / t)
 
-    def _moments(self) -> Tuple[float, float]:
+    def _moments(self) -> tuple[float, float]:
         """
         Bayesian mean and variance using pseudocounts (α=1).
 

@@ -12,7 +12,7 @@ import sqlite3
 from abc import ABC, abstractmethod
 from collections import defaultdict
 from pathlib import Path
-from typing import Any, Dict, List, NamedTuple, Optional, Tuple, TYPE_CHECKING
+from typing import Any, NamedTuple, TYPE_CHECKING
 
 import numpy as np
 
@@ -23,7 +23,6 @@ from wise_explorer.memory.anchor_manager import AnchorManager
 from wise_explorer.memory.concept_library import ConceptLibrary
 
 if TYPE_CHECKING:
-    from wise_explorer.agent.agent import State
     from wise_explorer.games.game_base import GameBase
 UNEXPLORED_ANCHOR_ID = -999
 
@@ -46,10 +45,10 @@ class MoveEvaluation(NamedTuple):
     Also carries bell and concept scores so selection doesn't need to
     re-clone games and re-query the DB for the same information.
     """
-    anchors_with_moves: Dict[int, List[Tuple[np.ndarray, Stats]]]
-    anchor_stats: Dict[int, Stats]
-    bell_scores: Dict[tuple, Optional[float]]  # move_key -> propagated_score
-    concept_scores: Dict[tuple, Optional[float]]  # move_key -> invented-concept value
+    anchors_with_moves: dict[int, list[tuple[np.ndarray, Stats]]]
+    anchor_stats: dict[int, Stats]
+    bell_scores: dict[tuple, float | None]  # move_key -> propagated_score
+    concept_scores: dict[tuple, float | None]  # move_key -> invented-concept value
 
 
 class GameMemory(ABC):
@@ -64,8 +63,8 @@ class GameMemory(ABC):
         self.read_only = read_only
         self._closed = False
 
-        self._anchor_stats_cache: Dict[int, Stats] = {}
-        self._anchor_id_cache: Dict[Any, Optional[int]] = {}
+        self._anchor_stats_cache: dict[int, Stats] = {}
+        self._anchor_id_cache: dict[Any, int | None] = {}
 
         self.conn = sqlite3.connect(str(self.db_path))
         self.conn.execute("PRAGMA journal_mode=WAL")
@@ -104,12 +103,12 @@ class GameMemory(ABC):
         pass
 
     @abstractmethod
-    def _fetch_anchor_id(self, from_hash: str, to_hash: str) -> Optional[int]:
+    def _fetch_anchor_id(self, from_hash: str, to_hash: str) -> int | None:
         """Fetch anchor ID from database."""
         pass
 
     @abstractmethod
-    def batch_get_anchor_ids(self, keys: List, cur: sqlite3.Cursor) -> Dict:
+    def batch_get_anchor_ids(self, keys: list, cur: sqlite3.Cursor) -> dict:
         """Batch fetch anchor IDs for keys."""
         pass
 
@@ -124,22 +123,22 @@ class GameMemory(ABC):
         pass
 
     @abstractmethod
-    def collect_units(self) -> List[Tuple]:
+    def collect_units(self) -> list[tuple]:
         """Collect all units as (key, counts) tuples for rebuild."""
         pass
 
     @abstractmethod
-    def write_anchor_ids(self, membership: Dict, cur: sqlite3.Cursor) -> None:
+    def write_anchor_ids(self, membership: dict, cur: sqlite3.Cursor) -> None:
         """Batch write anchor IDs after rebuild."""
         pass
 
     @abstractmethod
-    def _commit_outcomes(self, transitions: Dict[Tuple[str, str], List[float]], cur: sqlite3.Cursor) -> Tuple[List, Dict]:
+    def _commit_outcomes(self, transitions: dict[tuple[str, str], list[float]], cur: sqlite3.Cursor) -> tuple[list, dict]:
         """Commit outcomes and return (keys, deltas) for anchor update."""
         pass
 
     @abstractmethod
-    def _get_mode_specific_info(self) -> Dict[str, Any]:
+    def _get_mode_specific_info(self) -> dict[str, Any]:
         """Return mode-specific info for get_info()."""
         pass
 
@@ -147,7 +146,7 @@ class GameMemory(ABC):
     # Anchor Queries (shared implementation)
     # -------------------------------------------------------------------------
 
-    def get_anchor_id(self, from_hash: str, to_hash: str) -> Optional[int]:
+    def get_anchor_id(self, from_hash: str, to_hash: str) -> int | None:
         """Get anchor ID for a move (cached)."""
         key = self._cache_key(from_hash, to_hash)
         if key in self._anchor_id_cache:
@@ -188,7 +187,7 @@ class GameMemory(ABC):
             return direct
         return anchor
 
-    def get_anchor_details(self) -> List[Dict[str, Any]]:
+    def get_anchor_details(self) -> list[dict[str, Any]]:
         """Get detailed information about all anchors."""
         return self.anchors.get_details()
 
@@ -221,7 +220,7 @@ class GameMemory(ABC):
     # Info
     # -------------------------------------------------------------------------
 
-    def get_info(self) -> Dict[str, Any]:
+    def get_info(self) -> dict[str, Any]:
         """Get summary statistics."""
         anchors = self.conn.execute("SELECT COUNT(*) FROM anchors").fetchone()[0]
         return {
@@ -234,7 +233,7 @@ class GameMemory(ABC):
     # Move Evaluation
     # -------------------------------------------------------------------------
 
-    def evaluate_moves(self, game: "GameBase", valid_moves: List[np.ndarray]) -> MoveEvaluation:
+    def evaluate_moves(self, game: GameBase, valid_moves: list[np.ndarray]) -> MoveEvaluation:
         """Evaluate all valid moves and group by anchor.
 
         Uses a single batch DB query per position instead of 3 queries per move.
@@ -248,10 +247,10 @@ class GameMemory(ABC):
         # Single batch query: fetch stats + anchor_id + bell for ALL moves from this position
         known_moves = self.batch_get_moves_from(from_hash) if hasattr(self, 'batch_get_moves_from') else {}
 
-        anchors_with_moves: Dict[int, List[Tuple[np.ndarray, Stats]]] = defaultdict(list)
-        anchor_stats: Dict[int, Stats] = {}
-        bell_scores: Dict[tuple, Optional[float]] = {}
-        concept_scores: Dict[tuple, Optional[float]] = {}
+        anchors_with_moves: dict[int, list[tuple[np.ndarray, Stats]]] = defaultdict(list)
+        anchor_stats: dict[int, Stats] = {}
+        bell_scores: dict[tuple, float | None] = {}
+        concept_scores: dict[tuple, float | None] = {}
 
         for move, to_hash, to_board in self._compute_move_hashes(game, valid_moves):
             mk = tuple(move)
@@ -282,7 +281,7 @@ class GameMemory(ABC):
             concept_scores=concept_scores,
         )
 
-    def _compute_move_hashes(self, game: "GameBase", valid_moves: List[np.ndarray]) -> List[Tuple[np.ndarray, str, np.ndarray]]:
+    def _compute_move_hashes(self, game: GameBase, valid_moves: list[np.ndarray]) -> list[tuple[np.ndarray, str, np.ndarray]]:
         """Generate (move, destination_hash, destination_board) triples.
 
         Moves come from valid_moves() so validation is skipped.
@@ -302,7 +301,7 @@ class GameMemory(ABC):
     # Recording
     # -------------------------------------------------------------------------
 
-    def record_round(self, game_class: type, stacks: List[Tuple]) -> Tuple[int, int]:
+    def record_round(self, game_class: type, stacks: list[tuple]) -> tuple[int, int]:
         """
         Record outcomes from a batch of games — every move in a stack is
         credited with its mover's eventual outcome, flat. (A gamma-decay /
@@ -323,12 +322,12 @@ class GameMemory(ABC):
 
         from wise_explorer.games.game_state import GameState
 
-        transitions: Dict[Tuple[str, str], List[float]] = defaultdict(lambda: [0.0, 0.0, 0.0])
-        trajectory_keys: List[List[Tuple[str, str]]] = []
+        transitions: dict[tuple[str, str], list[float]] = defaultdict(lambda: [0.0, 0.0, 0.0])
+        trajectory_keys: list[list[tuple[str, str]]] = []
         # Cross-score accumulator: (from_hash, to_hash, observer_role) -> [score_sum, count]
-        cross_scores: Dict[Tuple[str, str, int], List[float]] = defaultdict(lambda: [0.0, 0.0])
+        cross_scores: dict[tuple[str, str, int], list[float]] = defaultdict(lambda: [0.0, 0.0])
         # Board storage: hash -> (board_bytes, rows, cols) for concept invention
-        boards_to_store: Dict[str, Tuple[bytes, int, int]] = {}
+        boards_to_store: dict[str, tuple[bytes, int, int]] = {}
 
         for stack_entry in stacks:
             moves, outcome = stack_entry[0], stack_entry[1]
@@ -339,7 +338,7 @@ class GameMemory(ABC):
                 continue
 
             game = game_class()
-            stack_keys: List[Tuple[str, str]] = []
+            stack_keys: list[tuple[str, str]] = []
             for move, board, player in moves:
                 from_hash = hash_board(board)
                 game.set_state(GameState(board.copy(), player))
@@ -376,7 +375,7 @@ class GameMemory(ABC):
 
         return len(transitions), swaps
 
-    def _store_boards(self, boards: Dict[str, Tuple[bytes, int, int]]) -> None:
+    def _store_boards(self, boards: dict[str, tuple[bytes, int, int]]) -> None:
         """Store board arrays for concept invention."""
         if not boards:
             return
@@ -388,7 +387,7 @@ class GameMemory(ABC):
         )
         self.conn.commit()
 
-    def _load_boards(self) -> Dict[str, np.ndarray]:
+    def _load_boards(self) -> dict[str, np.ndarray]:
         """Load all stored boards from the database."""
         rows = self.conn.execute(
             "SELECT board_hash, board_data, board_rows, board_cols FROM boards"
@@ -399,7 +398,7 @@ class GameMemory(ABC):
             result[h] = board
         return result
 
-    def _build_trans_scores(self, boards: Optional[Dict[str, np.ndarray]] = None) -> Tuple[Dict[str, np.ndarray], Dict[Tuple[str, str], Tuple[Counts, float]]]:
+    def _build_trans_scores(self, boards: dict[str, np.ndarray] | None = None) -> tuple[dict[str, np.ndarray], dict[tuple[str, str], tuple[Counts, float]]]:
         """Build the per-transition target the concept miner fits.
 
         The target is the minimax-propagated **Bellman** value of each transition
@@ -427,9 +426,9 @@ class GameMemory(ABC):
         if not rows:
             return {}, {}
 
-        keys: List[Tuple[str, str]] = []
-        counts_l: List[Counts] = []
-        bell_l: List[float] = []
+        keys: list[tuple[str, str]] = []
+        counts_l: list[Counts] = []
+        bell_l: list[float] = []
         for from_hash, to_hash, w, t, l, bell in rows:
             if from_hash not in boards or to_hash not in boards:
                 continue
@@ -444,7 +443,7 @@ class GameMemory(ABC):
         if not keys:
             return boards, {}
 
-        trans_scores: Dict[Tuple[str, str], Tuple[Counts, float]] = {
+        trans_scores: dict[tuple[str, str], tuple[Counts, float]] = {
             key: (counts_l[i], bell_l[i]) for i, key in enumerate(keys)
         }
         return boards, trans_scores
@@ -490,11 +489,11 @@ class GameMemory(ABC):
             self.complete_values(game, graph)    # re-price with the rules just distilled
         return kept
 
-    def _record_cross_scores(self, cross_scores: Dict) -> None:
+    def _record_cross_scores(self, cross_scores: dict) -> None:
         """Hook for recording cross-scores. No-op for Markov memory."""
         pass
 
-    def _propagate_bellman(self, trajectory_keys: List[List[Tuple[str, str]]]) -> None:
+    def _propagate_bellman(self, trajectory_keys: list[list[tuple[str, str]]]) -> None:
         """Hook for Bellman propagation. No-op for Markov memory."""
         pass
 
@@ -510,7 +509,7 @@ class GameMemory(ABC):
         """Library-completed value pass. No-op for Markov memory."""
         return 0
 
-    def _commit(self, transitions: Dict[Tuple[str, str], List[float]]) -> int:
+    def _commit(self, transitions: dict[tuple[str, str], list[float]]) -> int:
         """
         Write transitions to database with incremental anchor updates.
 
@@ -531,7 +530,7 @@ class GameMemory(ABC):
                 self.write_anchor_ids(membership, cur)
 
         # Gather current stats for changed keys
-        changed_stats: Dict[Any, Counts] = {}
+        changed_stats: dict[Any, Counts] = {}
         for key in keys:
             stats = self.get_stats_by_key(key)
             if stats.total > 0:

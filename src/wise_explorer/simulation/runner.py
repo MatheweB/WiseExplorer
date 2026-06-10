@@ -14,7 +14,7 @@ import random
 import signal
 import sys
 from multiprocessing.pool import Pool
-from typing import Dict, List, Optional, Set, Tuple, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 from wise_explorer.agent.agent import State
 from wise_explorer.simulation.jobs import GameJob, JobResult
@@ -34,8 +34,8 @@ DEFAULT_WORKER_COUNT = max(1, mp.cpu_count() - 1)
 # Process cleanup
 # ---------------------------------------------------------------------------
 
-_active_runners: List["SimulationRunner"] = []
-_active_memories: List["GameMemory"] = []
+_active_runners: list[SimulationRunner] = []
+_active_memories: list[GameMemory] = []
 
 
 def _shutdown_all():
@@ -49,7 +49,7 @@ def _shutdown_all():
     _active_memories.clear()
 
 
-def register_memory(memory: "GameMemory") -> None:
+def register_memory(memory: GameMemory) -> None:
     """Register a memory instance for cleanup on exit/interrupt."""
     if memory not in _active_memories:
         _active_memories.append(memory)
@@ -89,10 +89,10 @@ class SimulationRunner:
     before the next wave starts, ensuring subsequent games see updated statistics.
     """
 
-    def __init__(self, memory: "GameMemory", num_workers: int = DEFAULT_WORKER_COUNT):
+    def __init__(self, memory: GameMemory, num_workers: int = DEFAULT_WORKER_COUNT):
         self.memory = memory
         self.num_workers = num_workers
-        self._pool: Optional[Pool] = None
+        self._pool: Pool | None = None
         self._wheel_turned_at = 0           # graph size at the last value-loop turn
 
         _active_runners.append(self)
@@ -131,11 +131,11 @@ class SimulationRunner:
 
     def run_batch(
         self,
-        swarms: Dict[int, List["Agent"]],
-        game: "GameBase",
+        swarms: dict[int, list[Agent]],
+        game: GameBase,
         num_sims: int,
         max_turns: int,
-        prune_players: Set[int],
+        prune_players: set[int],
     ) -> int:
         """
         Run simulations in synchronized waves.
@@ -197,12 +197,12 @@ class SimulationRunner:
 
     def _make_jobs(
         self,
-        swarms: Dict[int, List["Agent"]],
-        game: "GameBase",
+        swarms: dict[int, list[Agent]],
+        game: GameBase,
         count: int,
         max_turns: int,
-        prune_players: Set[int],
-    ) -> List[GameJob]:
+        prune_players: set[int],
+    ) -> list[GameJob]:
         players = sorted(swarms.keys())
         indices = {
             pid: [random.randrange(len(swarms[pid])) for _ in range(count)]
@@ -219,7 +219,7 @@ class SimulationRunner:
             for i in range(count)
         ]
 
-    def _commit(self, results: List[JobResult]) -> Tuple[int, int]:
+    def _commit(self, results: list[JobResult]) -> tuple[int, int]:
         """
         Commit game results to memory.
         

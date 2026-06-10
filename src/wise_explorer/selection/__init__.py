@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import random
 from math import ceil as _math_ceil, log as _math_log
-from typing import Dict, List, Optional, Tuple, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 import numpy as np
 
@@ -60,11 +60,11 @@ def _fast_var(values: list) -> float:
 
 
 def _rank_signals(
-    bell_scores: Dict[tuple, Optional[float]],
-    anchor_scores: Dict[tuple, float],
-    solo_scores: Dict[tuple, float],
-    concept_scores: Optional[Dict[tuple, Optional[float]]] = None,
-) -> Tuple[str, ...]:
+    bell_scores: dict[tuple, float | None],
+    anchor_scores: dict[tuple, float],
+    solo_scores: dict[tuple, float],
+    concept_scores: dict[tuple, float | None] | None = None,
+) -> tuple[str, ...]:
     """Rank signals by variance — most informative first.
 
     Compares variance of bell, anchor, solo, and concept scores across
@@ -89,12 +89,12 @@ def _rank_signals(
 
 
 def _score_move(
-    bell: Optional[float],
+    bell: float | None,
     anchor_score: float,
     solo_score: float,
-    signal_order: Tuple[str, ...],
-    concept_score: Optional[float] = None,
-) -> Tuple[float, ...]:
+    signal_order: tuple[str, ...],
+    concept_score: float | None = None,
+) -> tuple[float, ...]:
     """Score a move as a tuple based on signal ranking.
 
     signal_order is ranked by variance (most informative first).
@@ -112,8 +112,8 @@ def _score_move(
 # ---------------------------------------------------------------------------
 
 def select_move(
-    game: "GameBase",
-    memory: "GameMemory",
+    game: GameBase,
+    memory: GameMemory,
     is_prune: bool = False,
     debug: bool = False,
 ) -> np.ndarray:
@@ -149,8 +149,8 @@ def select_move(
 
     # Collect anchor and solo scores per move for signal comparison
     # Uses decisive scoring: exact ratio when unanimously significant
-    anchor_scores: Dict[tuple, float] = {}
-    solo_scores: Dict[tuple, float] = {}
+    anchor_scores: dict[tuple, float] = {}
+    solo_scores: dict[tuple, float] = {}
     for aid, moves in anchors_with_moves.items():
         a_stats = anchor_stats.get(aid)
         a_score = _effective_score(a_stats) if a_stats else 0.5
@@ -175,7 +175,7 @@ def select_move(
     )
 
     # Score each move using the ranked signal order
-    move_scored: list[tuple[np.ndarray, Tuple[float, ...]]] = []
+    move_scored: list[tuple[np.ndarray, tuple[float, ...]]] = []
     for aid, moves in anchors_with_moves.items():
         a_stats = anchor_stats.get(aid)
         a_score = _effective_score(a_stats) if a_stats else 0.5
@@ -203,8 +203,8 @@ def select_move(
 # ---------------------------------------------------------------------------
 
 def select_move_for_training(
-    game: "GameBase",
-    memory: "GameMemory",
+    game: GameBase,
+    memory: GameMemory,
     is_prune: bool,
     debug: bool = False,
 ) -> np.ndarray:
@@ -239,8 +239,8 @@ def select_move_for_training(
         return np.asarray(random.choice(valid_moves))
 
     # Flatten to per-move (move, stats) — every valid move appears exactly once.
-    moves: List[np.ndarray] = []
-    weights: List[float] = []
+    moves: list[np.ndarray] = []
+    weights: list[float] = []
     for anchor_moves in anchors_with_moves.values():
         for move, stats in anchor_moves:
             moves.append(move)

@@ -12,7 +12,6 @@ Uses int8 board (1D array of heap sizes):
 
 from __future__ import annotations
 
-from typing import List
 
 import numpy as np
 from numpy.typing import NDArray
@@ -53,14 +52,14 @@ class Nim(GameBase):
     def num_players(self) -> int:
         return 2
 
-    def clone(self) -> "Nim":
+    def clone(self) -> Nim:
         g = Nim.__new__(Nim)
         g.n = self.n
         g.state = self.state
         g.winner = self.winner
         return g
 
-    def deep_clone(self) -> "Nim":
+    def deep_clone(self) -> Nim:
         g = Nim.__new__(Nim)
         g.n = self.n
         g.state = self.state.copy()
@@ -78,7 +77,7 @@ class Nim(GameBase):
     def current_player(self) -> int:
         return self.state.current_player
 
-    def valid_moves(self) -> List[NDArray]:
+    def valid_moves(self) -> list[NDArray]:
         """Return all [heap_index, num_to_remove] moves."""
         moves = []
         for i, count in enumerate(self.state.board):
