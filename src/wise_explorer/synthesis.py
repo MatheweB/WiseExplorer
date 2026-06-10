@@ -214,23 +214,36 @@ def _synthesize(terminals: List[Expr], B: np.ndarray, max_size: int, cap: Option
 # ───────────────────────────── concept selection (MDL, per round) ──────────────
 
 def _candidate_concepts(seen, B, V, min_leaf) -> List[Concept]:
-    """Derive boolean atoms (feature = c) and keep the best per yes/no partition."""
-    N = len(V); var = V.var()
+    """Derive boolean atoms (feature == c) and keep the best per yes/no partition.
+
+    The variance-reduction gain of every (program, value) split is computed from *grouped
+    sums* in one vectorised pass per program — far cheaper than calling numpy ``.var()``
+    once per split, which is almost all per-call overhead on these small arrays."""
+    N = len(V)
+    V2 = V * V
+    S = float(V.sum()); SS = float(V2.sum())
+    total_var = SS / N - (S / N) ** 2
     best: Dict[bytes, Tuple[float, Concept]] = {}
     for vec_bytes, expr in seen.items():
         vec = np.frombuffer(vec_bytes, dtype=np.int64)
-        for c in np.unique(vec):
-            mask = vec == c
-            n1 = int(mask.sum())
-            if n1 < min_leaf or N - n1 < min_leaf:
-                continue
-            gain = var - (n1 / N * V[mask].var() + (N - n1) / N * V[~mask].var())
-            if gain <= 0:
-                continue
-            sig = mask.tobytes()
+        vals, inv = np.unique(vec, return_inverse=True)
+        K = len(vals)
+        n1 = np.bincount(inv, minlength=K).astype(np.float64)        # size of each value-group
+        s1 = np.bincount(inv, weights=V, minlength=K)               # its Σ V
+        ss1 = np.bincount(inv, weights=V2, minlength=K)             # its Σ V²
+        n0 = N - n1; s0 = S - s1; ss0 = SS - ss1                     # the complement (value != c)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            var1 = np.maximum(ss1 / n1 - (s1 / n1) ** 2, 0.0)   # clamp float roundoff at 0
+            var0 = np.maximum(ss0 / n0 - (s0 / n0) ** 2, 0.0)
+            gain = total_var - (n1 * var1 + n0 * var0) / N
+        keep = (n1 >= min_leaf) & (n0 >= min_leaf) & (gain > 0)
+        for k in np.nonzero(keep)[0]:
+            c = int(vals[k]); mask = vec == c; sig = mask.tobytes()
             if sig not in best or expr.size < best[sig][1].size:
-                best[sig] = (gain, Concept(expr, "=", int(c), mask, expr.size))
-    return [c for _, c in sorted(best.values(), key=lambda x: (-x[0], x[1].size))]
+                best[sig] = (float(gain[k]), Concept(expr, "=", c, mask, expr.size))
+    # round the gain in the tiebreak so equivalent splits prefer the SIMPLER concept
+    # deterministically (float roundoff in the grouped sums must not flip the order)
+    return [c for _, c in sorted(best.values(), key=lambda x: (-round(x[0], 9), x[1].size))]
 
 
 # ───────────────────────────── structural reuse (counting + threats) ───────────
@@ -459,9 +472,9 @@ def invent_from_boards(B: np.ndarray, V: np.ndarray, M: Optional[np.ndarray] = N
     N, n_cells = B.shape
     CL = _classes(V, lo, hi)
     if max_size is None:
-        max_size = 7 if n_cells <= 5 else 5
+        max_size = 7 if n_cells <= 5 else 5     # reach: narrow boards may still need size-7 programs
     if cap == "auto":
-        cap = None if n_cells <= 5 else 6000
+        cap = 6000                              # but ALWAYS bound the search (cap=None was the explosion)
     min_leaf = max(3, N // 200)
 
     # base building blocks: cell reads + the small integer literals on the board
@@ -502,9 +515,9 @@ def grow_once(kept, B, V, M, prev_frac, max_size=None, cap="auto"):
     CL = _classes(V, 0.40, 0.60); min_leaf = max(3, len(V) // 200)   # inherited invent defaults
     n_cells = B.shape[1]
     if max_size is None:
-        max_size = 7 if n_cells <= 5 else 5
+        max_size = 7 if n_cells <= 5 else 5     # reach: narrow boards may still need size-7 programs
     if cap == "auto":
-        cap = None if n_cells <= 5 else 6000
+        cap = 6000                              # but ALWAYS bound the search (cap=None was the explosion)
     base = [Cell(i) for i in range(n_cells)]
     base += [Lit(v) for v in sorted(set(int(x) for x in np.unique(B)) | {0, 1})]
     for c in kept:                                       # cheap: re-derive masks on current boards

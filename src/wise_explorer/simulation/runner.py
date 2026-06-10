@@ -175,6 +175,9 @@ class SimulationRunner:
 
                 # Incremental predicate update (ITI: ~0.5ms per wave)
                 self.memory.mine_predicates(incremental=True)
+                # Grow the concept library too — cheap (~4ms) re-eval each wave; the expensive
+                # search fires only when the residual rises, so the signal stays current.
+                self.memory.grow_concepts()
 
                 job_idx += len(wave_jobs)
 
