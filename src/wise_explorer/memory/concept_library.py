@@ -29,7 +29,8 @@ CREATE TABLE IF NOT EXISTS concepts (
     const INTEGER NOT NULL, size INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS concept_rules (
-    id INTEGER PRIMARY KEY, path_json TEXT NOT NULL, avg REAL NOT NULL
+    id INTEGER PRIMARY KEY, path_json TEXT NOT NULL, avg REAL NOT NULL,
+    verdict TEXT DEFAULT '', n INTEGER DEFAULT 0
 );
 """
 
@@ -44,6 +45,11 @@ class ConceptLibrary:
         self.rules: List[S.Rule] = []       # the value model: rule paths with leaf values
         if not read_only:
             self.conn.executescript(_SCHEMA)
+            for col in ("verdict TEXT DEFAULT ''", "n INTEGER DEFAULT 0"):
+                try:                                     # migrate pre-verdict DBs in place
+                    self.conn.execute(f"ALTER TABLE concept_rules ADD COLUMN {col}")
+                except sqlite3.OperationalError:
+                    pass                                 # column already there
         self._load()
 
     # ── discovery (the value loop's distillation beat) ──────────────────────────
@@ -67,29 +73,47 @@ class ConceptLibrary:
         self.save()
         return len(self.kept)
 
-    def summary(self) -> str:
-        """A terse 'what training discovered' line: the rules verbatim, then a key giving
-        each fold's derived plain-English reading alongside its formula."""
+    def summary(self, expand: bool = False) -> str:
+        """What training discovered: the rule tree (each split shown once, with derived
+        ⟺ readings) and a KEY defining every named program one floor deep. ``expand=True``
+        prints flat rules with fully-spelled-out formulas instead."""
         if not self.kept:
             return "No concepts discovered yet (the data may not support any)."
         lines = [f"Discovered {len(self.kept)} concept{'s' if len(self.kept) != 1 else ''}, "
                  f"{len(self.rules)} rule{'s' if len(self.rules) != 1 else ''}:"]
-        for r in self.rules:
-            lines.append(f"  {r.render()}  →  {r.avg:.2f}")
-        used, seen = [], set()
-        for r in self.rules:
-            for con, _ in r.path:
-                key = str(con)
-                if key not in seen:
-                    seen.add(key); used.append(con)
-        gl = S._groups_line(used)
-        if gl:
-            lines.append(f"  {gl}")
-        for con in used:
-            gloss = S.meaning(con)
-            if gloss:
-                lines.append(f"  where {con}  ⟺  {gloss}")
+        toks, shape = self._alphabet()
+        if expand:
+            for r in self.rules:
+                lines.append(f"  {r.render()}  →  {r.avg:.2f}")
+        else:
+            names = S._handles(self.kept)
+
+            def cond(con):
+                text = f"{S._pretty(con.expr, names)} {con.op} {con.const}"
+                m = S.meaning(con, toks, brief=True, names=names)
+                return [text + (f"   ⟺ {m}" if m else "")]
+
+            rules = [r for r in self.rules]
+            lines.extend("  " + l for l in S._tree_lines(rules, cond))
+            lines.append("  (each leaf value is what the library lends a board that lands there)")
+        lines.extend(S._key_lines(self.rules, self.kept,
+                                  {} if expand else S._handles(self.kept),
+                                  toks, shape=shape, expand=expand))
         return "\n".join(lines)
+
+    def _alphabet(self):
+        """The observed nonzero tokens and the native board shape, from a bounded sample
+        of stored boards — what derived glosses and region geometry may honestly use."""
+        try:
+            rows = self.conn.execute(
+                "SELECT board_data, board_rows, board_cols FROM boards LIMIT 64").fetchall()
+        except Exception:
+            return (), None
+        if not rows:
+            return (), None
+        toks = sorted({int(t) for bd, _r, _c in rows
+                       for t in np.frombuffer(bd, dtype=np.int8) if t != 0})
+        return tuple(toks), (int(rows[0][1]), int(rows[0][2]))
 
     # ── the signal (everywhere, including read-only workers) ────────────────────
     def value_for(self, board: np.ndarray, m: Optional[int] = None) -> Optional[float]:
@@ -130,9 +154,9 @@ class ConceptLibrary:
              for i, c in enumerate(self.kept)],
         )
         cur.executemany(
-            "INSERT INTO concept_rules (id, path_json, avg) VALUES (?,?,?)",
+            "INSERT INTO concept_rules (id, path_json, avg, verdict, n) VALUES (?,?,?,?,?)",
             [(ri, json.dumps([[idx[id(con)], bool(s)] for con, s in r.path if id(con) in idx]),
-              float(r.avg)) for ri, r in enumerate(self.rules)],
+              float(r.avg), r.verdict, int(r.n)) for ri, r in enumerate(self.rules)],
         )
         self.conn.commit()
 
@@ -171,11 +195,16 @@ class ConceptLibrary:
         concepts = self._concepts_from(self.conn)
         self.kept = [concepts[k] for k in sorted(concepts)]
         rules = []
-        for _rid, pj, avg in self.conn.execute(
-                "SELECT id, path_json, avg FROM concept_rules ORDER BY id").fetchall():
+        try:
+            rows = self.conn.execute(
+                "SELECT path_json, avg, verdict, n FROM concept_rules ORDER BY id").fetchall()
+        except sqlite3.OperationalError:                 # a pre-verdict DB opened read-only
+            rows = [(pj, avg, "", 0) for pj, avg in self.conn.execute(
+                "SELECT path_json, avg FROM concept_rules ORDER BY id").fetchall()]
+        for pj, avg, verdict, n in rows:
             try:
                 path = [(concepts[cid], bool(s)) for cid, s in json.loads(pj) if cid in concepts]
             except Exception:
                 continue
-            rules.append(S.Rule(path, "", 0, float(avg), 0.0))
+            rules.append(S.Rule(path, verdict or "", int(n or 0), float(avg), 0.0))
         self.rules = rules

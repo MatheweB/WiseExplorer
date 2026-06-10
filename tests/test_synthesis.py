@@ -143,7 +143,88 @@ class TestMeaning:
 
     def test_plain_cell_arithmetic_keeps_its_formula(self):
         c = S.Concept(S.BinOp("&", S.Cell(0), S.Cell(4)), "=", 0, np.zeros(2, dtype=bool), 3)
-        assert S.meaning(c) is None                               # already readable as-is
+        assert S.meaning(c) is None                               # no alphabet given → no claim
+
+    def test_lattice_chain_glosses_with_the_alphabet(self):
+        # (c0 & c4 & c8) = 0 — enumerated over tokens {1,2}: nonzero ⟺ all same player
+        chain = S.BinOp("&", S.Cell(0), S.BinOp("&", S.Cell(4), S.Cell(8)))
+        c = S.Concept(chain, "=", 0, np.zeros(2, dtype=bool), 5)
+        assert S.meaning(c, tokens=(1, 2)) == "c0·c4·c8 are not all one player's"
+        # tokens with overlapping bits (3 & 1 = 1) fail the enumeration → honest silence
+        assert S.meaning(c, tokens=(1, 3)) is None
+
+    def test_or_of_chains_glosses_each_region(self):
+        line = lambda a, b, k: S.BinOp("&", S.Cell(a), S.BinOp("&", S.Cell(b), S.Cell(k)))
+        e = S.BinOp("|", line(0, 1, 2), S.BinOp("⊕", line(3, 4, 5), line(6, 7, 8)))
+        c = S.Concept(e, "=", 0, np.zeros(2, dtype=bool), 17)
+        m = S.meaning(c, tokens=(1, 2))
+        assert m == ("no group among (c0·c1·c2) is all one player's, "
+                     "and (c3·c4·c5) and (c6·c7·c8) carry equal values")
+
+    def test_count_fold_glosses_as_a_count(self):
+        # a 0/1-valued body makes the +-fold a plain count, not a score table
+        e = lambda j: S.Elem(j, S.GroupDomain.names)
+        body = S.BinOp("min", e(0), e(1))                # min(played, empty) ∈ {0,1} on 2-cell groups
+        fold = S.Fold("+", S.GroupDomain([(0, 1), (2, 3)]), body)
+        c = S.Concept(fold, "=", 2, np.zeros(2, dtype=bool), fold.size)
+        m = S.meaning(c)
+        assert m.startswith("how many groups are") and m.endswith("the count is 2")
+
+    def test_gt_threshold_glosses_too(self):
+        e = lambda j: S.Elem(j, S.GroupDomain.names)
+        fold = S.Fold("max", S.GroupDomain([(0, 1, 2)]), e(0))   # max played over groups
+        c = S.Concept(fold, ">", 2, np.zeros(2, dtype=bool), fold.size)
+        assert S.meaning(c) == "some group is you 3 · empty 0 · them 0"
+
+
+class TestPrettyRender:
+    """The reader mirrors the search: handles for promoted programs, one floor per
+    definition, the rule tree printed as a tree."""
+
+    @staticmethod
+    def _fit(max_size=5):
+        import itertools
+        B = np.array(list(itertools.product(range(4), repeat=3)), dtype=np.int64)
+        V = np.where(B[:, 0] ^ B[:, 1] ^ B[:, 2] == 0, 0.95, 0.05)
+        return S.invent_from_boards(B, V, np.zeros(len(B), dtype=np.int64), max_size=max_size)
+
+    def test_handles_name_programs_not_thresholds(self):
+        f = S.Fold("+", S.GroupDomain([(0, 1, 2)]), S.Elem(0, S.GroupDomain.names))
+        z = np.zeros(2, dtype=bool)
+        a, b = S.Concept(f, "=", 8, z, f.size), S.Concept(f, "=", 7, z, f.size)
+        names = S._handles([a, b])
+        assert len(names) == 1                                    # one program, one K
+
+    def test_pretty_flattens_associative_chains(self):
+        e = S.BinOp("&", S.Cell(0), S.BinOp("&", S.Cell(1), S.Cell(2)))
+        assert S._pretty(e, {}) == "(c0 and c1 and c2)"
+
+    def test_pretty_prints_promoted_blocks_by_name(self):
+        inner = S.BinOp("&", S.Cell(0), S.Cell(1))
+        outer = S.BinOp("|", S.Named(inner, np.empty(0, dtype=np.int64)), S.Cell(2))
+        assert S._pretty(outer, {str(inner): "K₁"}) == "(K₁ or c2)"
+
+    def test_tree_print_shows_each_split_once(self):
+        res = self._fit()
+        lines = S._tree_lines(res.rules, lambda con: [f"{S._pretty(con.expr, {})} {con.op} {con.const}"])
+        text = "\n".join(lines)
+        assert text.count("fold(⊕, board, cell)") == 1            # the split, printed once
+        assert "├─ yes → [WIN ]" in text and "└─ no  → [LOSS]" in text
+
+    def test_render_modes_share_the_facts(self):
+        res = self._fit()
+        pretty, full = S.render(res), S.render(res, expand=True)
+        for fact in ("ROUND 1", "n=16", "n=48", "avg=0.95", "the xor of every cell is 0"):
+            assert fact in pretty and fact in full
+        assert "K₁" in pretty and "K₁" not in full
+
+    def test_region_geometry_is_derived_from_shape(self):
+        assert S._region_geometry((0, 1, 2), (3, 3)) == "row 0"
+        assert S._region_geometry((0, 3, 6), (3, 3)) == "column 0"
+        assert S._region_geometry((0, 4, 8), (3, 3)) == "↘ diagonal"
+        assert S._region_geometry((2, 4, 6), (3, 3)) == "↗ diagonal"
+        assert S._region_geometry((0, 4, 5), (3, 3)) is None      # scattered → no claim
+        assert S._region_geometry((0, 1, 2), (1, 4)) is None      # 1-D board → no geometry
 
 
 class TestGroupCounting:

@@ -137,6 +137,8 @@ def run_invent(argv: list[str]) -> None:
     p.add_argument("--remine", action="store_true",
                    help="Re-run discovery over the stored games and print the full bits ledger (slower)")
     p.add_argument("--rounds", type=int, default=4, help="Max reuse rounds when mining (default: 4)")
+    p.add_argument("--expand", action="store_true",
+                   help="Print every formula fully spelled out (default: named, one floor deep)")
     a = p.parse_args(argv)
 
     game = create_game(a.game, size=a.size)
@@ -144,7 +146,8 @@ def run_invent(argv: list[str]) -> None:
 
     if a.fresh:
         mem = _train_throwaway(game, a.fresh, markov=False)
-        print(synthesis.render(synthesis.invent(mem, max_rounds=a.rounds), label=label))
+        print(synthesis.render(synthesis.invent(mem, max_rounds=a.rounds), label=label,
+                               expand=a.expand))
         mem.close()
         return
 
@@ -158,10 +161,11 @@ def run_invent(argv: list[str]) -> None:
     mem = Memory.for_game(game, base_dir=MEMORY_DIR, read_only=True)
     if a.remine:
         print(f"Re-discovering from the games stored in {db_path.name} — this can take a while…")
-        print(synthesis.render(synthesis.invent(mem, max_rounds=a.rounds), label=label))
+        print(synthesis.render(synthesis.invent(mem, max_rounds=a.rounds), label=label,
+                               expand=a.expand))
     else:
         print(f"{label} — the library the agent plays with ({db_path.name}):")
-        print(mem.concept_library.summary())
+        print(mem.concept_library.summary(expand=a.expand))
         print()
         print("(--remine re-runs discovery and shows the full bits ledger)")
     mem.close()

@@ -188,13 +188,13 @@ and renders to a readable formula. The build ladder for Tic-Tac-Toe:
 |---|---|---|
 | primitive | `fold(rule, what, each)` | walk `what`, merge each item with `rule` — the only structural primitive |
 | round 1 (cells) | `fold(⊕, board, cell) = 0` | the nim-sum: xor every cell — width-free, the same program at any board size |
-| round 1 (cells) | `(c0 and (c4 and c8)) = 0` | a line is all one colour (an `&`-fold over those cells, written as a chain) |
+| round 1 (cells) | `(c0 and c4 and c8) = 0` | a line is all one colour (an `&`-fold over those cells, written as a chain) |
 | round 2 (lines) | `fold(max, groups, <test of played & empty>) = 1` | ∃ a line passing a *discovered* test — a threat |
 | round 2 (lines) | `fold(+, groups, …)` thresholded | how many lines pass it — a fork |
 | rules | `win → WIN`,  `threat → LOSS / WIN`,  `else → DRAW` | a leaf is labeled by its heaviest outcome mass — learned from the value, never asserted (play uses the leaf's *value*; the label is for reading) |
 
 The lines a round-2 fold walks are **discovered, not hand-listed**: they are the cell-supports
-of the *atomic* concepts round 1 already found (the `(c0 and (c4 and c8))` lines). Each line shows the
+of the *atomic* concepts round 1 already found (the `(c0 and c4 and c8)` lines). Each line shows the
 two face-value counts `played` and `empty`, and the inner test (e.g. `(played dist (played max
 empty)) = 1`) is itself found by the same bottom-up search. So a threat is a fold-of-folds,
 discovered end to end.
@@ -212,7 +212,7 @@ flowchart TD
     F["ONE OPERATION<br/>fold(rule, what-to-walk, value-of-each) → one number<br/>rule ∈ {⊕ + &amp; | max min}"]
     subgraph L1["layer 1 — walk the board's cells"]
       N["nim-sum<br/>fold(⊕, board, cell) = 0"]
-      LN["a line<br/>(c0 and (c4 and c8)) = 0"]
+      LN["a line<br/>(c0 and c4 and c8) = 0"]
     end
     subgraph L2["layer 2 — walk the discovered lines"]
       PE["each line, read against the move m:<br/>played = cells == m · empty = cells == 0"]
@@ -316,13 +316,25 @@ Measured (run `wise-explorer transfer --full`):
 wise-explorer invent -g nim                  # the persisted library — what play actually uses
 wise-explorer invent -g nim --remine         # re-run discovery, with the full bits ledger
 wise-explorer invent -g nim --fresh 10000    # train a throwaway demo first, then invent
+wise-explorer invent -g nim --expand         # every formula fully spelled out (the chaos)
 wise-explorer transfer                       # discover on 4 piles, play 8 piles zero-shot
 ```
 
-With `--remine` or `--fresh` it prints, per round: the concepts invented — each formula **side by side with a derived
-plain-English reading** (`⟺` lines, enumerated from the program's possible inputs, never
-hand-labeled) — the rule set they support, the MDL ledger that decides whether to continue,
-and a closing KEY that translates every fold the rules use.
+The reader mirrors the search's own compression — names all the way up:
+
+- every discovered **program gets a handle** (`K₁, K₂ …` — one per program; two thresholds
+  of the same program share its K),
+- the **rules print as one tree**, each split shown once with a derived `⟺` reading,
+- the **KEY defines each handle one floor deep** — in the handles of the floor below, never
+  re-expanded to raw cells — so a five-floor tower reads as five one-line definitions,
+- discovered **regions get nicknames** (`g₁, g₂ …`) and, when the board's stored shape
+  supports it, a *derived* place-name (`row 0`, `column 2`, `↘ diagonal`) — geometry read
+  from data, never assumed,
+- every `⟺` reading is **enumerated from the program** (fold bodies over their finite
+  input space; cell `and`/`or` chains over the board's observed token alphabet), never
+  hand-labeled. Where no honest reading is derivable, none is printed.
+
+`--expand` undoes all of it and prints the raw nested formulas.
 
 ## Honest limits
 

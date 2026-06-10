@@ -21,8 +21,11 @@ and prints it when training ends:
 
 ```text
 Discovered 1 concept, 2 rules:
-  fold(⊕, board, cell) = 0      →  0.89     # xor of all piles is zero → you left a dead position
-  ¬[fold(⊕, board, cell) = 0]   →  0.08     # otherwise → the opponent can punish you
+  K₁ = 0   ⟺ the xor of every cell is 0
+  ├─ yes → [WIN ] n=24   avg=1.00      # you left a dead position
+  └─ no  → [LOSS] n=95   avg=0.00      # the opponent can punish you
+
+  K₁ = fold(⊕, board, cell)
 ```
 
 Playing with that two-line model, it makes the optimal move in **every** winning
@@ -404,38 +407,48 @@ is re-fit locally.
 ```text
 $ wise-explorer invent -g nim --fresh 2000
 
-══ CONCEPT INVENTION — NIM ══   (119 boards · baseline 146 bits to explain)
+══ CONCEPT INVENTION — NIM4 ══   (119 boards · baseline 86 bits to explain)
 
-ROUND 1  ✓ pays — saved 70 bits  vs  12 cost   (1 concept invented)
-        + fold(⊕, board, cell) = 0
+ROUND 1  ✓ pays — saved 86 bits  vs  12 cost   (1 concept invented)
+        + K₁ = 0      K₁ = fold(⊕, board, cell)
           ⟺ the xor of every cell is 0
 ROUND 2  ✗ stop — saved 0 bits  vs  0 cost   (nothing new pays for itself)
 
 → stopped after round 1;  1 concept(s) kept.
 
-RULES it builds from the invented concepts:
-   [WIN ] n=24    avg=0.89   fold(⊕, board, cell) = 0
-   [LOSS] n=95    avg=0.08   ¬[fold(⊕, board, cell) = 0]
+RULES — one tree, each split shown once:
+   K₁ = 0   ⟺ the xor of every cell is 0
+   ├─ yes → [WIN ] n=24     avg=1.00
+   └─ no  → [LOSS] n=95     avg=0.00
 
-KEY — each fold above, in plain terms (derived from the program, not asserted):
-   fold(⊕, board, cell) = 0
-      ⟺ the xor of every cell is 0
+KEY — every name above, derived from the program (never hand-labeled):
+   K₁ = fold(⊕, board, cell)
+        [= 0]  ⟺ the xor of every cell is 0
 ```
 
-Every fold is printed **side by side with a derived reading** (the `⟺` lines): the renderer
-enumerates the program over its possible inputs and states what the threshold picks out —
-derived from the program itself, never hand-labeled. The key also grounds each *group* in
-the cells it was discovered on (groups are regions, not necessarily lines — whatever cell
-arithmetic proved predictive). On Tic-Tac-Toe:
+The reader mirrors the search's own compression: every discovered **program gets a handle**
+(`K₁, K₂ …`), the rules print as **one tree** with each split shown once, and the KEY
+defines each handle **one floor deep** — in the handles of the floor below — so a deep
+concept tower stays a page of one-line definitions. Every `⟺` reading is *enumerated from
+the program* (fold bodies over their finite inputs; cell chains over the board's observed
+token alphabet), never hand-labeled — and discovered regions earn nicknames with *derived*
+geometry. On Tic-Tac-Toe:
 
 ```text
-groups = the board regions it discovered: (c0·c4·c8) (c2·c4·c6) (c0·c1·c2) …
-fold(max, groups, (played xor (played max empty))) = 1
-   ⟺ the top-scoring group: you 0 · empty 1 · them 2
+groups — discovered as cell-sets; geometry derived from the board's shape:
+  g₁ = (c2·c4·c6)   ↗ diagonal
+  g₂ = (c0·c4·c8)   ↘ diagonal
+  g₃ = (c0·c1·c2)   row 0
+  …
+K₁ = (c2 and c4 and c6)
+     [= 0]  ⟺ c2·c4·c6 are not all one player's
+K₁₃ = fold(max, groups, (played xor (played max empty)))
+     [= 0]  ⟺ no group is you 0 · empty 1 · them 2 or you 0 · empty 2 · them 1 or …
 ```
 
-— here the regions are the win-lines, so this reads: *some line holds two opponent pieces
-and one empty cell — they are one move from completing it.*
+— the regions it found are the win-lines (it is never told that), and `K₁₃ = 0` reads:
+*no line holds two opponent pieces and one empty cell — no one is a move from completing
+one.* `--expand` prints the raw nested formulas instead.
 
 The engine was never given the rules of Nim, yet it compresses its experience to the
 two-line theorem — provably correct against the nim-sum it was never told about.

@@ -67,6 +67,14 @@ class TestConceptLibrary:
         lib = ConceptLibrary(sqlite3.connect(":memory:"))
         assert lib.value_for(np.array([1, 2, 3])) is None         # nothing discovered → no signal
 
+    def test_summary_survives_reload_with_verdicts(self):
+        B, V, M = _xor_data()
+        conn = sqlite3.connect(":memory:")
+        ConceptLibrary(conn).rebuild(B, V, M, max_size=5)
+        text = ConceptLibrary(conn, read_only=True).summary()     # a worker's view
+        assert "K₁ = 0" in text and "[WIN ]" in text and "├─ yes" in text
+        assert "KEY" in text and "fold(⊕, board, cell)" in text
+
 
 class TestBoundedRebuild:
     def test_rebuild_subsamples_past_the_cap(self, monkeypatch):
