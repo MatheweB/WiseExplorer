@@ -242,7 +242,10 @@ def _candidate_concepts(seen, B, V, min_leaf) -> List[Concept]:
 
     The variance-reduction gain of every (program, value) split is computed from *grouped
     sums* in one vectorised pass per program — far cheaper than calling numpy ``.var()``
-    once per split, which is almost all per-call overhead on these small arrays."""
+    once per split, which is almost all per-call overhead on these small arrays. (A fully
+    batched flat-bincount version was built and benched: bit-identical results, 0.9× —
+    the time lives in admitting kept candidates, not in the per-program numpy calls — so
+    the simpler per-program form stays.)"""
     N = len(V)
     V2 = V * V
     S = float(V.sum()); SS = float(V2.sum())
@@ -410,7 +413,7 @@ def _verdict(v: np.ndarray) -> str:
     return ["LOSS", "DRAW", "WIN"][int(_soft_counts(v).argmax())]   # heaviest outcome mass
 
 
-def _build_rules(concepts: List[Concept], V: np.ndarray, min_leaf: int, max_depth: int):
+def _build_rules(concepts: List[Concept], V: np.ndarray, min_leaf: int):
     rules: List[Rule] = []
     split_cost = math.log2(max(len(concepts), 2)) + 2.0   # MDL: a split must beat its own description
 
@@ -418,7 +421,10 @@ def _build_rules(concepts: List[Concept], V: np.ndarray, min_leaf: int, max_dept
         v = V[idx]; n = len(idx)
         here = _bits(v)
         verd = _verdict(v)
-        if n < 2 * min_leaf or here < 1e-6 or len(path) >= max_depth:
+        # a node whose total bits don't exceed the cost of naming one split can never
+        # pay — this single derived test is the whole leaf condition (it also bounds the
+        # depth: every split must pay >= split_cost out of a finite bit budget)
+        if here <= split_cost:
             rules.append(Rule(list(path), verd, n, float(v.mean()), here)); return
         best = None
         for con in concepts:
@@ -449,7 +455,7 @@ def _fit(kept: List[Concept], B, V, M, min_leaf) -> Tuple[List[Rule], float, flo
     for c in kept:
         v = c.expr.eval(B, M)
         c.mask = (v == c.const) if c.op == "=" else (v > c.const)
-    rules = _build_rules(kept, V, min_leaf, max_depth=6)
+    rules = _build_rules(kept, V, min_leaf)
     return rules, sum(r.resid for r in rules), _model_bits(rules, max(len(kept), 2))
 
 
@@ -502,7 +508,7 @@ def _invent_round(kept, prior_rules, resid, model, B, V, M, min_leaf, base, max_
     pool_new = [c for c in (extra_atoms + cands) if c.mask.tobytes() not in have][:POOL]
     if not pool_new:
         return [], prior_rules, resid, model, 0.0, 0.0, False
-    rules = _build_rules(kept + pool_new, V, min_leaf, max_depth=6)
+    rules = _build_rules(kept + pool_new, V, min_leaf)
     used, used_keys = [], set()                        # charge only for what the tree uses
     for r in rules:
         for con, _ in r.path:
@@ -520,7 +526,7 @@ def _invent_round(kept, prior_rules, resid, model, B, V, M, min_leaf, base, max_
 
 
 def invent_from_boards(B: np.ndarray, V: np.ndarray, M: Optional[np.ndarray] = None, *,
-                       max_rounds: int = 4, max_size: Optional[int] = None, cap="auto",
+                       max_rounds: int = 32, max_size: Optional[int] = None, cap="auto",
                        seed: Optional[List["Concept"]] = None) -> InventionResult:
     """Run the multi-round concept-invention loop on boards B with values V.
 
@@ -539,8 +545,10 @@ def invent_from_boards(B: np.ndarray, V: np.ndarray, M: Optional[np.ndarray] = N
     if max_size is None:
         max_size = 7 if n_cells <= 5 else 5     # reach: narrow boards may still need size-7 programs
     if cap == "auto":
-        cap = 6000                              # but ALWAYS bound the search (cap=None was the explosion)
-    min_leaf = max(3, N // 200)
+        cap = CAP                               # but ALWAYS bound the search (cap=None was the explosion)
+    # the smallest value-group worth naming: one whose own bits could ever cover a split's
+    # description cost — derived from the candidate budget, not tuned (cap=6000 -> 10)
+    min_leaf = math.ceil((math.log2(cap) + 2) / math.log2(3))
 
     # base building blocks: cell reads + the small integer literals on the board
     base: List[Expr] = [Cell(i) for i in range(n_cells)]
@@ -583,6 +591,11 @@ def invent_from_boards(B: np.ndarray, V: np.ndarray, M: Optional[np.ndarray] = N
 # tree and poison one healing pass. Discovery now happens only where completed values
 # exist: at the loop's boundaries.)
 CAP = 6000
+
+# The smallest table any fit may run on. Below this even a single leaf's average is a
+# coin flip — a statistical floor, not a tuned knob; shared by discovery, the library's
+# rebuild guard, and the runner's first wheel turn.
+MIN_BOARDS = 8
 
 
 # ───────────────────────────── (de)serialisation for persistence ───────────────
@@ -627,11 +640,12 @@ def expr_from_dict(d: dict) -> Expr:
     raise ValueError(f"unknown expr tag {t!r}")
 
 
-def _boards_values(memory) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+def _boards_values(memory, boards=None) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Pull (after-board, value, just-moved token) from the stored transitions. The move
     is read straight from the before→after diff — the token the mover just placed (the
-    new non-empty value at a changed cell); boards whose before-board isn't stored get 0."""
-    boards, trans = memory._build_trans_scores()
+    new non-empty value at a changed cell); boards whose before-board isn't stored get 0.
+    ``boards`` skips the reload when the caller already holds the boards table."""
+    boards, trans = memory._build_trans_scores(boards)
     bv: Dict[tuple, float] = {}
     bm: Dict[tuple, int] = {}
     canon: Dict[tuple, str] = {}                                 # board → its smallest incoming from_hash
@@ -664,7 +678,7 @@ def _boards_values(memory) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
 def invent(memory, game_id: Optional[str] = None, **kw) -> InventionResult:
     """Invent concepts from a trained memory's stored transitions."""
     B, V, M = _boards_values(memory)
-    if len(B) < 8:
+    if len(B) < MIN_BOARDS:
         return InventionResult([], [], [], len(B), 0.0)
     res = invent_from_boards(B, V, M, **kw)
     res.shape = _board_shape(memory)
@@ -1059,10 +1073,12 @@ def _key_lines(rules, concepts, names, toks, shape=None, expand=False) -> List[s
         return out
     # collect each program's thresholds actually tested by the rules
     tests: Dict[str, List[Concept]] = {}
+    seen_tests = set()
     for r in rules:
         for con, _ in r.path:
             key = str(_strip(con.expr))
-            if all(f"{c.op}{c.const}" != f"{con.op}{con.const}" for c in tests.get(key, [])):
+            if (key, con.op, con.const) not in seen_tests:
+                seen_tests.add((key, con.op, con.const))
                 tests.setdefault(key, []).append(con)
     for c in used:
         key = str(_strip(c.expr))

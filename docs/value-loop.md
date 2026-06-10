@@ -219,18 +219,21 @@ mechanism, run in reverse.
   `α`-blend in `solve_graph` defaults to the same thing when no cross-score data exists,
   as in all current 2-player games). A future non-zero-sum game would need the blend
   threaded through.
-- **Enumeration cost.** One legal-move sweep per stored board per cycle, plus one batched
-  rule-walk over the novel boards, plus a vectorized value iteration
-  (`np.maximum.reduceat`). Runs only when the library has rules — the games too big to
-  have discovered anything yet are exactly the games that skip it.
+- **Enumeration cost.** One legal-move sweep per stored board per *boundary* — built
+  once (`reply_graph`) and shared by both healing passes, since the loop's beats never
+  add boards or transitions. Each heal is then a batched rule-walk plus a vectorized
+  value iteration (`np.maximum.reduceat`); measured at 25k boards the boundary went
+  25.7s → 7.4s with bit-identical values. Runs only when the library has rules — the
+  games too big to have discovered anything yet are exactly the games that skip it.
 
 ## Where it lives
 
 | piece | place |
 |---|---|
 | batched pricing `L(r)` | `ConceptLibrary.values_for` |
+| the reply enumeration (built once per boundary) | `TransitionMemory.reply_graph` |
 | the completed backup | `TransitionMemory.complete_values` |
 | the loop ordering + bootstrap | `GameMemory.grow_concepts` |
 | the doubling cadence | `SimulationRunner.run_batch` |
-| end-of-run turn | `run_training` / `run_training_interleaved` pass the game |
+| end-of-run turn | `run_training` passes the game |
 | inert default | `GameMemory.complete_values` returns 0 (Markov mode, empty library) |

@@ -156,8 +156,6 @@ wise-explorer transfer                       # ← discover on 4 piles, play 8 z
 | `--self-play` | | AI plays for all players (no humans) |
 | `--players` | `-p` | Comma-separated human player numbers, e.g. `1,2` (overrides `--self-play`) |
 | `--markov` | | Use Markov (path-independent) states instead of transitions |
-| `--gamma` | | Reverse n-ply credit decay, `1.0` = flat (default: `1.0`) |
-| `--max-ply` | | Only credit this many plies back from the end (default: all) |
 
 Training is **cumulative** — every run adds to the same database. Expect a few thousand
 epochs before strong play emerges.
@@ -305,7 +303,7 @@ flowchart TD
     end
     subgraph TTT["Tic-Tac-Toe — two stories"]
       TC["cells — c0 … c8"]
-      TL["(c0 and (c4 and c8)) = 0 · (c0 and (c3 and c6)) = 0 · …<br/><b>the lines</b> — found as regions, not given"]
+      TL["(c0 and c4 and c8) = 0 · (c0 and c3 and c6) = 0 · …<br/><b>the lines</b> — found as regions, not given"]
       TT["fold(max, groups, (played xor (played max empty))) = 1<br/>⟺ top-scoring group: you 0 · empty 1 · them 2 — <b>a threat</b>"]
       TC -->|"round 1 · arithmetic over cells"| TL
       TL -->|"round 2 · each line becomes a group,<br/>read against the move: played · empty"| TT
@@ -675,20 +673,20 @@ Then add it to `GAMES` and `INITIAL_STATES` in
 ```
 src/wise_explorer/
 ├── cli.py · api.py             # CLI (train·play·invent·transfer) + public API (start_simulations)
-├── synthesis.py                # the discovery engine: fold programs, MDL, live growth
+├── synthesis.py                # the discovery engine: fold programs, MDL, the readable reader
 ├── agent/agent.py              # Agent dataclass and State enum
 ├── core/                       # types.py (Bayesian scoring) · hashing.py · bayes.py (Bayes factor)
 ├── games/                      # game_base.py · tic_tac_toe.py · nim.py · minichess.py
 │
 ├── memory/                     # ── the heart of the system ──
 │   ├── game_memory.py          # shared base: recording, scoring, signal fusion
-│   ├── transition_memory.py    # path-dependent memory + Bellman / N-player α
+│   ├── transition_memory.py    # path-dependent memory + Bellman / value loop / N-player α
 │   ├── markov_memory.py        # path-independent (state) memory
 │   ├── anchor_manager.py       # Bayes-factor clustering
-│   └── concept_library.py      # persisted invented concepts (the live value signal)
+│   └── concept_library.py      # persisted invented concepts (the value signal)
 │
 ├── selection/                  # variance arbitration · training (explore) · inference (compete)
-├── simulation/                 # runner.py (waves) · worker.py · training.py (prune/exploit)
+├── simulation/                 # runner.py (waves + the wheel's cadence) · worker.py · training.py
 └── utils/ · debug/
 
 scripts/transfer_demo.py        # thin wrapper — prefer `wise-explorer transfer`

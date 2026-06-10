@@ -7,7 +7,7 @@ and collecting results for training.
 
 from wise_explorer.simulation.jobs import GameJob, JobResult, MoveRecord
 from wise_explorer.simulation.runner import SimulationRunner, DEFAULT_WORKER_COUNT
-from wise_explorer.simulation.training import run_training, run_training_interleaved
+from wise_explorer.simulation.training import run_training
 
 __all__ = [
     "GameJob",
@@ -16,5 +16,4 @@ __all__ = [
     "SimulationRunner",
     "DEFAULT_WORKER_COUNT",
     "run_training",
-    "run_training_interleaved",
 ]

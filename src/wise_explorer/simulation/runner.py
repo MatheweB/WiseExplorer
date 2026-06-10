@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     from wise_explorer.agent.agent import Agent
     from wise_explorer.games.game_base import GameBase
     from wise_explorer.memory.game_memory import GameMemory
+from wise_explorer import synthesis
 
 logger = logging.getLogger(__name__)
 
@@ -182,7 +183,7 @@ class SimulationRunner:
                 # 176/400 optimal; chunked turns hold ~200/200 per chunk.
                 graph = self.memory.conn.execute(
                     f"SELECT COUNT(*) FROM {self.memory.main_table}").fetchone()[0]
-                if graph >= 2 * max(self._wheel_turned_at, 4):
+                if graph >= max(2 * self._wheel_turned_at, synthesis.MIN_BOARDS):
                     self.memory.grow_concepts(game=game)
                     self._wheel_turned_at = graph
 

@@ -58,13 +58,10 @@ class GameMemory(ABC):
     main_table: str  # Subclasses define: "transitions" or "states"
     is_markov: bool  # Subclasses define: False for Transition, True for Markov
 
-    def __init__(self, db_path: str | Path, read_only: bool = False,
-                 gamma: float = 1.0, max_ply: Optional[int] = None):
+    def __init__(self, db_path: str | Path, read_only: bool = False):
         self.db_path = Path(db_path).resolve()
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.read_only = read_only
-        self.gamma = gamma
-        self.max_ply = max_ply
         self._closed = False
 
         self._anchor_stats_cache: Dict[int, Stats] = {}
@@ -307,18 +304,10 @@ class GameMemory(ABC):
 
     def record_round(self, game_class: type, stacks: List[Tuple]) -> Tuple[int, int]:
         """
-        Record outcomes from a batch of games with reverse n-ply credit.
-
-        Each move in a player's stack receives geometrically decaying credit
-        based on its distance from the terminal state:
-
-            weight = gamma ^ depth_from_end
-
-        where depth_from_end = (stack_length - 1 - position). The last move
-        always receives full credit (gamma^0 = 1). Earlier moves receive
-        exponentially less, filtering noise from causally distant decisions.
-
-        With gamma=1.0 (default), this reproduces the original flat credit.
+        Record outcomes from a batch of games — every move in a stack is
+        credited with its mover's eventual outcome, flat. (A gamma-decay /
+        max-ply credit knob existed here; it was never set off its neutral
+        default anywhere, so it was deleted.)
 
         Stacks may be 2-tuples (moves, outcome) or 3-tuples
         (moves, outcome, all_outcomes) where all_outcomes is a dict mapping
@@ -334,8 +323,6 @@ class GameMemory(ABC):
 
         from wise_explorer.games.game_state import GameState
 
-        gamma = self.gamma
-        max_ply = self.max_ply
         transitions: Dict[Tuple[str, str], List[float]] = defaultdict(lambda: [0.0, 0.0, 0.0])
         trajectory_keys: List[List[Tuple[str, str]]] = []
         # Cross-score accumulator: (from_hash, to_hash, observer_role) -> [score_sum, count]
@@ -351,12 +338,9 @@ class GameMemory(ABC):
             if outcome_idx < 0:
                 continue
 
-            k = len(moves)
             game = game_class()
             stack_keys: List[Tuple[str, str]] = []
-            for i, (move, board, player) in enumerate(moves):
-                depth_from_end = k - 1 - i
-
+            for move, board, player in moves:
                 from_hash = hash_board(board)
                 game.set_state(GameState(board.copy(), player))
                 game.apply_move(move, validated=True)
@@ -372,12 +356,7 @@ class GameMemory(ABC):
                     boards_to_store[to_hash] = (b.tobytes(), b.shape[0], b.shape[1])
 
                 stack_keys.append((from_hash, to_hash))
-
-                if max_ply is not None and depth_from_end >= max_ply:
-                    continue  # Skip moves beyond ply cap for credit
-
-                weight = gamma ** depth_from_end
-                transitions[(from_hash, to_hash)][outcome_idx] += weight
+                transitions[(from_hash, to_hash)][outcome_idx] += 1.0
 
                 # Accumulate cross-scores: each non-mover's outcome
                 if all_outcomes is not None:
@@ -385,8 +364,8 @@ class GameMemory(ABC):
                         if obs_pid == player:
                             continue  # Skip mover's own outcome
                         obs_score = OUTCOME_SCORE.get(obs_outcome, 0.5)
-                        cross_scores[(from_hash, to_hash, obs_pid)][0] += weight * obs_score
-                        cross_scores[(from_hash, to_hash, obs_pid)][1] += weight
+                        cross_scores[(from_hash, to_hash, obs_pid)][0] += obs_score
+                        cross_scores[(from_hash, to_hash, obs_pid)][1] += 1.0
 
             trajectory_keys.append(stack_keys)
 
@@ -420,7 +399,7 @@ class GameMemory(ABC):
             result[h] = board
         return result
 
-    def _build_trans_scores(self) -> Tuple[Dict[str, np.ndarray], Dict[Tuple[str, str], Tuple[Counts, float]]]:
+    def _build_trans_scores(self, boards: Optional[Dict[str, np.ndarray]] = None) -> Tuple[Dict[str, np.ndarray], Dict[Tuple[str, str], Tuple[Counts, float]]]:
         """Build the per-transition target the concept miner fits.
 
         The target is the minimax-propagated **Bellman** value of each transition
@@ -433,7 +412,8 @@ class GameMemory(ABC):
 
         Returns (boards, trans_scores) or (empty, empty) if insufficient data.
         """
-        boards = self._load_boards()
+        if boards is None:
+            boards = self._load_boards()
         if not boards:
             return {}, {}
 
@@ -489,6 +469,11 @@ class GameMemory(ABC):
             return 0
         from wise_explorer import synthesis
         self.solve_graph()
+        # one structural enumeration serves the whole boundary: the loop's beats never
+        # add boards or transitions, so both healing passes share this reply graph and
+        # every beat reuses its loaded boards
+        graph = self.reply_graph(game) if game is not None else None
+        boards = graph["boards"] if graph else None
         if game is not None and not self.concept_library.rules:
             # bootstrap: completion can't lend prices from an empty head. On the first
             # boundary (cold start, or a freshly seeded library whose rules are cleared)
@@ -496,13 +481,13 @@ class GameMemory(ABC):
             # re-distills properly from the completed values. (Measured: skipping this
             # leaves the first boundary's fit on raw evidence AND heals with it —
             # 87/200 on seeded 8-pile Nim vs ~199 once rules exist.)
-            self.concept_library.rebuild(*synthesis._boards_values(self))
+            self.concept_library.rebuild(*synthesis._boards_values(self, boards))
         if game is not None:
-            self.complete_values(game)
-        B, V, M = synthesis._boards_values(self)
+            self.complete_values(game, graph)
+        B, V, M = synthesis._boards_values(self, boards)
         kept = self.concept_library.rebuild(B, V, M)
         if game is not None:
-            self.complete_values(game)           # re-price with the rules just distilled
+            self.complete_values(game, graph)    # re-price with the rules just distilled
         return kept
 
     def _record_cross_scores(self, cross_scores: Dict) -> None:
@@ -517,7 +502,11 @@ class GameMemory(ABC):
         """Full value iteration on the game graph. No-op for Markov memory."""
         return 0
 
-    def complete_values(self, game) -> int:
+    def reply_graph(self, game):
+        """Structural reply enumeration for the value loop. None for Markov memory."""
+        return None
+
+    def complete_values(self, game, graph=None) -> int:
         """Library-completed value pass. No-op for Markov memory."""
         return 0
 

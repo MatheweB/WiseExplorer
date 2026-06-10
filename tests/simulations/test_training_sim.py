@@ -6,7 +6,7 @@ Tests training orchestration with prune/exploit phases.
 
 from unittest.mock import MagicMock
 
-from wise_explorer.simulation.training import run_training, run_training_interleaved
+from wise_explorer.simulation.training import run_training
 
 
 class TestRunTraining:
@@ -68,49 +68,6 @@ class TestRunTraining:
         
         for call_args in runner.run_batch.call_args_list:
             assert call_args[1]['max_turns'] == 42
-
-
-class TestRunTrainingInterleaved:
-    """run_training_interleaved function tests."""
-
-    def test_zero_sims_returns_zero(self):
-        """Zero simulations returns 0."""
-        result = run_training_interleaved(MagicMock(), {1: [], 2: []}, MagicMock(), 0, 10)
-        assert result == 0
-
-    def test_alternates_phases(self):
-        """Alternates prune/exploit phases."""
-        runner = MagicMock()
-        runner.run_batch.return_value = 5
-        swarms = {1: [MagicMock()], 2: [MagicMock()]}
-        
-        run_training_interleaved(runner, swarms, MagicMock(), 150, 10, phase_size=50)
-        
-        prune_args = [c[1]['prune_players'] for c in runner.run_batch.call_args_list]
-        
-        # Pattern: {1}, {2}, {}, repeat
-        assert prune_args[0] == {1}
-        assert prune_args[1] == {2}
-        assert prune_args[2] == set()
-
-    def test_respects_phase_size(self):
-        """Uses specified phase_size."""
-        runner = MagicMock()
-        runner.run_batch.return_value = 5
-        swarms = {1: [MagicMock()]}
-        
-        run_training_interleaved(runner, swarms, MagicMock(), 100, 10, phase_size=25)
-        
-        assert runner.run_batch.call_count == 4  # 100 / 25 = 4 phases
-
-    def test_returns_total_transitions(self):
-        """Returns sum of all transitions."""
-        runner = MagicMock()
-        runner.run_batch.side_effect = [10, 20, 30, 40]
-        swarms = {1: [MagicMock()], 2: [MagicMock()]}
-        
-        result = run_training_interleaved(runner, swarms, MagicMock(), 200, 10, phase_size=50)
-        assert result == 100
 
 
 class TestEdgeCases:

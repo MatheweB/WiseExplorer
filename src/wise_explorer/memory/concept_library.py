@@ -67,7 +67,7 @@ class ConceptLibrary:
         if len(B) > S.CAP:
             keep = np.random.default_rng(0).choice(len(B), S.CAP, replace=False)
             B, V, M = B[keep], V[keep], M[keep]
-        if len(B) >= 8:
+        if len(B) >= S.MIN_BOARDS:
             res = S.invent_from_boards(B, V, M, max_size=max_size, cap=cap, seed=self.kept)
             self.kept, self.rules = res.concepts, res.rules
         self.save()

@@ -74,18 +74,6 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Uses Markov states in favor of transitions",
     )
-    parser.add_argument(
-        "--gamma",
-        type=float,
-        default=1.0,
-        help="Reverse n-ply decay rate (default: 1.0 = flat credit). Lower values discount early moves more.",
-    )
-    parser.add_argument(
-        "--max-ply",
-        type=int,
-        default=None,
-        help="Max plies from end to credit (default: None = all moves).",
-    )
     return parser.parse_args()
 
 def parse_human_players(players_str: str | None, num_players: int, game_id: str, self_play: bool) -> list[int]:
@@ -136,7 +124,8 @@ def run_invent(argv: list[str]) -> None:
                    help="Train N self-play games into a throwaway DB first (quick demo)")
     p.add_argument("--remine", action="store_true",
                    help="Re-run discovery over the stored games and print the full bits ledger (slower)")
-    p.add_argument("--rounds", type=int, default=4, help="Max reuse rounds when mining (default: 4)")
+    p.add_argument("--rounds", type=int, default=32,
+                   help="Backstop on reuse rounds (the MDL stop governs; default: 32)")
     p.add_argument("--expand", action="store_true",
                    help="Print every formula fully spelled out (default: named, one floor deep)")
     a = p.parse_args(argv)
@@ -354,7 +343,6 @@ def main() -> None:
     # Set up memory
     memory = Memory.for_game(
         game, base_dir=MEMORY_DIR, markov=args.markov,
-        gamma=args.gamma, max_ply=args.max_ply,
     )
     
     # Determine human players

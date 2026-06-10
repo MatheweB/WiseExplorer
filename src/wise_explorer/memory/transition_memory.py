@@ -18,7 +18,7 @@ import numpy as np
 from wise_explorer.core.hashing import hash_board
 from wise_explorer.core.types import Stats, Counts, OUTCOME_SCORE
 from wise_explorer.games.game_state import GameState
-from wise_explorer.memory.game_memory import GameMemory, _placed_token
+from wise_explorer.memory.game_memory import GameMemory
 from wise_explorer.memory.schema import SCHEMA_TRANSITIONS
 
 
@@ -439,42 +439,30 @@ class TransitionMemory(GameMemory):
         self.conn.commit()
         return n_iters
 
-    def complete_values(self, game) -> int:
-        """Complete the value graph with the concept library — the value loop's healing step.
-
-        :meth:`solve_graph` can only take its max over replies somebody has *played*, so
-        a position with an unexplored refutation looks safe until someone stumbles into
-        it. This pass re-runs the same backup with the max over **all legal replies**,
-        pricing the never-played ones with the library (no opinion → ignored, exactly as
-        they are today). Call it after ``solve_graph``: evidence re-derives every value
-        from raw counts first, then the library fills only the gaps — see
-        ``grow_concepts`` for the full loop ordering and docs/value-loop.md for why.
+    def reply_graph(self, game) -> Optional[dict]:
+        """Enumerate every stored board's full legal reply set — the structural half of
+        :meth:`complete_values`. A pure function of (stored boards, game rules), and the
+        loop never adds boards or transitions between its beats, so one boundary builds
+        this once and hands it to both healing passes.
 
         Replies are enumerated for every seat and merged: exact for games whose moves
-        don't depend on whose turn it is (Nim), a conservative superset otherwise.
-        Zero-sum backup (α = 0). Returns how many never-played replies were priced.
-        """
-        lib = self.concept_library
-        if not lib.rules:
-            return 0                                    # nothing known → nothing to lend
+        don't depend on whose turn it is (Nim), a conservative superset otherwise."""
         boards = self._load_boards()
         if not boards:
-            return 0
+            return None
         hashes = list(boards)
         index = {h: i for i, h in enumerate(hashes)}
         n = len(hashes)
 
-        # Walk every stored board once: terminal value, or its full legal reply set.
         seats = range(1, game.num_players() + 1)
         shape = game.get_state().board.shape            # stored boards are 2-D-normalized
-        V = np.full(n, 0.5)
+        V0 = np.full(n, 0.5)
         fixed = np.zeros(n, dtype=bool)                 # terminals hold their value
         parents: List[int] = []                         # one row per (board, legal reply)
         known: List[int] = []                           # reply's row index, or -1
-        novel_rows: List[int] = []                      # candidate rows awaiting a price
+        novel_of: List[int] = []                        # candidate row of each novel reply
         novel_boards: List[np.ndarray] = []
-        novel_m: List[int] = []
-        consts: List[float] = []
+        novel_parents: List[np.ndarray] = []
 
         for i, h in enumerate(hashes):
             board = boards[h].reshape(shape)
@@ -482,7 +470,7 @@ class TransitionMemory(GameMemory):
             probe.set_state(GameState(board.copy(), current_player=1))
             if probe.is_over():
                 # the mover who LANDED here gets the best seat's outcome (they just moved)
-                V[i] = max(OUTCOME_SCORE[probe.get_result(p)] for p in seats)
+                V0[i] = max(OUTCOME_SCORE[probe.get_result(p)] for p in seats)
                 fixed[i] = True
                 continue
             seen: set = set()
@@ -499,32 +487,78 @@ class TransitionMemory(GameMemory):
                     seen.add(ch)
                     parents.append(i)
                     known.append(index.get(ch, -1))
-                    consts.append(np.nan)
                     if ch not in index:
-                        novel_rows.append(len(consts) - 1)
+                        novel_of.append(len(known) - 1)
                         novel_boards.append(np.asarray(child).ravel().astype(np.int64))
-                        novel_m.append(_placed_token(board, child))
+                        novel_parents.append(np.asarray(board).ravel().astype(np.int64))
 
-        priced = 0
-        if novel_boards:
-            prices = lib.values_for(np.stack(novel_boards), np.array(novel_m))
-            for row, price in zip(novel_rows, prices):
-                consts[row] = price                     # the library's value for landing there
-            priced = int(np.count_nonzero(~np.isnan(prices)))
-
-        parents_a = np.array(parents)
-        known_a = np.array(known)
-        consts_a = np.array(consts, dtype=float)
-        order = np.argsort(parents_a, kind="stable")
-        parents_a, known_a, consts_a = parents_a[order], known_a[order], consts_a[order]
+        # rows were appended board by board, so ``parents`` is already sorted — reduceat
+        # segment starts come straight from searchsorted
+        parents_a = np.array(parents, dtype=np.int64)
+        known_a = np.array(known, dtype=np.int64)
         starts = np.searchsorted(parents_a, np.arange(n))
         ends = np.append(starts[1:], len(parents_a))
-        has_kids = (starts < ends) & ~fixed
+
+        if novel_boards:
+            NB = np.stack(novel_boards)
+            NP = np.stack(novel_parents)
+            # the token each move placed — the new non-empty value at a changed cell —
+            # in one pass over all novel replies (vectorized _placed_token)
+            placed = (NP != NB) & (NB != 0)
+            first = placed.argmax(1)
+            novel_m = np.where(placed.any(1), NB[np.arange(len(NB)), first], 0)
+        else:
+            NB = np.zeros((0, 0), dtype=np.int64)
+            novel_m = np.zeros(0, dtype=np.int64)
+
+        return {
+            "boards": boards, "index": index, "V0": V0,
+            "known": known_a, "starts": starts,
+            "has_kids": (starts < ends) & ~fixed,
+            "novel_rows": np.array(novel_of, dtype=np.int64),
+            "novel_boards": NB, "novel_m": novel_m,
+            "edges": self.conn.execute("SELECT from_hash, to_hash FROM transitions").fetchall(),
+        }
+
+    def complete_values(self, game, graph: Optional[dict] = None) -> int:
+        """Complete the value graph with the concept library — the value loop's healing step.
+
+        :meth:`solve_graph` can only take its max over replies somebody has *played*, so
+        a position with an unexplored refutation looks safe until someone stumbles into
+        it. This pass re-runs the same backup with the max over **all legal replies**,
+        pricing the never-played ones with the library (no opinion → ignored, exactly as
+        they are today). Call it after ``solve_graph``: evidence re-derives every value
+        from raw counts first, then the library fills only the gaps — see
+        ``grow_concepts`` for the full loop ordering and docs/value-loop.md for why.
+
+        ``graph`` is a prebuilt :meth:`reply_graph`; passing it lets a boundary's two
+        healing passes share one enumeration. Zero-sum backup (α = 0). Returns how many
+        never-played replies were priced.
+        """
+        lib = self.concept_library
+        if not lib.rules:
+            return 0                                    # nothing known → nothing to lend
+        if graph is None:
+            graph = self.reply_graph(game)
+        if graph is None:
+            return 0
+        index, known = graph["index"], graph["known"]
+        starts, has_kids = graph["starts"], graph["has_kids"]
+        n = len(graph["V0"])
+
+        # price the never-played replies with the *current* rules (they change between heals)
+        consts = np.full(len(known), np.nan)
+        priced = 0
+        if len(graph["novel_boards"]):
+            prices = lib.values_for(graph["novel_boards"], graph["novel_m"])
+            consts[graph["novel_rows"]] = prices
+            priced = int(np.count_nonzero(~np.isnan(prices)))
 
         # the same backup as solve_graph — V(b) = 1 − max over replies — but the max now
         # ranges over every legal reply, library-priced where unvisited
+        V = graph["V0"].copy()
         for _ in range(200):
-            cand = np.where(known_a >= 0, V[np.maximum(known_a, 0)], consts_a)
+            cand = np.where(known >= 0, V[np.maximum(known, 0)], consts)
             cand = np.where(np.isnan(cand), -np.inf, cand)
             best = np.full(n, -np.inf)
             if has_kids.any():
@@ -534,12 +568,9 @@ class TransitionMemory(GameMemory):
                 V = newV; break
             V = newV
 
-        cur = self.conn.cursor()
-        cur.executemany(
+        self.conn.cursor().executemany(
             "UPDATE transitions SET propagated_score=? WHERE from_hash=? AND to_hash=?",
-            [(float(V[index[t]]), f, t)
-             for f, t in self.conn.execute("SELECT from_hash, to_hash FROM transitions").fetchall()
-             if t in index],
+            [(float(V[index[t]]), f, t) for f, t in graph["edges"] if t in index],
         )
         self.conn.commit()
         return priced
