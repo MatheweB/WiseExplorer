@@ -220,11 +220,13 @@ mechanism, run in reverse.
   as in all current 2-player games). A future non-zero-sum game would need the blend
   threaded through.
 - **Enumeration cost.** One legal-move sweep per stored board per *boundary* — built
-  once (`reply_graph`) and shared by both healing passes, since the loop's beats never
-  add boards or transitions. Each heal is then a batched rule-walk plus a vectorized
-  value iteration (`np.maximum.reduceat`); measured at 25k boards the boundary went
-  25.7s → 7.4s with bit-identical values. Runs only when the library has rules — the
-  games too big to have discovered anything yet are exactly the games that skip it.
+  once (`reply_graph`), shared by both healing passes, and chunked across the runner's
+  worker pool when one is lent (pure per-board game work; identical rows either way).
+  Each heal is then a batched rule-walk plus a vectorized value iteration; the evidence
+  solve is the same array form (with α read from the best edge's cross data, min-α on
+  ties). Measured on a 77k-board cyclic minichess DB, a full turn went 65–90s → 21s
+  (the solve alone: 31.6s → 0.4s). Runs only when the library has rules — the games
+  too big to have discovered anything yet are exactly the games that skip it.
 
 ## Where it lives
 

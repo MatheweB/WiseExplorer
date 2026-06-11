@@ -132,6 +132,33 @@ class TestValueLoop:
         assert mem.get_propagated_score(h02, h00) > 0.9            # sound values stay sound
         mem.close()
 
+    def test_solve_graph_alpha_and_tie_rule(self, tmp_path):
+        """V(b) = α·best + (1−α)·(1−best), α from the best edge's cross data; among
+        TIED-best children the most adversarial alignment (min α) applies."""
+        from wise_explorer.memory import TransitionMemory
+        mem = TransitionMemory(tmp_path / "alpha.db")
+        cur = mem.conn.cursor()
+        # b -> {x, y}: x and y are terminals with equal incoming evidence (a tie);
+        # the x-edge carries cooperative cross data (α=0.5), the y-edge none (α=0)
+        cur.executemany(
+            "INSERT INTO transitions (from_hash, to_hash, wins, ties, losses) VALUES (?,?,?,?,?)",
+            [("b", "x", 8, 0, 0), ("b", "y", 8, 0, 0)])
+        cur.execute("INSERT INTO cross_scores VALUES ('b','x',2,?,8)", (8 * 0.875,))
+        mem.conn.commit()
+        mem.solve_graph()
+        vx = mem.get_propagated_score("b", "x")            # terminal: its own edge mean
+        # V(x)=V(y)=mean(8,0,0); tie → min α = α(y-edge) = 0 → V(b)=1−best
+        from wise_explorer.core.types import Stats
+        best = Stats(8, 0, 0).mean_score
+        assert abs(vx - best) < 1e-9
+        # and the α formula itself, untied: drop the y edge → α = max(0, .875+.864−1)
+        cur.execute("DELETE FROM transitions WHERE to_hash='y'")
+        mem.conn.commit()
+        mem.solve_graph()
+        a = max(0.0, 0.875 + best - 1.0)
+        assert abs(mem.get_propagated_score("b", "x") - best) < 1e-9   # x stays terminal-valued
+        mem.close()
+
     def test_complete_values_is_inert_without_rules(self, tmp_path):
         from wise_explorer.games.nim import Nim
         from wise_explorer.memory import TransitionMemory

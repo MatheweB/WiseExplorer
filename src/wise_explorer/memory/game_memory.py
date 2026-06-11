@@ -77,6 +77,7 @@ class GameMemory(ABC):
 
         self.anchors = AnchorManager(self.conn, self.main_table, self.read_only)
         self.concept_library = ConceptLibrary(self.conn, self.read_only)   # invented concepts, persisted
+        self.pool = None                    # a runner may lend its worker pool for boundary work
 
     # -------------------------------------------------------------------------
     # Abstract Methods (subclasses must implement)

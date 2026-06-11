@@ -11,7 +11,6 @@ from __future__ import annotations
 import sqlite3
 from typing import Any
 
-from collections import defaultdict
 
 import numpy as np
 
@@ -20,6 +19,38 @@ from wise_explorer.core.types import Stats, Counts, OUTCOME_SCORE
 from wise_explorer.games.game_state import GameState
 from wise_explorer.memory.game_memory import GameMemory
 from wise_explorer.memory.schema import SCHEMA_TRANSITIONS
+
+
+def _replies_chunk(args):
+    """Pool worker for :meth:`TransitionMemory.reply_graph`: enumerate one chunk of
+    boards' legal replies. Pure game work — all bookkeeping stays in the parent."""
+    game, shape, known, chunk = args
+    seats = range(1, game.num_players() + 1)
+    out = []
+    for i, raw in chunk:
+        board = raw.reshape(shape)
+        probe = game.deep_clone()
+        probe.set_state(GameState(board.copy(), current_player=1))
+        if probe.is_over():
+            out.append((i, max(OUTCOME_SCORE[probe.get_result(p)] for p in seats), None))
+            continue
+        seen: set = set()
+        edges = []
+        for p in seats:
+            seat_game = game.deep_clone()
+            seat_game.set_state(GameState(board.copy(), current_player=p))
+            for mv in seat_game.valid_moves():
+                child_game = seat_game.deep_clone()
+                child_game.apply_move(mv, validated=True)
+                child = child_game.get_state().board
+                ch = hash_board(child)
+                if ch in seen:
+                    continue
+                seen.add(ch)
+                edges.append((ch, None if ch in known
+                              else np.asarray(child).ravel().astype(np.int64)))
+        out.append((i, None, edges))
+    return out
 
 
 class TransitionMemory(GameMemory):
@@ -302,6 +333,92 @@ class TransitionMemory(GameMemory):
 
         self.conn.commit()
 
+    def _solve_graph_arrays(self, rows, epsilon: float, max_iters: int) -> int:
+        """The value iteration as array work: boards are indexed, each board's stored
+        children form one ``reduceat`` segment, terminals hold the mean of their incoming
+        evidence, and ``V(b) = α·best + (1−α)·(1−best)`` iterates to the fixpoint. α is
+        the alignment factor of the *best* edge (``max(0, μ_cross + μ_mover − 1)``, zero
+        where no cross data exists); among tied-best children the MOST
+        ADVERSARIAL alignment (min α) applies — solved positions share exact values, so
+        ties are real, and resolving them by float noise made results order-dependent.
+        ~80× the old dict-loop on a 77k-board cyclic graph."""
+        fhs = [r[0] for r in rows]
+        ths = [r[1] for r in rows]
+        index: dict[str, int] = {}
+        for h in fhs:
+            index.setdefault(h, len(index))
+        for h in ths:
+            index.setdefault(h, len(index))
+        n = len(index)
+        parent = np.array([index[h] for h in fhs], dtype=np.int64)
+        child = np.array([index[h] for h in ths], dtype=np.int64)
+        mean = np.array([Stats(w, t, l).mean_score for _, _, w, t, l in rows])
+
+        # per-edge cross-player mean (NaN where unobserved → α contribution is 0)
+        cross = np.full(len(rows), np.nan)
+        agg: dict[tuple[str, str], list[float]] = {}
+        for fh, th, ss, sc in self.conn.execute(
+                "SELECT from_hash, to_hash, score_sum, score_count "
+                "FROM cross_scores WHERE score_count > 0").fetchall():
+            a = agg.setdefault((fh, th), [0.0, 0.0])
+            a[0] += ss
+            a[1] += sc
+        if agg:
+            for i, key in enumerate(zip(fhs, ths)):
+                if key in agg:
+                    ss, sc = agg[key]
+                    cross[i] = ss / sc
+        edge_alpha = np.maximum(0.0, np.nan_to_num(cross, nan=-1.0) + mean - 1.0)
+
+        # terminals (no outgoing edges) hold the mean of their incoming evidence
+        has_kids = np.zeros(n, dtype=bool)
+        has_kids[parent] = True
+        inc_sum = np.zeros(n)
+        inc_cnt = np.zeros(n)
+        np.add.at(inc_sum, child, mean)
+        np.add.at(inc_cnt, child, 1.0)
+        V = np.full(n, 0.5)
+        terminal = ~has_kids & (inc_cnt > 0)
+        V[terminal] = inc_sum[terminal] / inc_cnt[terminal]
+
+        order = np.argsort(parent, kind="stable")
+        child_s, alpha_s = child[order], edge_alpha[order]
+        starts = np.searchsorted(parent[order], np.arange(n))
+        pos = np.arange(len(order))
+        seg = np.searchsorted(starts, pos, side="right") - 1     # row → its parent segment
+        kid_starts = starts[has_kids]
+
+        def backup(V):
+            cv = V[child_s]
+            best = np.full(n, 0.5)
+            best[has_kids] = np.maximum.reduceat(cv, kid_starts)
+            # several replies can tie as best; the blend takes the MOST ADVERSARIAL
+            # reading among them (min α) — ties are real (solved positions share exact
+            # values) and resolving them by float noise made results order-dependent
+            tie_a = np.where(cv == best[seg], alpha_s, np.inf)
+            a = np.zeros(n)
+            a[has_kids] = np.minimum.reduceat(tie_a, kid_starts)
+            return np.where(has_kids, a * best + (1.0 - a) * (1.0 - best), V)
+
+        n_iters = max_iters
+        for it in range(1, max_iters + 1):
+            newV = backup(V)
+            delta = float(np.max(np.abs(newV - V))) if n else 0.0
+            V = newV
+            if delta < epsilon:
+                n_iters = it
+                break
+
+        # propagated_score per edge: the value of landing on ``to`` (terminals keep
+        # their own edge's observed mean, as in the dict-loop oracle)
+        prop = np.where(has_kids[child], V[child], mean)
+        self.conn.cursor().executemany(
+            "UPDATE transitions SET propagated_score=? WHERE from_hash=? AND to_hash=?",
+            [(float(p), f, t) for p, f, t in zip(prop, fhs, ths)],
+        )
+        self.conn.commit()
+        return n_iters
+
     def solve_graph(self, epsilon: float = 1e-6, max_iters: int = 200) -> int:
         """Full value iteration on the stored game graph.
 
@@ -309,10 +426,13 @@ class TransitionMemory(GameMemory):
         this propagates values across ALL edges simultaneously until
         convergence. Produces globally-consistent minimax values.
 
-        Uses topological ordering when possible (acyclic games like Nim/TTT)
-        for single-pass convergence. Falls back to iterative for cyclic graphs.
-
-        Returns the number of iterations to convergence.
+        Solved as a vectorized fixpoint (the same array form :meth:`complete_values`
+        uses; ~80× the old dict-loop on a 77k-board cyclic graph). The backup is
+        ``V(b) = α·best + (1−α)·(1−best)`` with α — the alignment factor — read from
+        the best edge's cross-player data, zero where none exists. Among tied-best
+        children the most adversarial alignment (min α) applies: solved positions
+        share exact values, so ties are real, and resolving them by float noise made
+        results order-dependent. Returns the number of iterations to convergence.
         """
         rows = self.conn.execute(
             "SELECT from_hash, to_hash, wins, ties, losses "
@@ -320,124 +440,7 @@ class TransitionMemory(GameMemory):
         ).fetchall()
         if not rows:
             return 0
-
-        # Build adjacency and stats caches
-        children: dict[str, list[tuple[str, Stats]]] = defaultdict(list)
-        all_boards: set = set()
-        stats_cache: dict[tuple[str, str], Stats] = {}
-
-        for fh, th, w, t, l in rows:
-            s = Stats(w, t, l)
-            children[fh].append((th, s))
-            stats_cache[(fh, th)] = s
-            all_boards.add(fh)
-            all_boards.add(th)
-
-        # Load cross-scores for alpha computation
-        cross_cache: dict[tuple[str, str], float] = {}
-        try:
-            cross_agg: dict[tuple[str, str], list[float]] = defaultdict(
-                lambda: [0.0, 0.0]
-            )
-            for fh, th, ss, sc in self.conn.execute(
-                "SELECT from_hash, to_hash, score_sum, score_count "
-                "FROM cross_scores WHERE score_count > 0"
-            ).fetchall():
-                agg = cross_agg[(fh, th)]
-                agg[0] += ss
-                agg[1] += sc
-            for key, (ss, sc) in cross_agg.items():
-                cross_cache[key] = ss / sc
-        except Exception:
-            pass
-
-        def compute_alpha(parent: str, child: str) -> float:
-            mu_cross = cross_cache.get((parent, child))
-            if mu_cross is None:
-                return 0.0
-            st = stats_cache.get((parent, child))
-            if st is None:
-                return 0.0
-            return max(0.0, mu_cross + st.mean_score - 1.0)
-
-        # Terminal boards: appear as to_hash but have no outgoing edges
-        terminal = all_boards - set(children.keys())
-
-        # Initialize V[board]
-        V: dict[str, float] = {}
-        for b in all_boards:
-            if b in terminal:
-                incoming = [s for fh in children for th, s in children[fh] if th == b]
-                V[b] = sum(s.mean_score for s in incoming) / len(incoming) if incoming else 0.5
-            else:
-                V[b] = 0.5
-
-        # Topological sort (Kahn's algorithm)
-        in_degree: dict[str, int] = defaultdict(int)
-        for kids in children.values():
-            for child, _ in kids:
-                in_degree[child] += 1
-
-        queue = [b for b in children if in_degree.get(b, 0) == 0]
-        topo_order: list[str] = []
-        while queue:
-            b = queue.pop()
-            topo_order.append(b)
-            for child, _ in children.get(b, []):
-                in_degree[child] -= 1
-                if in_degree[child] == 0 and child in children:
-                    queue.append(child)
-
-        is_acyclic = len(topo_order) == len(children)
-
-        def best_child_value(board: str):
-            best_v, best_c = -1.0, None
-            for child, _ in children.get(board, []):
-                cv = V.get(child, 0.5)
-                if cv > best_v:
-                    best_v, best_c = cv, child
-            return best_v, best_c
-
-        if is_acyclic:
-            for b in reversed(topo_order):
-                if not children.get(b):
-                    continue
-                best_v, best_c = best_child_value(b)
-                alpha = compute_alpha(b, best_c) if best_c else 0.0
-                V[b] = alpha * best_v + (1.0 - alpha) * (1.0 - best_v)
-            n_iters = 1
-        else:
-            non_terminal = [b for b in children if b not in terminal]
-            n_iters = max_iters
-            for iteration in range(1, max_iters + 1):
-                max_delta = 0.0
-                for b in non_terminal:
-                    best_v, best_c = best_child_value(b)
-                    alpha = compute_alpha(b, best_c) if best_c else 0.0
-                    new_v = alpha * best_v + (1.0 - alpha) * (1.0 - best_v)
-                    max_delta = max(max_delta, abs(new_v - V[b]))
-                    V[b] = new_v
-                if max_delta < epsilon:
-                    n_iters = iteration
-                    break
-
-        # Write back propagated_score for every transition
-        cur = self.conn.cursor()
-        for fh, th, w, t, l in rows:
-            kids = children.get(th, [])
-            if not kids:
-                prop = Stats(w, t, l).mean_score
-            else:
-                best_v, best_c = best_child_value(th)
-                alpha = compute_alpha(th, best_c) if best_c else 0.0
-                prop = alpha * best_v + (1.0 - alpha) * (1.0 - best_v)
-            cur.execute(
-                "UPDATE transitions SET propagated_score=? "
-                "WHERE from_hash=? AND to_hash=?",
-                (prop, fh, th),
-            )
-        self.conn.commit()
-        return n_iters
+        return self._solve_graph_arrays(rows, epsilon, max_iters)
 
     def reply_graph(self, game) -> dict | None:
         """Enumerate every stored board's full legal reply set — the structural half of
@@ -446,16 +449,31 @@ class TransitionMemory(GameMemory):
         this once and hands it to both healing passes.
 
         Replies are enumerated for every seat and merged: exact for games whose moves
-        don't depend on whose turn it is (Nim), a conservative superset otherwise."""
+        don't depend on whose turn it is (Nim), a conservative superset otherwise.
+        The enumeration is pure per-board game work, so when a runner has lent its
+        worker pool (``self.pool``) the boards are chunked across it — same rows,
+        same order, ~workers× faster on move-generation-heavy games."""
         boards = self._load_boards()
         if not boards:
             return None
         hashes = list(boards)
         index = {h: i for i, h in enumerate(hashes)}
         n = len(hashes)
-
-        seats = range(1, game.num_players() + 1)
         shape = game.get_state().board.shape            # stored boards are 2-D-normalized
+
+        items = [(i, boards[h]) for i, h in enumerate(hashes)]
+        pool = getattr(self, "pool", None)
+        if pool is not None:
+            chunks = max(1, len(pool._pool) * 4)        # a few tasks per worker
+            step = -(-len(items) // chunks)
+            known_set = set(hashes)
+            results = pool.map(_replies_chunk,
+                               [(game, shape, known_set, items[a:a + step])
+                                for a in range(0, len(items), step)])
+            per_board = [r for chunk in results for r in chunk]
+        else:
+            per_board = _replies_chunk((game, shape, set(hashes), items))
+
         V0 = np.full(n, 0.5)
         fixed = np.zeros(n, dtype=bool)                 # terminals hold their value
         parents: list[int] = []                         # one row per (board, legal reply)
@@ -464,33 +482,19 @@ class TransitionMemory(GameMemory):
         novel_boards: list[np.ndarray] = []
         novel_parents: list[np.ndarray] = []
 
-        for i, h in enumerate(hashes):
-            board = boards[h].reshape(shape)
-            probe = game.deep_clone()
-            probe.set_state(GameState(board.copy(), current_player=1))
-            if probe.is_over():
+        for i, terminal_v, edges in per_board:
+            if terminal_v is not None:
                 # the mover who LANDED here gets the best seat's outcome (they just moved)
-                V0[i] = max(OUTCOME_SCORE[probe.get_result(p)] for p in seats)
+                V0[i] = terminal_v
                 fixed[i] = True
                 continue
-            seen: set = set()
-            for p in seats:
-                seat_game = game.deep_clone()
-                seat_game.set_state(GameState(board.copy(), current_player=p))
-                for mv in seat_game.valid_moves():
-                    child_game = seat_game.deep_clone()
-                    child_game.apply_move(mv, validated=True)
-                    child = child_game.get_state().board
-                    ch = hash_board(child)
-                    if ch in seen:
-                        continue
-                    seen.add(ch)
-                    parents.append(i)
-                    known.append(index.get(ch, -1))
-                    if ch not in index:
-                        novel_of.append(len(known) - 1)
-                        novel_boards.append(np.asarray(child).ravel().astype(np.int64))
-                        novel_parents.append(np.asarray(board).ravel().astype(np.int64))
+            for ch, novel_board in edges:
+                parents.append(i)
+                known.append(index.get(ch, -1))
+                if novel_board is not None:
+                    novel_of.append(len(known) - 1)
+                    novel_boards.append(novel_board)
+                    novel_parents.append(np.asarray(boards[hashes[i]]).ravel().astype(np.int64))
 
         # rows were appended board by board, so ``parents`` is already sorted — reduceat
         # segment starts come straight from searchsorted

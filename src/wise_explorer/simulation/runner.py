@@ -126,6 +126,7 @@ class SimulationRunner:
                 initializer=_worker_init_wrapper,
                 initargs=(str(self.memory.db_path), self.memory.is_markov),
             )
+            self.memory.pool = self._pool       # lent for boundary work (reply_graph)
         return self._pool
 
     def shutdown(self, force: bool = False) -> None:
@@ -136,6 +137,7 @@ class SimulationRunner:
             return
 
         pool, self._pool = self._pool, None
+        self.memory.pool = None
         pool.terminate() if force else pool.close()
         pool.join()
 
