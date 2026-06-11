@@ -49,7 +49,7 @@ only on 4-pile Nim (120 positions) plays **8-pile Nim** (362,880 positions, a st
 |---|---|---|:--:|
 | **zero-shot transfer** | 4-pile only (120 positions) | with no 8-pile data at all | **400/400** |
 | from-scratch control | 8-pile, 3000 games | after seeing ~7% of the space | 51/400 (≈ chance) |
-| **seeded, then retrained** | 4-pile seed + 3000 8-pile games | the [value loop](docs/value-loop.md) keeps the rule in charge | **400/400** |
+| **seeded, then retrained** | 4-pile seed + 3000 8-pile games | the [value loop](docs/value-loop.md) keeps the rule intact | **400/400** |
 
 ```mermaid
 flowchart LR
@@ -59,7 +59,7 @@ flowchart LR
     classDef fail  fill:#7f1d1d,stroke:#b91c1c,color:#fee2e2
     A["4-pile Nim<br/>120 positions · 2,000 games"] -->|"invents"| P["fold(⊕, board, cell) = 0<br/>a width-free program"]
     P -->|"zero-shot · no retraining"| B["8-pile Nim<br/>362,880 positions · 400/400 optimal"]
-    P -->|"seed + 3,000 more games —<br/>the value loop keeps the rule in charge"| B2["8-pile Nim, retrained<br/>400/400 optimal"]
+    P -->|"seed + 3,000 more games —<br/>the value loop keeps the rule intact"| B2["8-pile Nim, retrained<br/>400/400 optimal"]
     S["8-pile Nim from scratch<br/>3,000 games"] -.->|"space too big to discover in"| F["no rule found<br/>≈ chance play"]
     class A small
     class P prog
@@ -94,7 +94,7 @@ flowchart LR
     T --> S2["② anchors"]
     T --> S3["③ Bellman"]
     T --> S4["④ concepts"]
-    S4 -.->|"heals — the value loop"| S3
+    S4 -.->|"the value loop: ④ prices<br/>the replies ③ never saw"| S3
     S1 --> V{{"variance<br/>arbitration"}}
     S2 --> V
     S3 --> V
@@ -289,19 +289,20 @@ trains*.
 The whole language is three primitives — cell reads, arithmetic/bitwise operators, and one
 combinator, **`fold(op, domain, body)`**: reduce a formula over a region of the board.
 Everything it has ever discovered is some nesting of that one shape, and each round builds
-its concepts *out of* the previous round's. The same loop grows a different tower per game:
+its concepts *out of* the previous round's. The same loop runs a different number of
+rounds per game:
 
 ```mermaid
 flowchart TD
     classDef raw fill:#1f2937,stroke:#475569,color:#e5e7eb
     classDef one fill:#0e7490,stroke:#155e75,color:#ecfeff
     classDef two fill:#065f46,stroke:#047857,color:#d1fae5
-    subgraph NIM["Nim — one story was enough"]
+    subgraph NIM["Nim — one round was enough"]
       NC["cells — the piles"]
       NS["fold(⊕, board, cell) = 0<br/>⟺ the xor of every cell is 0 — <b>the nim-sum</b>"]
       NC -->|"round 1 · fold the whole board"| NS
     end
-    subgraph TTT["Tic-Tac-Toe — two stories"]
+    subgraph TTT["Tic-Tac-Toe — two rounds"]
       TC["cells — c0 … c8"]
       TL["(c0 and c4 and c8) = 0 · (c0 and c3 and c6) = 0 · …<br/><b>the lines</b> — found as regions, not given"]
       TT["fold(max, groups, (played xor (played max empty))) = 1<br/>⟺ top-scoring group: you 0 · empty 1 · them 2 — <b>a threat</b>"]
@@ -313,13 +314,13 @@ flowchart TD
     class TT two
 ```
 
-Nim stops at one story because the nim-sum already explains everything; Tic-Tac-Toe keeps
-climbing because threats only become *expressible* once lines exist to fold over. The
-height of the tower is decided by the data, not by a schedule.
+Nim stops after one round because the nim-sum already explains everything; Tic-Tac-Toe
+takes a second because threats only become *expressible* once lines exist to fold over.
+The number of rounds is decided by the data, not by a schedule.
 
-**How concepts are made — a loop whose judge is a tree.** Not a decision tree *or* an
-iterative search: an iterated loop in which each round's candidates audition inside one
-greedy decision tree, and only what the tree actually uses survives:
+**How concepts are made.** Each round runs three stages — enumerate candidate programs,
+fit one greedy decision tree over library + candidates, keep the concepts the tree
+actually used — and stops the first round whose tree saves fewer bits than it costs:
 
 ```mermaid
 flowchart TD
@@ -327,8 +328,8 @@ flowchart TD
     classDef tree fill:#0e7490,stroke:#155e75,color:#ecfeff
     classDef gate fill:#9a3412,stroke:#7c2d12,color:#ffedd5
     classDef out  fill:#065f46,stroke:#047857,color:#d1fae5
-    P["1 · PROPOSE<br/>enumerate every small program over the current language,<br/>keep one per distinct behavior, rank by value-variance removed"]
-    T["2 · AUDITION<br/>grow one greedy tree over library + candidates —<br/>every split must save more bits than it costs"]
+    P["1 · ENUMERATE<br/>build every small program over the current language,<br/>keep one per distinct behavior, rank by value-variance removed"]
+    T["2 · FIT<br/>grow one greedy tree over library + candidates —<br/>every split must save more bits than it costs"]
     G{"3 · did the round<br/>pay, in bits?"}
     K["4 · PROMOTE<br/>concepts the tree used join the library:<br/>each becomes a size-1 block, its cells a foldable group"]
     R["the last tree IS the model —<br/>its leaves are the WIN / DRAW / LOSS rules"]
@@ -342,15 +343,16 @@ flowchart TD
 ```
 
 The three stages, briefly — the full anatomy lives in
-[docs/concept-invention.md](docs/concept-invention.md) (enumeration counts, the mask/split
-data structures, a worked split, why one combinator is enough, the honest limits):
+[docs/concept-invention.md](docs/concept-invention.md), including **a toy example that
+builds one rule end to end on 2-pile Nim** (six boards, every number checkable by eye),
+the enumeration counts, the mask/split data structures, and the honest limits:
 
-- **Propose** is enumeration, not guessing: every program up to a size budget is built
+- **Enumerate**, don't guess: every program up to a size budget is built
   smallest-first, the six whole-board folds always offered (`fold(⊕, board, cell)` exists
   *before* anything knows it matters), and two formulas that behave identically on the
   data count as one concept — on 3-pile Nim that collapses the formula space to ≈ 13,600
   distinct behaviors, all scored in one vectorized pass.
-- **Audition**: on the data a program is a *column*, a threshold makes it a *mask*, and a
+- **Fit**: on the data a program is a *column*, a threshold makes it a *mask*, and a
   tree node is just an array of row indices the mask partitions. The node goes to the mask
   saving the most bits:
 
@@ -391,11 +393,12 @@ the word. (Hard cuts at 0.40/0.60 used to do this job; benched head-to-head, the
 masses matched every result with half the duplicate concepts and less junk, so the cuts
 were deleted.)
 
-**Discovery runs where the values are trustworthy.** At each training-cycle boundary the
-[value loop](docs/value-loop.md) solves the graph from raw evidence, heals it with the
-current library, and runs discovery over those completed values; a sufficient library
-self-limits (the MDL search finds nothing left that pays). The persisted model is always
-the last considered fit. A library can also be **seeded from another game's DB**
+**Discovery runs where the values are trustworthy.** Discovery happens inside the
+[value loop](docs/value-loop.md): each time the evidence has doubled, values are
+recomputed from raw counts, completed by the current library (which prices the replies
+training never played), and discovery refits on those completed values; a sufficient
+library self-limits (the MDL search finds nothing left that pays). The persisted model is
+always the last considered fit. A library can also be **seeded from another game's DB**
 (`ConceptLibrary.seed_from`) — that's the transfer demo: programs carry over; their worth
 is re-fit locally.
 
@@ -509,8 +512,11 @@ Wise Explorer learns by playing **itself** — no opponent, no dataset. Games ru
 **synchronized waves** ([`simulation/runner.py`](src/wise_explorer/simulation/runner.py)):
 play a wave in parallel → commit transitions + Bellman sweep → consolidate anchors →
 repeat — so every wave learns from fresh statistics. Whenever the evidence has doubled,
-the [value loop](docs/value-loop.md) turns: values re-solved, healed by the concepts,
-concepts re-distilled — so discovery happens *during* training, not after it.
+the [value loop](docs/value-loop.md) runs in a background process: values are recomputed
+from raw counts, completed with library estimates for never-played replies, and the
+concept library is refit — discovery happens *during* training, not after it.
+Exploration never reads the loop's outputs; they matter to competitive play and the
+next cycle, which is why the two can safely overlap.
 
 ### Why *"Wise"* Explorer
 
@@ -569,39 +575,44 @@ converges to optimal.
 
 ---
 
-## The value loop: discoveries repair the evidence
+## The value loop: concepts fill the evidence gaps
 
-And where coverage *can't* be given, the discovered concepts hand it back. A Bellman
-backup can only take its max over replies somebody **played** — and when ~93% of
-positions have never been visited, a position whose refutation is among them *looks
-safe*, and that false safety propagates into the exact signal competitive play trusts
-first. The value loop closes
-the leak with the library's own discoveries: every time the evidence has doubled, the
-backup is re-run over **all** legal replies, with the never-played ones priced by the
-concepts.
+And where coverage *can't* be given, the discovered concepts substitute for it. A Bellman
+backup can only take its max over replies somebody **played** — when ~93% of positions
+have never been visited, a position whose refutation is among them gets *overvalued*,
+and the error propagates into the exact signal competitive play ranks first. The value
+loop fixes this with the system's own discoveries. Each time the stored evidence has
+doubled, it runs four steps in order:
 
 ```mermaid
 flowchart LR
-    classDef ev fill:#0e7490,stroke:#155e75,color:#ecfeff
-    classDef he fill:#9a3412,stroke:#7c2d12,color:#ffedd5
-    classDef di fill:#065f46,stroke:#047857,color:#d1fae5
     classDef pl fill:#1f2937,stroke:#475569,color:#e5e7eb
-    P(["self-play<br/>writes evidence"]):::pl -->|"when the evidence<br/>has doubled"| S["values re-derived<br/>from raw counts"]:::ev
-    S --> H["concepts price the<br/>replies nobody played"]:::he
-    H --> D["concepts re-distilled from<br/>the completed values"]:::di
-    D --> H2["values re-healed<br/>with the fresh rules"]:::he
-    H2 --> P
+    classDef db fill:#713f12,stroke:#a16207,color:#fef9c3
+    classDef ev fill:#0e7490,stroke:#155e75,color:#ecfeff
+    classDef co fill:#9a3412,stroke:#7c2d12,color:#ffedd5
+    classDef di fill:#065f46,stroke:#047857,color:#d1fae5
+    P["self-play — every wave<br/>moves picked by uncertainty alone;<br/>never reads bell or concepts"]:::pl -->|"appends"| K[("raw W/D/L<br/>counts")]:::db
+    K -->|"counts ×2<br/>⇒ one cycle"| S["1 · bell ← solve(counts)<br/>full rebuild from counts alone;<br/>last cycle's output discarded"]:::ev
+    S --> C1["2 · bell ← complete(bell, lib)<br/>max over ALL legal replies —<br/>the library prices the never-played"]:::co
+    C1 --> D["3 · lib ← refit on completed bell<br/>seeded with itself — concepts are<br/>the only state that carries forward"]:::di
+    D --> C2["4 · bell ← complete(bell, lib′)"]:::co
+    C2 --> OUT(["competitive play & evaluation<br/>(bell ranked first)"]):::pl
 ```
 
-Each role keeps the next honest: evidence is always re-derived from raw counts (the
-library never overwrites a count), discovery only ever fits the completed values, and
-training itself stays concept-blind — its uncertainty-driven exploration is what keeps
-the evidence independent of the theory it feeds. Measured on 8-pile Nim seeded with the
-4-pile library: without the loop, continued training is a coin flip that eventually
-destroys the library it started with; with it, **seeded-then-retrained play is 400/400 —
-indistinguishable from the zero-shot rule**. The full anatomy — equations, a richer
-diagram, the self-distillation guard rails, and the honest costs — is in
-[docs/value-loop.md](docs/value-loop.md).
+The loop's outputs flow right, never back into training: self-play explores by
+uncertainty over raw counts alone, so each cycle's results are consumed by competitive
+play, evaluation, and the next cycle. Per store: the **counts** are append-only ground
+truth, **bell** is a derived cache rebuilt from scratch each cycle, and the **library**
+is the only state that carries across cycles. Three anchors keep the feedback honest:
+values always restart from raw counts (the library fills gaps, never overwrites a
+count); the MDL gate discards any concept that merely restates the library; and
+training's concept-blind exploration keeps the evidence independent of the theory it
+feeds.
+Measured on 8-pile Nim seeded with the 4-pile library: without the loop, every refit
+fits coverage noise and eventually destroys the library it started with; with it,
+**seeded-then-retrained play is 400/400 — indistinguishable from the zero-shot rule**.
+Equations, the doubling-cadence rationale, self-distillation guard rails, and the honest
+costs are in [docs/value-loop.md](docs/value-loop.md).
 
 ---
 
@@ -686,7 +697,7 @@ src/wise_explorer/
 │   └── concept_library.py      # persisted invented concepts (the value signal)
 │
 ├── selection/                  # variance arbitration · training (explore) · inference (compete)
-├── simulation/                 # runner.py (waves + the wheel's cadence) · worker.py · training.py
+├── simulation/                 # runner.py (waves + value-loop cadence) · worker.py · training.py
 └── utils/ · debug/
 
 scripts/transfer_demo.py        # thin wrapper — prefer `wise-explorer transfer`
@@ -712,7 +723,7 @@ zero-prior-knowledge and game-agnostic:
 3. **The value loop** — discoveries feed back into the value graph: Bellman backups
    range over *all* legal replies, with never-played ones priced by the invented
    concepts. Self-distillation anchored by raw evidence and the MDL gate; at 1%
-   coverage it keeps retraining at 400/400 where the unhealed system collapses.
+   coverage it keeps retraining at 400/400 where the uncorrected system collapses.
 4. **Variance-arbitrated multi-signal selection** — letting the data decide, per position,
    whether statistics, clustering, game value, or an invented concept should drive the choice.
 5. **A principled N-player / non-zero-sum generalization of minimax** via an alignment

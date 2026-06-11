@@ -284,7 +284,7 @@ def run_transfer(argv: list[str]) -> None:
           " ~93% of positions never")
     print("  visited, training would normally bury the rule under coverage-biased Bellman"
           " backups; the value loop")
-    print("  instead uses the rule to price the replies training never played, healing"
+    print("  instead uses the rule to price the replies training never played, correcting"
           " that signal (docs/value-loop.md).")
     mem8.close()
 

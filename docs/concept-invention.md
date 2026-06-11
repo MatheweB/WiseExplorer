@@ -8,15 +8,18 @@
 This note describes the **concept-invention** engine (`wise_explorer/synthesis.py`, exposed as
 the `wise-explorer invent` command) — the system's one discovery mechanism. Instead of splitting
 on a fixed vocabulary of board features, it **searches for new features to build** out of
-generic primitives, scores them by how much they compress the win/loss data, and reuses its own
-discoveries to reach concepts that were out of reach from scratch. It runs inside the
+generic primitives, scores them by how much they compress the game's learned values (the
+completed Bellman values — not the raw game records), and reuses its own discoveries to
+reach concepts that were out of reach from scratch. It runs inside the
 [value loop](value-loop.md) — whenever the evidence graph has doubled — and its
-discoveries feed competitive move selection as the only signal that generalizes to
-boards training never visited.
+discoveries are consumed in exactly two places: competitive move selection (the only
+signal that generalizes to boards training never visited) and the value loop's
+completion pass. Training-time selection never reads them — exploration is
+uncertainty-driven, which keeps the evidence independent of the theory fitted to it.
 
 ## The one idea
 
-A concept is **good** if it lets you describe the win/loss data in *fewer symbols*.
+A concept is **good** if it lets you describe the learned values in *fewer symbols*.
 `"you win exactly when the nim-sum is 0"` is one short sentence that nails every board — a
 great concept. `"you win when cell 3 is empty"` needs endless exceptions — a bad one.
 
@@ -42,6 +45,38 @@ pays, a *whole round* runs iff it produced something that paid.
 
 No magic numbers, no round counter — the loop is a compression fixpoint.
 
+## What a concept is, precisely
+
+Four objects, kept distinct throughout the code. A **concept** is a *program* — a pure
+function from a board to a number. By itself it claims nothing; it is a measurement, not
+a fact:
+
+| object | type | example | what it claims |
+|---|---|---|---|
+| **concept** | program: board → number | `K₁ = fold(⊕, board, cell)` | nothing — a measurement |
+| **test** | concept + threshold: board → yes/no | `K₁ = 0` | nothing — a predicate |
+| **rule** | path of tests → leaf value | `K₁ = 0 → V ≈ 1.0 [WIN]` | a fact: boards passing these tests have this value |
+| **rule tree** | all rules together | — | the value model `L(r)` that play and the value loop consult |
+
+The library persists exactly two of these: the concepts (`kept`, the reusable language)
+and the rules (the current value model). Tests and the tree are reconstructed from them.
+The facts that *predict* a board's value are the rules; concepts are the vocabulary the
+rules are stated in — which is why one concept can appear in many rules, why two
+thresholds of the same program share one `K`, and why a rule can be refit (new
+thresholds, new leaf values) while the concept underneath it never changes.
+
+The two levels also age differently. A concept, once kept, is frozen — programs are
+added, never edited or deleted (a transferred program may be impossible to re-derive
+from the current game's data, so deletion is never risked). The rules are rebuilt from scratch
+at every refit, so a concept that stops paying its way simply stops appearing in the
+tree, without leaving the library. "Does the library improve over training?" splits the
+same way: the programs don't change, the set of them grows, and the fit around them —
+thresholds, leaf values, which concepts the tree uses — is re-estimated at every cycle.
+
+A promoted concept also plays a second role, as raw material: its cell-support becomes a
+*group* that the next round's programs can fold over — round 1's line `(c0·c4·c8)`
+is what makes round 2's threat `fold(max, groups, …)` expressible at all.
+
 ## One operation: the fold
 
 Everything the engine builds is a **fold** — the standard "running total" operation:
@@ -65,8 +100,98 @@ Three everyday concepts are the *same fold under a different rule*:
 - fold **`&`** over the cells of a line → **"is this line all one colour?"**
 - fold **`+`** over a line, of "is this cell the piece just played?" → **a count**
 
-So "line" and "count" are not hand-coded — they are a fold with `&` or `+`. Nesting folds (a
-count inside a per-line test, aggregated across lines) is how richer concepts blossom.
+So "line" and "count" are not hand-coded — they are a fold with `&` or `+`. Richer concepts
+are nested folds: a count inside a per-line test, aggregated across lines.
+
+## A rule, built end to end — a toy example
+
+Everything below happens inside one discovery call. The game is **2-pile Nim** (take any
+number from one pile; taking the last object wins), small enough to check every number by
+eye.
+
+**Step 0 — the data.** Discovery receives boards and their completed values (a board here
+is the position *you just created* by moving; `V = 1` means it wins for you). Six boards
+from a converged run:
+
+| board `[c0, c1]` | `V` |
+|---|--:|
+| `[1, 1]` | 1.0 |
+| `[2, 2]` | 1.0 |
+| `[3, 3]` | 1.0 |
+| `[1, 0]` | 0.0 |
+| `[2, 1]` | 0.0 |
+| `[3, 2]` | 0.0 |
+
+(Real values are soft — `0.95`, `0.31` — and split mass between the outcome anchors;
+pure 0/1 keeps the toy arithmetic visible.)
+
+**Step 1 — enumerate candidates, smallest first.** Picture the data as a spreadsheet:
+one row per board, `V` on the right. Enumeration builds every program up to a size
+budget — `c0` and `c1` at size 1, the whole-board folds at size 2, composites like
+`(c0 xor c1)` at size 3 — and evaluates each one on all six boards in a single
+vectorized pass. A program's six outputs are **one new column** of that spreadsheet:
+
+| board | `c0` | `c1` | `fold(max, board, cell)` | `fold(+, board, cell)` | `fold(⊕, board, cell)` | `(c0 xor c1)` | → `V` |
+|---|--:|--:|--:|--:|--:|--:|--:|
+| `[1, 1]` | 1 | 1 | 1 | 2 | **0** | 0 | 1.0 |
+| `[2, 2]` | 2 | 2 | 2 | 4 | **0** | 0 | 1.0 |
+| `[3, 3]` | 3 | 3 | 3 | 6 | **0** | 0 | 1.0 |
+| `[1, 0]` | 1 | 0 | 1 | 1 | **1** | 1 | 0.0 |
+| `[2, 1]` | 2 | 1 | 2 | 3 | **3** | 3 | 0.0 |
+| `[3, 2]` | 3 | 2 | 3 | 5 | **1** | 1 | 0.0 |
+
+The search's whole job is to find a column whose pattern lines up with the `V` column.
+Reading these: `c0` hands wins and losses the same numbers (`1 2 3` on both sides) —
+useless. `fold(+, …)` separates by parity (wins even, losses odd), but no single
+threshold splits even from odd, so the mask language can't use it. `fold(⊕, …)` is `0`
+on exactly the three winning boards.
+
+**Step 2 — dedup by observational equivalence.** A program's identity is its column.
+Two pairs above are visibly identical: `fold(max, …)` duplicates `c0` → discarded (the
+smaller spelling survives), and `(c0 xor c1)` duplicates `fold(⊕, board, cell)` →
+discarded for the same reason. That tie-break matters: the surviving spelling is the
+*width-free* one, the program that still means something on 8 piles.
+
+**Step 3 — threshold makes a mask.** The ⊕-fold's column, cut at `= 0`, becomes
+`✓ ✓ ✓ ✗ ✗ ✗` — call it `K₁ = 0`.
+
+**Step 4 — score the split in bits.** The root node holds all six boards: three units of
+win mass, three of loss, so `H = 1` bit per board, `bits(root) = 6 · 1 = 6`. The mask
+partitions it into two pure children (`bits = 0` each):
+
+$$\text{gain} = 6 - 0 - 0 = 6 \text{ bits}$$
+
+Compare `c0`'s best mask: any cut leaves both children still half-win, half-loss —
+`gain = 0`. Useless candidates eliminate themselves; nobody inspects them.
+
+**Step 5 — the MDL verdict.** Writing the concept down costs ≈ 12 bits (its symbols at
+`log₂ 12` apiece, plus the two tree branches it grows). At six boards: **6 < 12 —
+rejected.** A perfect pattern on six boards is not yet worth a concept; that is the gate
+working, not failing. Self-play revisits positions, though, so the same six *patterns*
+arrive with multiplicity — at four sightings each (24 rows), the identical split saves
+24 bits against the same 12: **kept**. (The real 4-pile run: 86 saved vs 12 — kept
+comfortably.)
+
+**Step 6 — leaves become rules.** The tree is now one split with two pure leaves. Each
+leaf stores its root-to-leaf path of tests plus its pooled value — those pairs are the
+rules, and they are what the library persists:
+
+```text
+K₁ = 0   ⟺ the xor of every cell is 0
+├─ yes → [WIN ]  avg = 1.00
+└─ no  → [LOSS]  avg = 0.00
+```
+
+**Step 7 — promote, and try another round.** `K₁` joins the library as a size-1 token
+(on a game with localized supports, its cells would also become a foldable group — that
+is Tic-Tac-Toe's path from lines to threats). Round 2 searches the enriched language,
+finds the residual is already zero bits — nothing left to explain — and stops.
+
+A large game changes the *volume* of every step, never the steps: more candidates
+(≈ 13,600 distinct behaviors on 3-pile Nim), more rows (capped by a uniform sample),
+masks that only partially purify a node (so the tree grows several splits deep), and
+more rounds when promoted supports make new folds expressible. The sections below are
+these same seven steps at code level.
 
 ## The move is the only perspective
 
@@ -74,7 +199,7 @@ Every board the learner sees was reached by a **move**, and we read that move st
 before→after diff: **the token the move just placed**, call it `m`. That single fact is the
 *only* thing the engine is told about "sides" — there is no notion of ownership, no "mine vs
 theirs", no turn parity. The board is **never recoded**; every piece keeps its face value. A
-line is described by two counts taken *against the move*:
+line is described by two counts taken relative to the move:
 
 - **played** — how many of its cells hold the just-played token (`cell == m`)
 - **empty** — how many cells are blank (`cell == 0`)
@@ -107,7 +232,7 @@ flowchart TD
 
 Within every round, the same three stages run. Here is each one at the level of the code.
 
-## Propose: enumeration, not guessing
+## Enumerate, don't guess
 
 Candidates are never sampled or guessed. The search builds *every* program, smallest first:
 size 1 is the givens (cell reads and the board's literals); the six whole-board folds — one
@@ -131,7 +256,7 @@ The formula space collapses to ≈ 13,600 distinct behaviors — the search neve
 on a formula that behaves like one it already has — and ranking them all by how much
 value-variance they remove is a single vectorized pass.
 
-## Audition: a concept is a mask; a split is a partition
+## Fit: a concept is a mask; a split is a partition
 
 On the data, a program *is* a column (it is evaluated on all boards at once), and a
 threshold turns it into a mask:
@@ -235,7 +360,7 @@ Three facts pin the picture down:
 - **MDL keeps a fold iff it pays; the value decides WIN/LOSS** — the verdict is learned,
   never asserted.
 
-## Why a loss is dearer than a win
+## Why a loss is a harder concept than a win
 
 On Tic-Tac-Toe a **win** is an absolute, compact concept ("you completed a line") — the search
 finds it instantly. A **loss** is *relative, counted, and conditional*: a line that is two-thirds
@@ -271,23 +396,24 @@ The nim-sum already explains everything; round 2 saves nothing → stop after ro
 The savings collapse while the concept cost climbs; the moment cost overtakes saving, the
 round stops paying. (Exact numbers vary per run.)
 
-## When it runs: the loop's boundaries
+## When it runs: inside the value loop
 
-Discovery has exactly one teacher and one venue: whenever the evidence graph has doubled
-(and once more at the end of training), the [value loop](value-loop.md) solves the game
-graph from raw counts, heals it with the current library, and *then* runs discovery over
-those completed values — the system's best current belief. The search is seeded with the current concepts, so knowledge carries
-forward, and a sufficient library self-limits: the MDL gate finds nothing left that pays,
-and the search stops itself. Between boundaries the library simply is the last considered
-fit. Discovery's data view is bounded (`synthesis.CAP`, a compute budget, not a knob):
-past it, the fit runs over a uniform sample — a concept is a program, visible in any fair
-sample.
+Discovery runs at one venue, on one kind of target: whenever the evidence graph has
+doubled (and once more at the end of training), the [value loop](value-loop.md)
+recomputes all values from raw counts, completes them with the current library (pricing
+the replies training never played), and *then* runs discovery over those completed
+values — the system's best current belief. The search is seeded with the current
+concepts, so knowledge carries forward, and a sufficient library self-limits: the MDL
+gate finds nothing left that pays, and the search stops itself. Between cycles the
+library simply is the last fit. Discovery's data view is bounded (`synthesis.CAP`, a
+compute budget, not a knob): past it, the fit runs over a uniform sample — a concept is
+a program, visible in any fair sample.
 
-(A continuous per-wave variant — live table, refit every wave, due-and-insufficient search
-trigger — was built, benched, and deleted: training-time move selection never reads the
-concept signal, so the live fit's only consumer was the loop's healing pass, exactly where
-a refit over still-drifting values could transiently collapse the tree and poison one
-heal. Measured in docs/value-loop.md.)
+(A continuous per-wave variant — live table, refit every wave, due-and-insufficient
+search trigger — was built, benched, and deleted: training-time move selection never
+reads the concept signal, so the live fit's only consumer was the loop's completion
+pass, exactly where a refit over still-drifting values could transiently collapse the
+tree and corrupt one pass. Measured in [value-loop.md](value-loop.md).)
 
 ## Knowledge transfers across scales
 
@@ -308,7 +434,7 @@ Measured (run `wise-explorer transfer --full`):
   zero-shot. This used to be the honest caveat: refitting on n=8's own coverage-starved
   values *degraded* the library, because a fit can't beat bad targets. The
   [value loop](value-loop.md) removed the bad targets — discovery now fits values the
-  concepts have already healed — and retraining at scale became safe.
+  library has already completed — and retraining at scale became safe.
 
 ## Running it
 
@@ -316,7 +442,7 @@ Measured (run `wise-explorer transfer --full`):
 wise-explorer invent -g nim                  # the persisted library — what play actually uses
 wise-explorer invent -g nim --remine         # re-run discovery, with the full bits ledger
 wise-explorer invent -g nim --fresh 2000     # train a throwaway demo first, then invent
-wise-explorer invent -g nim --expand         # every formula fully spelled out (the chaos)
+wise-explorer invent -g nim --expand         # every formula fully spelled out (verbose)
 wise-explorer transfer                       # discover on 4 piles, play 8 piles zero-shot
 ```
 
@@ -357,8 +483,8 @@ The reader mirrors the search's own compression — names all the way up:
   *evidence-only* Bellman values stay biased and a fit will happily "explain" their noise
   (measured at 8-pile Nim — and weighting boards by evidence does *not* fix it; the bad
   targets, not the vote counting, are the bottleneck). The [value loop](value-loop.md) is
-  the system's answer: discovery fits values the library has already healed, which is what
-  makes retraining at scale safe. Where the library knows *nothing*, the limit stands —
+  the system's answer: discovery fits values the library has already completed, which is
+  what makes retraining at scale safe. Where the library knows *nothing*, the limit stands —
   discover where values can converge, transfer to where they can't.
 
 ## Lineage

@@ -1,30 +1,36 @@
 # The value loop
 
-> *Bellman keeps a notebook: exact bookkeeping of every game anyone actually played. The
-> concept library is the rule of thumb distilled from that notebook. The loop is what happens
-> when the notebook starts citing the rule of thumb for the pages nobody has written yet —
-> and the rule of thumb is re-distilled from the notebook it just helped complete.*
+The value loop is how the discovered concepts feed back into the value graph. Bellman
+values are exact bookkeeping over the games actually played; the concept library is a
+model fitted to those values. The loop uses the model to fill in the parts of the graph
+self-play never reached, then refits the model on the filled-in graph.
 
-This note describes how the discovered concepts feed back into the value graph
-(`TransitionMemory.complete_values`, closed by `GameMemory.grow_concepts`). It assumes the
-companion note [concept-invention.md](concept-invention.md), which explains where concepts
-come from. This one explains what they are *for* during training: turning a coverage-limited
-learner into one whose abstractions repair its own value estimates.
+It is deliberately decoupled from training: exploration never reads the loop's outputs,
+so the loop changes nothing about what data gets collected. What it changes is how much
+correct play the system extracts from a given amount of data — the same 3,000 games of
+8-pile Nim yield 52/400 optimal moves without the loop and 400/400 with it. At 7%
+coverage, evidence alone cannot converge no matter how long training runs; the loop
+substitutes the library's generalization for the coverage that is missing.
 
-## The blind spot
+Entry points: `TransitionMemory.complete_values` (the completion pass) and
+`GameMemory.grow_concepts` (one full cycle). The companion note
+[concept-invention.md](concept-invention.md) explains where concepts come from; this one
+explains how they are used during training. (Code comments call the completion pass
+"healing" and one cycle a "turn of the wheel" — same things.)
 
-The Bellman backup is a max over replies:
+## The problem: a max over a sample
+
+The Bellman backup is
 
 $$V(t) \;=\; 1 - \max_{r \in \text{replies}(t)} V(r)$$
 
-`t` is a board someone just moved onto, `replies(t)` are the boards the *opponent* can move
-onto from there, and `V ∈ [0,1]` is always read from the mover's side — landing on `t` is
-worth `1` when every opponent reply leads back to positions worth `0` for them. The `1 − x`
-is the zero-sum flip: whatever the position is worth to the player facing it, it is worth
-the complement to the player who created it.
+where `t` is the board a move lands on, `replies(t)` are the boards the opponent can
+reach from `t`, and `V ∈ [0,1]` is always read from the mover's side — the `1 − x` is
+the zero-sum flip. Terminal boards skip the max entirely: they are fixed at the game's
+own verdict (win `1`, draw `½`, loss `0`), and every backup chains down to them.
 
-The stored game graph can only take that max over replies somebody has **played**. On games
-small enough to cover, that is exact. At scale it is quietly catastrophic:
+The stored graph contains only replies that were actually **played**, so that is all the
+max can range over. On a game small enough to cover, this is exact. At scale it is not:
 
 | | 4-pile Nim | 8-pile Nim (3,000 games) |
 |---|---|---|
@@ -32,144 +38,164 @@ small enough to cover, that is exact. At scale it is quietly catastrophic:
 | visited | all of them | ~25,000 (7%) |
 | max over replies is | the true max | the max over a 7% sample |
 
-A position whose refutation was never played *looks safe* — not because the evidence says
-it is safe, but because the evidence never met the door that disproves it. The backup then
-**propagates** that false safety to every ancestor: confidently, consistently, and in the
-one signal (`bell`) that competitive move selection trusts first. Measured on seeded 8-pile
-Nim, this is not a degradation but a collapse: an agent that starts at ~100% optimal (pure
-transferred rule, bell still empty) is dragged to ~15% as training *fills* the bell signal
-with coverage-biased backups that outrank the still-correct concept signal.
+A position whose refutation was never played gets **overvalued** — the max simply does
+not contain the move that disproves it — and the backup propagates the overvaluation to
+every ancestor. The error lands in the `bell` signal, which competitive selection ranks
+first. Measured on seeded 8-pile Nim: an agent that starts at ~100% optimal (transferred
+rule, `bell` still empty) degrades to ~15% as training fills `bell` with sample-biased
+backups that outrank the still-correct concept signal.
 
-The deep point: the problem was never that the agent knew too little. Its library priced
-every position correctly from game one. The problem was a value system that refused to use
-that knowledge where the evidence ran out.
+Note what failed: not knowledge — the seeded library priced every position correctly
+from game one — but a value computation that ignored that knowledge wherever the
+evidence ran out.
 
-## The loop
+## The fix: complete the max
 
-`complete_values` re-runs the same backup with the max over **all legal replies**. Visited
-replies keep their evidence value. Never-played replies are priced by the concept library —
-the rule of thumb fills the unwritten pages:
+`complete_values` re-runs the same backup with the max over **all legal replies**:
 
-$$V(t) \;=\; 1 - \max_{r \in \text{ALL legal replies}(t)} \begin{cases} V(r) & r \text{ visited} \\ L(r) & r \text{ priced by the library} \\ \text{(ignored)} & \text{library has no opinion} \end{cases}$$
+$$V(t) \;=\; 1 - \max_{r \,\in\, \text{legal}(t)} \begin{cases} V(r) & r \text{ visited} \\ L(r) & r \text{ unvisited, library prices it} \\ \text{(excluded)} & \text{library has no opinion} \end{cases}$$
 
-`L(r)` is the library's rule-tree value for board `r` (`ConceptLibrary.values_for`), and "no
-opinion" (no rule matches, or the library is empty) means the reply simply doesn't enter the
-max — exactly its status today. Terminal boards don't use the max at all: they are fixed at
-the game's own verdict for the player who landed there (win `1`, draw `½`, loss `0`) — the
-ground truth the whole graph hangs from.
+`L(r)` is the library's rule-tree value for board `r` (`ConceptLibrary.values_for`). A
+reply the library cannot price (no rule matches, or the library is empty) simply does
+not enter the max — exactly its status without the loop. With an empty library the whole
+pass is a no-op, so the loop needs no enable flag: it does nothing until the library has
+rules, and engages the moment it does.
 
-One full training cycle is then a single turn of the wheel — five beats, two kinds of
-knowledge feeding each other:
+**What gets written.** Library prices enter the max as constants; they are never stored
+as `bell` values themselves. The recomputed `V` is written back only to transitions that
+exist in the table — i.e. moves somebody played. Concretely: if board `A` has legal
+moves 1–5 and only move 1 was ever played, moves 2–5 still have no `bell` entry after
+the pass (at selection time the concept signal scores them directly). What changes is
+the value of the **played** moves: the move that *landed on* `A` is now valued against
+all five replies, so if the library prices move 5 as a winning refutation, that move is
+marked refuted even though move 5 was never played. The loop repairs the evidence about
+explored moves by accounting for the unexplored alternatives — it does not fabricate
+evidence for the unexplored moves themselves.
+
+## One cycle
+
+The loop runs whenever the number of stored transitions has **doubled** since the last
+run, plus once at the end of training. One cycle, in order:
+
+1. **Self-play** (between cycles) appends transitions with raw win/draw/loss counts,
+   and keeps `bell` roughly fresh with a cheap backward sweep along each played line
+   (`propagate_bellman`, every wave). The cycle's full rebuild below subsumes those
+   incremental updates — the sweep is a cache refresh, not a second source of truth.
+2. **`solve_graph`** — recompute every value from raw counts alone. The previous
+   cycle's completions are discarded, not accumulated: library prices never persist
+   into the evidence pass.
+3. **`complete_values`** — widen every backup's max to all legal replies, pricing
+   unvisited ones with the current library.
+4. **Discovery** — refit the concept library on the completed values; the MDL gate
+   decides what is kept ([concept-invention.md](concept-invention.md)).
+5. **`complete_values`** again — so the stored values reflect the library just fitted.
 
 ```mermaid
-flowchart TB
-    classDef play     fill:#1f2937,stroke:#475569,color:#e5e7eb
-    classDef evidence fill:#0e7490,stroke:#155e75,color:#ecfeff
-    classDef heal     fill:#9a3412,stroke:#7c2d12,color:#ffedd5
-    classDef distill  fill:#065f46,stroke:#047857,color:#d1fae5
-    classDef truth    fill:#713f12,stroke:#a16207,color:#fef9c3
-
-    P["1 · SELF-PLAY — pages are written<br/>every move played becomes a transition<br/>with raw win/loss counts"]:::play
-    S["2 · RE-TOTAL THE NOTEBOOK — solve_graph<br/>every value recomputed from raw counts alone;<br/>last cycle's healing is rewritten, never accumulated"]:::evidence
-    H1["3 · PRICE THE UNOPENED DOORS — complete_values<br/>the max widens to ALL legal replies:<br/>played → evidence value · unplayed → library price<br/>no opinion → ignored"]:::heal
-    D["4 · RE-DISTILL THE RULE OF THUMB — rebuild<br/>discovery fits the completed values, the system's<br/>best current belief; the MDL gate decides what stays"]:::distill
-    H2["5 · RE-ANNOTATE THE MARGINS — complete_values<br/>one more healing pass, so the value graph<br/>reflects the rules just distilled"]:::heal
-    T["TERMINAL BOARDS — game truth<br/>win 1 · draw ½ · loss 0<br/>the fixed points every backup hangs from"]:::truth
-
-    P -->|"fresh evidence"| S
-    S -->|"evidence-only values"| H1
-    H1 -->|"completed values"| D
-    D -->|"fresh rules"| H2
-    H2 -->|"healed bell — selection's first-ranked<br/>signal now agrees with the library"| P
-    T -.->|anchors| S
-    T -.->|anchors| H1
+flowchart LR
+    classDef pl fill:#1f2937,stroke:#475569,color:#e5e7eb
+    classDef db fill:#713f12,stroke:#a16207,color:#fef9c3
+    classDef ev fill:#0e7490,stroke:#155e75,color:#ecfeff
+    classDef co fill:#9a3412,stroke:#7c2d12,color:#ffedd5
+    classDef di fill:#065f46,stroke:#047857,color:#d1fae5
+    P["1 · self-play — every wave<br/>selection = uncertainty over raw counts<br/>(never reads bell or the library)"]:::pl -->|"appends"| K[("raw W/D/L<br/>counts")]:::db
+    K -->|"transitions ×2<br/>⇒ one cycle"| S["2 · solve_graph<br/>bell ← values from counts alone<br/>(last cycle's completions discarded)"]:::ev
+    S --> C1["3 · complete_values<br/>bell ← max over ALL legal replies;<br/>library prices the unvisited"]:::co
+    C1 --> D["4 · discovery<br/>library ← refit on completed values<br/>(seeded with the current library)"]:::di
+    D --> C2["5 · complete_values<br/>bell ← completed with the refit library"]:::co
+    C2 --> OUT(["competitive selection & evaluation<br/>(bell ranked first, concepts second)"]):::pl
 ```
 
-Blue is evidence work (counting what happened), orange is healing (the library lending
-prices where evidence ran out), green is discovery (compressing values back into concepts).
-The wheel turns once per training cycle, and each kind of knowledge hands the next its
-input: evidence grounds the healing, healed values feed discovery, discovered rules heal
-the signal that decides actual play. The brown anchor never moves — terminals are the
-game's own verdicts, and both value passes hang from them.
+Note the shape: the two loops touch only through the counts. Self-play never reads the
+cycle's outputs — training-time selection is uncertainty over raw counts — so a cycle's
+results matter to competitive play, to evaluation, and to the *next* cycle, never to
+exploration. That is also why a cycle can safely run in its own process while waves
+keep playing. Terminal values stay pinned to game truth throughout.
 
-**When the wheel turns:** whenever the evidence graph has *doubled* since the last turn,
-plus once at the end of training. The cadence decides only **when to ask**; what to do
-is still decided by the system at every turn — the MDL search keeps nothing on a
-sufficient library, and the heal prices only what the rules actually match. A
-"smarter" trigger would have to watch some signal for *when knowledge has changed*, and
-every such signal needs its own threshold (a pure insufficiency trigger was benched in
-this codebase's history: it storms). Doubling needs none, and it buys three properties
-at once:
+Update semantics, per store:
 
-- **Bounded cost.** Each turn processes a graph ~2× the last, so the whole run's wheel
-  work is about twice the final turn — amortized constant per game, the same schedule
+| store | written by | semantics |
+|---|---|---|
+| raw W/D/L counts | self-play only | append-only ground truth — the loop never touches them |
+| `bell` (`propagated_score`) | the cycle (and per-wave sweeps along played lines) | derived cache — rebuilt **from scratch** every cycle, then completed; nothing accumulates |
+| concept library | the cycle only | **cumulative** — each refit is seeded with the current library, and `kept` is monotone |
+
+So concepts never incrementally patch `bell`: each cycle is a full rewrite of the value
+cache, and the library is the one piece of knowledge that carries forward between
+cycles.
+
+**Bootstrap.** Step 3 needs a library with rules, and on a cold start — or with a
+freshly seeded library, whose rule tree is cleared by design — there are none. The cycle
+then runs discovery once on the evidence-only values to produce a provisional fit, and
+proceeds normally (3 → 4 → 5). Measured on seeded 8-pile Nim: skipping this leaves the
+first cycle fitting *and completing* on raw evidence (87/200 optimal); with it, 191/200.
+
+## Why doubling
+
+The trigger is deliberately dumb. An adaptive trigger would have to watch some statistic
+for "knowledge has changed", and every such statistic needs its own threshold (a pure
+insufficiency trigger was benched in this codebase's history: it fires in storms).
+Doubling has no parameter, and buys three properties:
+
+- **Bounded cost.** Each cycle processes a graph ~2× the last, so total loop work over
+  a run is about twice the final cycle — amortized constant per game, the same argument
   that makes dynamic arrays cheap.
-- **Self-scaling density.** Turns come fast early (small graph, cheap turns, the library
-  is forming) and slow late (big graph, expensive turns, the library is stable).
-- **Nothing is lost by waiting.** A concept is a program — a regularity visible at size
-  N is still visible at size 2N — so postponing the question to the next doubling delays
-  knowledge by at most one doubling and never destroys it. Bell is never more than one
-  doubling stale.
+- **Density matches need.** Cycles are frequent early (small graph, cheap cycles,
+  library still forming) and rare late (large graph, expensive cycles, library stable).
+- **Waiting loses nothing.** A concept is a program: a regularity visible in N
+  transitions is still visible in 2N. Postponing discovery delays a concept by at most
+  one doubling and never destroys it. `bell` is never more than one doubling stale.
 
-Measured on seeded 8-pile Nim: a single end-of-run turn after 3,000 games leaves bell
-unhealed the whole way and scores 176/400; turning on doublings scores **400/400** —
-seeded-then-retrained play becomes indistinguishable from the zero-shot rule.
+Measured on seeded 8-pile Nim: a single end-of-run cycle after 3,000 games leaves `bell`
+uncompleted the whole way and scores 176/400; cycling at doublings scores **400/400** —
+seeded-then-retrained play indistinguishable from the zero-shot rule. (On a game small
+enough to cover, the *concepts* would come out the same under either schedule — evidence
+values converge on their own there. In-run cycles buy two things that schedule can't:
+a correct `bell` during the run, and clean refit targets while coverage is still thin.)
 
-One bootstrap detail: completion can't lend prices from an empty head. On a boundary
-where no rules exist yet — a cold start, or a freshly seeded library whose rules are
-cleared by design — the wheel first reads the notebook once to mint a provisional fit,
-then proceeds normally: heal, re-distill from the completed values, re-heal. Measured on
-seeded 8-pile Nim, skipping this leaves the first boundary fitting *and healing* on raw
-evidence (87/200 optimal); with it, the first boundary lands at 191/200.
+## Why it doesn't diverge
 
-## Why it doesn't echo
-
-The library fits values it helped produce — the classic self-distillation worry. Two things
-anchor the loop to reality, and one was *measured the hard way*:
+Step 4 fits the library to values the library helped produce — the classic
+self-distillation worry. Two mechanisms anchor the loop, and the obvious alternative was
+measured and rejected:
 
 1. **Evidence re-enters every cycle.** `solve_graph` recomputes every value from raw
-   win/loss counts before any healing happens. Healed values are never inputs to the next
-   cycle's evidence pass — they are rewritten, not accumulated. Terminals stay pinned to
-   game truth. The library only ever fills *gaps*; it never overwrites a count.
-2. **The MDL gate.** A concept that merely restates what the current library already
-   predicts compresses nothing beyond the seed (the seed is in the search), so it cannot pay
-   its description cost and is not kept (see
-   [concept-invention.md](concept-invention.md)).
+   counts before any completion happens; completed values are rewritten each cycle,
+   never accumulated; terminals stay pinned to game truth. The library only ever fills
+   gaps — it never overwrites a count.
+2. **The MDL gate.** Discovery is seeded with the current library, so a candidate that
+   merely restates what the library already predicts compresses nothing beyond the seed.
+   It cannot pay its description cost and is not kept.
 
-The measured negative result: the obvious-looking "clean room" ordering — fit the library
-on *evidence-only* values so it can never see its own output — **collapses** (stuck near 80/200
-from the first chunk, then 32/200 by the fourth, on seeded 8-pile Nim). With ~93% of
-positions never visited, the un-healed backup is mostly noise, and a refit on noise shreds
-the transferred rules; the loop then heals with a broken library. Information starvation turned out to be a worse failure mode than
-self-reference. Discovery must fit the system's *best current belief* — the completed
-values — and the echo risk is held by the evidence re-anchor and the MDL gate, not by
-hiding the library's own signal from it.
+The measured negative result: the "clean-room" ordering — fit the library on
+*evidence-only* values, so it can never see its own output — **collapses** on seeded
+8-pile Nim (≈80/200 from the first cycle, 32/200 by the fourth). With ~93% of positions
+unvisited, evidence-only values are mostly noise; a refit on noise shreds the
+transferred rules, and the completion pass then runs with a broken library. Information
+starvation is a worse failure mode than self-reference: discovery must fit the system's
+best current belief — the completed values — with the echo risk held by the evidence
+re-anchor and the MDL gate, not by hiding the library's signal from itself.
 
-## Why errors stay small
+## Why pricing errors stay small
 
-The completed backup is conservative by construction, because **a max only listens to the
-top**:
+The completed backup is a max, and a max only listens to its top element:
 
-- A reply the library *under*-prices changes nothing unless it was the best reply — every
-  other entry in the max masks the mistake.
-- A reply the library *over*-prices must beat the true best reply before it distorts
+- A reply the library **under**-prices changes nothing unless it was the argmax — every
+  other entry masks the mistake.
+- A reply the library **over**-prices must exceed the true best reply before it distorts
   anything, and then only by the margin of the over-price.
-- A reply the library can't price at all is ignored — the backup gracefully degrades to
-  exactly what it was before the loop existed.
+- A reply the library **can't** price is excluded — the backup degrades to exactly the
+  no-loop behavior.
 
-So wrong prices mostly vanish into the max, and the loop's failure mode is "no better than
-before," not "confidently wrong." An empty library makes the whole pass a no-op — the loop
-is inert until there is actually knowledge to lend, and switches itself on the moment there
-is. No flag, no threshold.
+So the loop's failure mode is "no better than before", not "confidently wrong".
 
 ## Measured behavior
 
-Protocol: 4-pile Nim trained 2,000 games (discovers the nim-sum), its library seeded into a
-fresh 8-pile memory (362,880 positions — training will visit ~7%), then 6 chunks × 500
-games. After each chunk, optimal-move rate on 200 sampled winning positions using the full
-competitive selection (bell ranked first), against the nim-sum oracle. The control is
-byte-identical except `complete_values` is a no-op. (Measured with one wheel turn per
-chunk, before the in-run doubling cadence landed; the cadence only turns the wheel more
+Protocol: 4-pile Nim trained 2,000 games (discovers the nim-sum), its library seeded
+into a fresh 8-pile memory (362,880 positions — training will visit ~7%), then 6 chunks
+× 500 games. After each chunk, optimal-move rate on 200 sampled winning positions using
+the full competitive selection (`bell` ranked first), against the nim-sum oracle. The
+control is byte-identical except `complete_values` is a no-op. (Measured with one cycle
+per chunk, before the in-run doubling cadence landed; the cadence only cycles more
 often, and the seeded-then-retrained 400/400 above is the shipped code end to end.)
 
 | chunk | loop ON, optimal | loop ON, concepts | loop OFF, optimal | loop OFF, concepts |
@@ -181,61 +207,62 @@ often, and the seeded-then-retrained 400/400 above is the shipped code end to en
 | 5 | 200/200 | 28 | 190/200 | 6 |
 | 6 | **200/200** | 28 | **52/200** | 12 |
 
-The control tells the whole story. It starts near-perfect — its bell is empty, so
-selection falls through to the clean transferred rule. Then every boundary rolls the
-dice: a rebuild on raw evidence with 93% of positions unvisited is fitting mostly noise,
-so the library's quality becomes a **random walk on luck**. This run diluted at chunk 2 (1 → 6 concepts),
-wobbled, briefly recovered on a lucky fit (190 at chunk 5), and ended collapsed (52, 12
-concepts). Two earlier control runs walked differently — one diluted at chunk 3 and
-flat-lined at ~15%, one held to chunk 4 then spiraled — but every unhealed run measured
-ends up gambling away knowledge it already had.
+The control starts near-perfect — its `bell` is empty, so selection falls through to the
+clean transferred rule. But each refit on raw, 93%-unvisited evidence is fitting mostly
+noise, so the library's quality becomes a random walk: this run diluted at chunk 2
+(1 → 6 concepts), wobbled, briefly recovered on a lucky fit (190 at chunk 5), and ended
+collapsed (52 optimal, 12 concepts). Two earlier control runs walked differently — one
+diluted at chunk 3 and flat-lined at ~15%, one held to chunk 4 then spiraled — but every
+control run eventually destroyed knowledge it started with.
 
-The loop removes the gamble rather than winning it: every rebuild fits completed values,
-so its targets are clean by construction, not by luck — six chunks, one curve, no
-variance (191 then five straight 200s). In an earlier run whose first boundary *did* fit
-a diluted library, the next turn of the wheel recovered it to 200/200 — the same
-mechanism, run in reverse.
+The loop removes the variance rather than betting against it: every refit's targets are
+completed values, clean by construction — six chunks, one curve (191, then five straight
+200s). In an earlier run whose first cycle *did* fit a diluted library, the next cycle
+recovered it to 200/200 — the same mechanism, run in reverse.
 
-## What it costs, honestly
+## Costs and edge cases
 
-- **Resolved: boundary wobble.** An earlier architecture kept a second, *live* library —
-  refit every wave on still-drifting evidence values so the concept signal could track
-  training. Benched on this protocol it dipped to 158 and 180 on random chunks: the heal
-  occasionally ran with a transiently degenerate live tree. The fix was deletion, not
-  machinery: training-time move selection never reads the concept signal (it explores by
-  uncertainty alone — and must, to keep the evidence anchor independent), so the live
-  fitter's only real consumer was the one place it could do harm. With discovery living
-  only at the loop's boundaries, the dips vanished (200/200 on every post-recovery chunk).
-- **Library growth.** `kept` is monotone: every rebuild seeds with all of it, and junk
-  variants admitted on one chunk's noisy values never leave (21 → 28 concepts over six
-  chunks, while the *rules* tighten to ~14 and play holds; the old continuous-search
-  architecture reached 72, so boundary-only discovery already tamed most of it).
-  Behaviorally cosmetic so far, but it is unbounded, and trimming it without breaking
-  the never-forget transfer guarantee is an open design question.
-- **Union over seats.** Replies are enumerated for every seat and merged — exact for games
-  whose legal moves don't depend on whose turn it is (Nim), a conservative superset
-  otherwise (a superset can only add candidates to the max).
-- **Zero-sum flip.** The completed backup uses the pure `1 − max` form (the cross-player
-  `α`-blend in `solve_graph` defaults to the same thing when no cross-score data exists,
-  as in all current 2-player games). A future non-zero-sum game would need the blend
-  threaded through.
-- **Enumeration cost.** One legal-move sweep per stored board per *boundary* — built
-  once (`reply_graph`), shared by both healing passes, and chunked across the runner's
-  worker pool when one is lent (pure per-board game work; identical rows either way).
-  Each heal is then a batched rule-walk plus a vectorized value iteration; the evidence
-  solve is the same array form (with α read from the best edge's cross data, min-α on
-  ties). Measured on a 77k-board cyclic minichess DB, a full turn went 65–90s → 21s
-  (the solve alone: 31.6s → 0.4s). Runs only when the library has rules — the games
-  too big to have discovered anything yet are exactly the games that skip it.
+- **Resolved: mid-training dips.** An earlier architecture kept a second, *live*
+  library, refit every wave on still-drifting evidence values. Benched on this protocol
+  it dipped to 158 and 180 on random chunks: the completion pass occasionally ran with a
+  transiently degenerate live tree. The fix was deletion, not machinery —
+  training-time move selection never reads the concept signal (it explores by
+  uncertainty alone, which also keeps the evidence independent of the library), so the
+  live fitter's only real consumer was the one place it could do harm. With discovery
+  running only at cycle boundaries, the dips vanished.
+- **Library growth.** The library's two levels age oppositely. The *rules* are rebuilt
+  from scratch at every refit, so a concept that stops paying drops out of use
+  immediately. The *programs* (`kept`) are monotone: every refit seeds with all of them
+  and nothing is ever deleted — deliberately, because a transferred program may be
+  impossible to re-derive from the local data (3,000 games of 8-pile Nim cannot
+  re-discover the nim-sum), and one noisy deletion would lose it permanently. The cost: junk variants
+  admitted on one chunk's noisy values never leave (21 → 28 concepts over six chunks,
+  while the rules tighten to ~14 and play holds; the old continuous-search architecture
+  reached 72). Behaviorally cosmetic so far, but unbounded — trimming `kept` without
+  breaking the never-forget transfer guarantee is an open design question.
+- **Union over seats.** Legal replies are enumerated for every seat and merged — exact
+  for games whose legal moves don't depend on whose turn it is (Nim), a conservative
+  superset otherwise (extra candidates can only enter the max).
+- **Zero-sum flip.** The completed backup uses the pure `1 − max` form. (`solve_graph`'s
+  cross-player `α`-blend reduces to the same thing when no cross-score data exists, as
+  in all current 2-player games.) A non-zero-sum game would need the blend threaded
+  through.
+- **Enumeration cost.** One legal-move sweep per stored board per cycle — built once
+  (`reply_graph`), shared by both completion passes, chunked across the runner's worker
+  pool when one is lent. Each completion is then a batched rule-walk plus a vectorized
+  value iteration; the evidence solve is the same array form. Measured on a 77k-board
+  cyclic minichess DB, a full cycle went 65–90s → 21s (the solve alone: 31.6s → 0.4s).
+  Runs only when the library has rules — games too big to have discovered anything yet
+  are exactly the games that skip it.
 
 ## Where it lives
 
 | piece | place |
 |---|---|
 | batched pricing `L(r)` | `ConceptLibrary.values_for` |
-| the reply enumeration (built once per boundary) | `TransitionMemory.reply_graph` |
+| reply enumeration (built once per cycle) | `TransitionMemory.reply_graph` |
 | the completed backup | `TransitionMemory.complete_values` |
-| the loop ordering + bootstrap | `GameMemory.grow_concepts` |
+| cycle ordering + bootstrap | `GameMemory.grow_concepts` |
 | the doubling cadence | `SimulationRunner.run_batch` |
-| end-of-run turn | `run_training` passes the game |
+| end-of-run cycle | `run_training` passes the game |
 | inert default | `GameMemory.complete_values` returns 0 (Markov mode, empty library) |
