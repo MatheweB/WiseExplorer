@@ -93,7 +93,17 @@ class SimulationRunner:
         self.memory = memory
         self.num_workers = num_workers
         self._pool: Pool | None = None
-        self._wheel_turned_at = 0           # graph size at the last value-loop turn
+        # The wheel turns when the evidence has doubled SINCE THIS SESSION BEGAN — a
+        # resumed run must not re-turn for evidence that was already considered (on a
+        # large accumulated DB that stalls the first wave for minutes). The end-of-run
+        # turn in run_training still leaves every session with a considered fit.
+        self._wheel_turned_at = 0
+        if not memory.read_only:
+            try:
+                self._wheel_turned_at = memory.conn.execute(
+                    f"SELECT COUNT(*) FROM {memory.main_table}").fetchone()[0]
+            except Exception:
+                pass
 
         _active_runners.append(self)
         register_memory(memory)

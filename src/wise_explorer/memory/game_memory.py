@@ -468,25 +468,28 @@ class GameMemory(ABC):
             return 0
         from wise_explorer import synthesis
         self.solve_graph()
+        if game is None:
+            return self.concept_library.rebuild(*synthesis._boards_values(self))
+        if not self.concept_library.rules:
+            # bootstrap: completion can't lend prices from an empty head. On a rule-less
+            # boundary (cold start, or a freshly seeded library whose rules are cleared)
+            # the evidence fit IS the first beat. (Measured: skipping it leaves the first
+            # boundary fitting on raw evidence AND healing with it — 87/200 on seeded
+            # 8-pile Nim vs ~199 once rules exist.) If nothing pays, stop here: the heals
+            # would no-op and a second search over the same evidence would re-find the
+            # same nothing — this is what keeps a game whose data supports no concepts
+            # (minichess) from paying two full searches at every turn of the wheel.
+            self.concept_library.rebuild(*synthesis._boards_values(self))
+            if not self.concept_library.rules:
+                return len(self.concept_library.kept)
         # one structural enumeration serves the whole boundary: the loop's beats never
         # add boards or transitions, so both healing passes share this reply graph and
-        # every beat reuses its loaded boards
-        graph = self.reply_graph(game) if game is not None else None
-        boards = graph["boards"] if graph else None
-        if game is not None and not self.concept_library.rules:
-            # bootstrap: completion can't lend prices from an empty head. On the first
-            # boundary (cold start, or a freshly seeded library whose rules are cleared)
-            # read the notebook once to mint a provisional fit; the rebuild below then
-            # re-distills properly from the completed values. (Measured: skipping this
-            # leaves the first boundary's fit on raw evidence AND heals with it —
-            # 87/200 on seeded 8-pile Nim vs ~199 once rules exist.)
-            self.concept_library.rebuild(*synthesis._boards_values(self, boards))
-        if game is not None:
-            self.complete_values(game, graph)
-        B, V, M = synthesis._boards_values(self, boards)
+        # the refit reuses its loaded boards
+        graph = self.reply_graph(game)
+        self.complete_values(game, graph)
+        B, V, M = synthesis._boards_values(self, graph["boards"] if graph else None)
         kept = self.concept_library.rebuild(B, V, M)
-        if game is not None:
-            self.complete_values(game, graph)    # re-price with the rules just distilled
+        self.complete_values(game, graph)        # re-price with the rules just distilled
         return kept
 
     def _record_cross_scores(self, cross_scores: dict) -> None:
