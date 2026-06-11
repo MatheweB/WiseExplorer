@@ -1034,6 +1034,7 @@ def render(res: InventionResult, label: str = "", expand: bool = False) -> str:
         out.append("  (not enough data to invent from)")
         return "\n".join(out)
     names = {} if expand else _handles(res.concepts)
+    defined: set = set()                                # handles whose definition is printed
     toks = res.tokens
 
     def show(c: Concept) -> str:
@@ -1057,7 +1058,11 @@ def render(res: InventionResult, label: str = "", expand: bool = False) -> str:
                     out.append(f"        + {c}")
                 else:
                     h = names[str(_strip(c.expr))]
-                    out.append(f"        + {h} {c.op} {c.const}      {h} = {define(c)}")
+                    if h in defined:                    # same program, new threshold
+                        out.append(f"        + {h} {c.op} {c.const}")
+                    else:
+                        defined.add(h)
+                        out.append(f"        + {h} {c.op} {c.const}      {h} = {define(c)}")
                 m = meaning(c, toks, names=None if expand else names)
                 if m:
                     out.append(f"          ⟺ {m}")
