@@ -70,6 +70,7 @@ class GameMemory(ABC):
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA cache_size=-65536")
         self.conn.execute("PRAGMA synchronous=NORMAL")
+        self.conn.execute("PRAGMA busy_timeout=30000")  # overlapped wheel turns wait, not error
 
         if not read_only:
             self.conn.executescript(self._schema())

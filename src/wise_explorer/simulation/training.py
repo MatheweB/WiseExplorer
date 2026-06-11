@@ -62,7 +62,9 @@ def run_training(
         )
 
     # Discover from the converged values, then let the library heal the value
-    # graph's blind spots (the value loop)
+    # graph's blind spots (the value loop). Any in-flight mid-run turn joins first
+    # so two turns never interleave their writes.
+    runner.join_wheel()
     runner.memory.grow_concepts(game=game)
 
     return total
