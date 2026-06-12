@@ -65,6 +65,7 @@ class GameMemory(ABC):
 
         self._anchor_stats_cache: dict[int, Stats] = {}
         self._anchor_id_cache: dict[Any, int | None] = {}
+        self._certified_cache: set[str] | None = None
 
         self.conn = sqlite3.connect(str(self.db_path))
         self.conn.execute("PRAGMA journal_mode=WAL")
@@ -230,6 +231,19 @@ class GameMemory(ABC):
             "concepts": len(self.concept_library.kept),
             **self._get_mode_specific_info(),
         }
+
+    @property
+    def certified_hashes(self) -> set[str]:
+        """Boards with a game-countersigned certificate (experimental — see
+        docs/certificate-aware-exploration.md). Empty unless an experiment has
+        created and filled a ``certificates`` table. Loaded once per session."""
+        if self._certified_cache is None:
+            try:
+                self._certified_cache = {r[0] for r in self.conn.execute(
+                    "SELECT board_hash FROM certificates")}
+            except sqlite3.OperationalError:
+                self._certified_cache = set()
+        return self._certified_cache
 
     # -------------------------------------------------------------------------
     # Move Evaluation

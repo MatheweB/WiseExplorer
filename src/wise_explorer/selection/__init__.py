@@ -8,6 +8,7 @@ Provides the main entry points:
 
 from __future__ import annotations
 
+import os
 import random
 from math import ceil as _math_ceil, log as _math_log
 from typing import TYPE_CHECKING
@@ -16,6 +17,20 @@ import numpy as np
 
 from wise_explorer.core.types import Stats
 from wise_explorer.selection import training
+
+# Experimental (docs/certificate-aware-exploration.md): training-time selection
+# steers by the theory's verified epistemic state. Mode 1 damps moves that land on
+# game-certified boards (memory.certified_hashes). Mode 2 additionally boosts moves
+# landing on sharp-but-untested boards — the claims that actively need evidence.
+# Multipliers are relative within the candidate set, so positions whose every move
+# is certified renormalize to normal play. Competitive selection is untouched.
+try:
+    CERT_AWARE = int(os.environ.get("WISE_CERT_AWARE", "0") or "0")
+except ValueError:
+    CERT_AWARE = 0
+CERT_DAMP = 0.05
+CERT_BOOST = 2.0
+CERT_SHARP = 0.3
 
 if TYPE_CHECKING:
     from wise_explorer.games.game_base import GameBase
@@ -245,6 +260,22 @@ def select_move_for_training(
         for move, stats in anchor_moves:
             moves.append(move)
             weights.append(training.move_weight(stats, is_prune))
+
+    if CERT_AWARE:
+        certs = getattr(memory, "certified_hashes", set())
+        if certs or CERT_AWARE >= 2:
+            to_hash = {tuple(mv): h for mv, h, _ in
+                       memory._compute_move_hashes(game, valid_moves)}
+
+            def _mult(mk):
+                if to_hash.get(mk) in certs:
+                    return CERT_DAMP                    # proven: skip
+                if CERT_AWARE >= 2:
+                    L = evaluation.concept_scores.get(mk)
+                    if L is not None and abs(L - 0.5) >= CERT_SHARP:
+                        return CERT_BOOST               # claimed: needs testing
+                return 1.0                              # guessed: as today
+            weights = [w * _mult(tuple(m)) for m, w in zip(moves, weights)]
 
     if sum(weights) <= 1e-12:
         # No uncertainty signal to act on (unexplored frontier or fully
