@@ -72,6 +72,7 @@ class GameMemory(ABC):
 
         self.concept_library = ConceptLibrary(self.conn, self.read_only)   # invented concepts, persisted
         self.pool = None                    # a runner may lend its worker pool for cycle work
+        self._data_version = self._db_version()   # for refresh_if_stale (pool workers)
 
     # -------------------------------------------------------------------------
     # Abstract Methods (subclasses must implement)
@@ -129,6 +130,25 @@ class GameMemory(ABC):
     def certified_hashes(self):
         """Hashes of game-proven boards (a keys view; supports `in`)."""
         return self.certified_values.keys()
+
+    def _db_version(self) -> int:
+        """SQLite's change counter — bumps only when *another* connection commits."""
+        try:
+            return self.conn.execute("PRAGMA data_version").fetchone()[0]
+        except sqlite3.Error:
+            return 0
+
+    def refresh_if_stale(self) -> None:
+        """Reload the concept library and certificates iff another connection has
+        committed since the last check — i.e. the main process ran a value-loop
+        cycle. This is what lets a pool worker steer with concepts discovered
+        *during* training, not just those present when it started. Cheap: one
+        PRAGMA per call; the reload runs only when the DB actually changed."""
+        v = self._db_version()
+        if v != self._data_version:
+            self._data_version = v
+            self.concept_library._load()
+            self._certified_cache = None
 
     # -------------------------------------------------------------------------
     # Move Evaluation

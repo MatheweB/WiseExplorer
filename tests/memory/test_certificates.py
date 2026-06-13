@@ -115,3 +115,40 @@ class TestEvaluateMoves:
         # the winning move (to [1,1], nim-sum 0) must be proven 1.0
         winning = {mk: v for mk, v in ev.proven.items() if v == 1.0}
         assert winning
+
+
+class TestRefreshIfStale:
+    """A read-only handle (a pool worker) must pick up concepts/certificates the
+    writer commits after the handle was opened — so steering uses the live theory."""
+
+    def test_worker_picks_up_writer_concepts(self, tmp_path):
+        import wise_explorer.memory as Memory
+        from wise_explorer.games.nim import Nim
+        main = Memory.for_game(Nim(n=2), base_dir=str(tmp_path))
+        worker = Memory.open_readonly(str(main.db_path))
+        assert len(worker.concept_library.kept) == 0
+
+        # writer commits a concept + a certificate
+        main.concept_library.conn.execute(
+            "INSERT INTO concepts (id, expr_json, op, const, size) VALUES (0, '{}', '=', 0, 1)")
+        main.conn.execute("INSERT INTO certificates VALUES ('h', 1.0)")
+        main.conn.commit()
+
+        worker.concept_library._load = lambda: setattr(worker.concept_library, "kept", ["x"])
+        assert len(worker.concept_library.kept) == 0      # stale until refreshed
+        worker.refresh_if_stale()
+        assert worker.concept_library.kept == ["x"]       # reloaded on DB change
+        assert worker.certified_values == {"h": 1.0}      # certificate cache cleared + reloaded
+        main.close(); worker.close()
+
+    def test_no_reload_when_unchanged(self, tmp_path):
+        import wise_explorer.memory as Memory
+        from wise_explorer.games.nim import Nim
+        main = Memory.for_game(Nim(n=2), base_dir=str(tmp_path))
+        worker = Memory.open_readonly(str(main.db_path))
+        worker.refresh_if_stale()                         # sync versions
+        calls = []
+        worker.concept_library._load = lambda: calls.append(1)
+        worker.refresh_if_stale()                         # nothing committed since
+        assert calls == []                                # cheap: no reload
+        main.close(); worker.close()

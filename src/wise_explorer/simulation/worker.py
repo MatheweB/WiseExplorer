@@ -28,6 +28,10 @@ def run_game(job: GameJob) -> JobResult:
     if _worker_memory is None:
         raise RuntimeError("Worker not initialized")
 
+    # pick up concepts/certificates from any value-loop cycle the main process ran
+    # since this worker's last game, so steering uses the current theory, not a stale one
+    _worker_memory.refresh_if_stale()
+
     game = job.game
     players = sorted(job.player_map.keys())
     moves: dict[int, list[MoveRecord]] = {pid: [] for pid in players}
