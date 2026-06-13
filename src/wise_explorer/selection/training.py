@@ -11,22 +11,24 @@ from __future__ import annotations
 from wise_explorer.core.types import Stats
 
 
-def move_weight(stats: Stats, is_prune: bool) -> float:
+def move_weight(stats: Stats, is_prune: bool, drive: float | None = None) -> float:
     """Training weight for a single move.
 
-    A move's *exploration drive* is its uncertainty (``Stats.std_error``). We
-    spend that drive on whichever side of the value we are still pinning down:
+    A move's *exploration drive* defaults to its uncertainty
+    (``Stats.std_error``); callers may pass a wider estimate (e.g. including
+    theory–evidence disagreement). The drive is spent on whichever side of the
+    value the phase is pinning down:
 
-    - exploit phase (``is_prune=False``): ``std_error * mean_score``
+    - exploit phase (``is_prune=False``): ``drive * mean_score``
       (promising moves we are not yet sure of)
-    - prune phase (``is_prune=True``):    ``std_error * (1 - mean_score)``
+    - prune phase (``is_prune=True``):    ``drive * (1 - mean_score)``
       (unpromising moves we are not yet sure of)
 
-    The two weights are mirror images and sum to ``std_error``. Because the
-    weight scales with ``std_error``, sampling a move shrinks its weight
-    (self-correcting); on the unexplored frontier every move shares the maximal
-    ``std_error``, so weights tie and sampling spreads ~uniformly.
+    The two weights are mirror images and sum to the drive. Sampling a move
+    shrinks its uncertainty and hence its weight (self-correcting); on the
+    unexplored frontier all moves tie and sampling spreads ~uniformly.
     """
-    drive = stats.std_error
+    if drive is None:
+        drive = stats.std_error
     score = stats.mean_score
     return drive * (1.0 - score) if is_prune else drive * score

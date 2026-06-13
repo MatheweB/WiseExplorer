@@ -34,11 +34,8 @@ if TYPE_CHECKING:
     from wise_explorer.games.game_base import GameBase
     from wise_explorer.memory.game_memory import GameMemory
 
-# Steering multipliers (training only). WISE_STEERING=0 disables the tilt.
+# WISE_STEERING=0 reduces training drive to plain statistical uncertainty.
 STEERING = os.environ.get("WISE_STEERING", "1") != "0"
-PROVEN_DAMP = 0.05
-CLAIM_BOOST = 2.0
-CLAIM_SHARP = 0.3      # |concept − 0.5| at which a claim is sharp enough to chase
 
 
 def _effective_score(stats: Stats) -> float:
@@ -100,29 +97,35 @@ def select_move_for_training(
 ) -> np.ndarray:
     """Sample a move from the uncertainty-weighted distribution.
 
-    A move's exploration drive is its standard error, spent on whichever side
-    of the value the phase is pinning down (see training.move_weight). The
-    steering tilt then reallocates drive between territories; within a
-    territory, sampling stays purely uncertainty-driven.
+    A move's exploration drive is its total remaining uncertainty: statistical
+    noise and theory–evidence disagreement, combined in quadrature; zero once
+    the board is proven. The drive is spent on whichever side of the value the
+    phase is pinning down (see training.move_weight). Disagreement is
+    direction-blind — the theory can pull attention toward boards where it is
+    informative and untested, never toward boards it merely favors.
     """
     valid_moves = game.valid_moves()
     ev = memory.evaluate_moves(game, valid_moves)
     if not ev.moves:
         return np.asarray(random.choice(valid_moves))
 
-    def tilt(mk):
+    def drive(mk, stats):
+        se = stats.std_error
+        if not STEERING:
+            return se
         if mk in ev.proven:
-            return PROVEN_DAMP
+            return 0.0                       # a proof leaves nothing to learn
         c = ev.concept_scores.get(mk)
-        if c is not None and abs(c - 0.5) >= CLAIM_SHARP:
-            return CLAIM_BOOST
-        return 1.0
+        if c is None:
+            return se
+        gap = c - stats.mean_score
+        return (se * se + gap * gap) ** 0.5
 
     moves, weights = [], []
     for move, stats in ev.moves:
         moves.append(move)
-        w = training.move_weight(stats, is_prune)
-        weights.append(w * tilt(tuple(move)) if STEERING else w)
+        weights.append(training.move_weight(stats, is_prune,
+                                            drive=drive(tuple(move), stats)))
 
     if sum(weights) <= 1e-12:
         # no uncertainty left to spend — spread uniformly
