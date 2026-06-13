@@ -273,7 +273,6 @@ class TestTransitionInfo:
         assert info["mode"] == "transition"
         assert info["transitions"] == 0
         assert info["total_samples"] == 0
-        assert info["anchors"] == 0
 
     def test_with_data(self, transition_memory):
         """Returns correct statistics."""
@@ -281,58 +280,13 @@ class TestTransitionInfo:
             "INSERT INTO transitions (from_hash, to_hash, wins, ties, losses) "
             "VALUES ('a', 'b', 10, 5, 3)"
         )
-        transition_memory.conn.execute("INSERT INTO anchors VALUES (1, 'a→b', 10, 5, 3)")
         transition_memory.conn.commit()
 
         info = transition_memory.get_info()
         assert info["transitions"] == 1
         assert info["total_samples"] == 18
-        assert info["anchors"] == 1
 
 
-class TestTransitionAnchors:
-    """TransitionMemory anchor stats tests."""
-
-    def test_fallback_to_move_stats(self, transition_memory):
-        """Falls back to move stats when no anchor."""
-        transition_memory.conn.execute(
-            "INSERT INTO transitions (from_hash, to_hash, wins, ties, losses) "
-            "VALUES ('a', 'b', 10, 5, 3)"
-        )
-        transition_memory.conn.commit()
-
-        stats = transition_memory.get_anchor_stats("a", "b")
-        assert stats.wins == 10
-
-    def test_uses_anchor_stats(self, transition_memory):
-        """Uses anchor stats when available."""
-        transition_memory.conn.execute(
-            "INSERT INTO transitions (from_hash, to_hash, wins, anchor_id) "
-            "VALUES ('a', 'b', 10, 1)"
-        )
-        transition_memory.conn.execute("INSERT INTO anchors VALUES (1, 'a→b', 100, 50, 30)")
-        transition_memory.conn.commit()
-
-        stats = transition_memory.get_anchor_stats("a", "b")
-        assert stats.wins == 100
-
-
-class TestTransitionCaching:
-    """TransitionMemory cache tests."""
-
-    def test_anchor_id_cache(self, transition_memory):
-        """Anchor ID cache uses (from, to) tuple."""
-        transition_memory.conn.execute(
-            "INSERT INTO transitions (from_hash, to_hash, wins, anchor_id) VALUES ('a', 'b', 10, 1)"
-        )
-        transition_memory.conn.execute("INSERT INTO anchors VALUES (1, 'k', 10, 0, 0)")
-        transition_memory.conn.commit()
-
-        transition_memory.get_anchor_id("a", "b")
-        assert ("a", "b") in transition_memory._anchor_id_cache
-
-        result = transition_memory.get_anchor_id("a", "b")
-        assert result == 1
 
 
 # =============================================================================
@@ -377,61 +331,17 @@ class TestMarkovInfo:
         assert info["mode"] == "markov"
         assert info["unique_states"] == 0
         assert info["total_samples"] == 0
-        assert info["anchors"] == 0
 
     def test_with_data(self, markov_memory):
         """Returns correct statistics."""
         markov_memory.conn.execute(
             "INSERT INTO states (state_hash, wins, ties, losses) VALUES ('abc', 10, 5, 3)"
         )
-        markov_memory.conn.execute("INSERT INTO anchors VALUES (1, 'abc', 10, 5, 3)")
         markov_memory.conn.commit()
 
         info = markov_memory.get_info()
         assert info["unique_states"] == 1
         assert info["total_samples"] == 18
-        assert info["anchors"] == 1
 
 
-class TestMarkovAnchors:
-    """MarkovMemory anchor stats tests."""
 
-    def test_fallback_to_state_stats(self, markov_memory):
-        """Falls back to state stats when no anchor."""
-        markov_memory.conn.execute(
-            "INSERT INTO states (state_hash, wins, ties, losses) VALUES ('abc', 10, 5, 3)"
-        )
-        markov_memory.conn.commit()
-
-        stats = markov_memory.get_anchor_stats("any_from", "abc")
-        assert stats.wins == 10
-
-    def test_uses_anchor_stats(self, markov_memory):
-        """Uses anchor stats when available."""
-        markov_memory.conn.execute(
-            "INSERT INTO states (state_hash, wins, anchor_id) VALUES ('abc', 10, 1)"
-        )
-        markov_memory.conn.execute("INSERT INTO anchors VALUES (1, 'abc', 100, 50, 30)")
-        markov_memory.conn.commit()
-
-        stats = markov_memory.get_anchor_stats("any_from", "abc")
-        assert stats.wins == 100
-
-
-class TestMarkovCaching:
-    """MarkovMemory cache tests."""
-
-    def test_anchor_id_cache_uses_to_hash(self, markov_memory):
-        """Anchor ID cache keys on to_hash only."""
-        markov_memory.conn.execute(
-            "INSERT INTO states (state_hash, wins, anchor_id) VALUES ('abc', 10, 1)"
-        )
-        markov_memory.conn.execute("INSERT INTO anchors VALUES (1, 'abc', 10, 0, 0)")
-        markov_memory.conn.commit()
-
-        markov_memory.get_anchor_id("any_from", "abc")
-        assert "abc" in markov_memory._anchor_id_cache
-
-        # Different from_hash, same to_hash — should hit cache
-        result = markov_memory.get_anchor_id("different_from", "abc")
-        assert result == 1

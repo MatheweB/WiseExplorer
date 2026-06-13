@@ -122,7 +122,7 @@ def is_decisive(stats: Stats, base_rate: float = 0.5) -> bool:
     chance is below 5% (binomial test).
 
     The base_rate is what we'd expect without this specific pattern —
-    typically the anchor's pooled win rate. Higher base rates require
+    typically the position's expected win rate. Higher base rates require
     more unanimous samples to be considered decisive.
 
     Examples:

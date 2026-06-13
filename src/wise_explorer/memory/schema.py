@@ -1,32 +1,33 @@
 """
 Database schema for game memory.
 
-Two separate modes with no shared state:
+Two modes, each with its own database file:
 
-Non-Markov Mode (transition-based):
-    - Unit of learning: (from_hash, to_hash) pairs
-    - Path-dependent: V(s) = f(s_prev, s)
-    - Tables: transitions, anchors
+Non-Markov (transition-based): the unit of learning is a (from_hash, to_hash)
+pair — path-dependent, V(s) = f(s_prev, s). Markov (state-based): the unit is
+the destination state alone, V(s) = f(s).
 
-Markov Mode (state-based):
-    - Unit of learning: state_hash (destination only)
-    - Assumes the Markov property: V(s) = f(s)
-    - Tables: states, anchors
-
-Each mode has its own database file for isolation.
-They cluster fundamentally different units and converge to different equilibria.
+`propagated_score` holds the value engine's output (Bellman solve + library
+completion). The engine writes it and discovery fits it; move selection never
+reads it. `certificates` holds game-proven board values
+(docs/certified-forgetting-v3.md).
 """
 
 # Raw board arrays by hash — the concept library reads these to turn stored
-# transitions back into (board, value) examples it can invent from. (Markov mode
-# stores them too but never invents — kept for schema symmetry and a future
-# markov-mode invention path.)
+# transitions back into (board, value) examples it can invent from.
 _SCHEMA_BOARDS = """
 CREATE TABLE IF NOT EXISTS boards (
     board_hash TEXT PRIMARY KEY,
     board_data BLOB NOT NULL,
     board_rows INTEGER NOT NULL,
     board_cols INTEGER NOT NULL
+);
+"""
+
+_SCHEMA_CERTIFICATES = """
+CREATE TABLE IF NOT EXISTS certificates (
+    board_hash TEXT PRIMARY KEY,
+    value REAL NOT NULL
 );
 """
 
@@ -38,19 +39,9 @@ CREATE TABLE IF NOT EXISTS transitions (
     ties REAL DEFAULT 0.0,
     losses REAL DEFAULT 0.0,
     propagated_score REAL DEFAULT NULL,
-    anchor_id INTEGER,
     PRIMARY KEY (from_hash, to_hash)
 );
 CREATE INDEX IF NOT EXISTS idx_from_hash ON transitions(from_hash);
-CREATE INDEX IF NOT EXISTS idx_trans_anchor ON transitions(anchor_id);
-
-CREATE TABLE IF NOT EXISTS anchors (
-    anchor_id INTEGER PRIMARY KEY,
-    repr_key TEXT,
-    wins REAL DEFAULT 0.0,
-    ties REAL DEFAULT 0.0,
-    losses REAL DEFAULT 0.0
-);
 
 CREATE TABLE IF NOT EXISTS cross_scores (
     from_hash TEXT NOT NULL,
@@ -65,21 +56,11 @@ CREATE TABLE IF NOT EXISTS metadata (
     key TEXT PRIMARY KEY,
     value TEXT
 );
-""" + _SCHEMA_BOARDS
+""" + _SCHEMA_BOARDS + _SCHEMA_CERTIFICATES
 
 SCHEMA_MARKOV = """
 CREATE TABLE IF NOT EXISTS states (
     state_hash TEXT PRIMARY KEY,
-    wins REAL DEFAULT 0.0,
-    ties REAL DEFAULT 0.0,
-    losses REAL DEFAULT 0.0,
-    anchor_id INTEGER
-);
-CREATE INDEX IF NOT EXISTS idx_state_anchor ON states(anchor_id);
-
-CREATE TABLE IF NOT EXISTS anchors (
-    anchor_id INTEGER PRIMARY KEY,
-    repr_key TEXT,
     wins REAL DEFAULT 0.0,
     ties REAL DEFAULT 0.0,
     losses REAL DEFAULT 0.0
@@ -89,4 +70,4 @@ CREATE TABLE IF NOT EXISTS metadata (
     key TEXT PRIMARY KEY,
     value TEXT
 );
-""" + _SCHEMA_BOARDS
+""" + _SCHEMA_BOARDS + _SCHEMA_CERTIFICATES

@@ -57,7 +57,6 @@ class TestRequiredTablesTransitions:
 
     @pytest.mark.parametrize("table", [
         "transitions",
-        "anchors",
         "metadata",
     ])
     def test_table_exists(self, conn, table):
@@ -81,7 +80,6 @@ class TestRequiredTablesMarkov:
 
     @pytest.mark.parametrize("table", [
         "states", 
-        "anchors",
         "metadata",
     ])
     def test_table_exists(self, conn, table):
@@ -105,7 +103,6 @@ class TestRequiredIndexesTransitions:
 
     @pytest.mark.parametrize("index", [
         "idx_from_hash",
-        "idx_trans_anchor",
     ])
     def test_index_exists(self, conn, index):
         """Required index exists."""
@@ -126,7 +123,6 @@ class TestRequiredIndexesMarkov:
         conn.close()
 
     @pytest.mark.parametrize("index", [
-        "idx_state_anchor",
     ])
     def test_index_exists(self, conn, index):
         """Required index exists."""

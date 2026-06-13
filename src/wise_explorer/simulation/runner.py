@@ -177,7 +177,7 @@ class SimulationRunner:
         Run simulations in synchronized waves.
         
         Each wave of num_workers games completes fully, writes to DB, and
-        consolidates anchors before the next wave starts. This ensures
+        commits before the next wave starts. This ensures
         subsequent games see updated statistics.
         """
         if num_sims <= 0 or not swarms:
@@ -207,9 +207,6 @@ class SimulationRunner:
                 # Write results
                 transitions, _swaps = self._commit(wave_results)
                 total_transitions += transitions
-
-                # Consolidate anchors
-                self.memory.consolidate_anchors()
 
                 # Turn the value loop's wheel whenever the evidence graph has doubled
                 # (docs/value-loop.md): solve → heal → distill → re-heal. O(log N) turns

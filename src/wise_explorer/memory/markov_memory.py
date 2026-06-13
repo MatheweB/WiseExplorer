@@ -12,7 +12,7 @@ import sqlite3
 from collections import defaultdict
 from typing import Any
 
-from wise_explorer.core.types import Stats, Counts
+from wise_explorer.core.types import Stats
 from wise_explorer.memory.game_memory import GameMemory
 from wise_explorer.memory.schema import SCHEMA_MARKOV
 
@@ -38,53 +38,20 @@ class MarkovMemory(GameMemory):
         ).fetchone()
         return Stats(*row) if row else Stats()
 
-    def get_stats_by_key(self, key: str) -> Stats:
-        return self.get_state_stats(key)
-
-    def _cache_key(self, from_hash: str, to_hash: str) -> str:
-        return to_hash
-
-    def _fetch_anchor_id(self, from_hash: str, to_hash: str) -> int | None:
-        row = self.conn.execute(
-            "SELECT anchor_id FROM states WHERE state_hash=?",
-            (to_hash,)
-        ).fetchone()
-        return row[0] if row else None
-
-    def batch_get_anchor_ids(self, keys: list[str], cur: sqlite3.Cursor) -> dict[str, int | None]:
-        if not keys:
+    def batch_stats(self, from_hash: str, to_hashes: list[str]) -> dict[str, Stats]:
+        """Stats for the given destination states, one query."""
+        if not to_hashes:
             return {}
-        placeholders = ','.join('?' * len(keys))
-        rows = cur.execute(
-            f"SELECT state_hash, anchor_id FROM states WHERE state_hash IN ({placeholders})",
-            keys
-        ).fetchall()
-        return {row[0]: row[1] for row in rows}
-
-    def set_anchor_id(self, key: str, anchor_id: int, cur: sqlite3.Cursor) -> None:
-        cur.execute(
-            "UPDATE states SET anchor_id=? WHERE state_hash=?",
-            (anchor_id, key)
-        )
-
-    def key_to_repr(self, key: str) -> str:
-        return key[:16]
-
-    def collect_units(self) -> list[tuple[str, Counts]]:
+        placeholders = ",".join("?" * len(to_hashes))
         rows = self.conn.execute(
-            "SELECT state_hash, wins, ties, losses FROM states WHERE wins+ties+losses > 0"
+            f"SELECT state_hash, wins, ties, losses FROM states "
+            f"WHERE state_hash IN ({placeholders})",
+            to_hashes,
         ).fetchall()
-        return [(h, (w, t, l)) for h, w, t, l in rows]
+        return {r[0]: Stats(r[1], r[2], r[3]) for r in rows}
 
-    def write_anchor_ids(self, membership: dict[str, int], cur: sqlite3.Cursor) -> None:
-        cur.executemany(
-            "UPDATE states SET anchor_id=? WHERE state_hash=?",
-            [(aid, key) for key, aid in membership.items()]
-        )
-
-    def _commit_outcomes(self, transitions: dict[tuple[str, str], list[float]], cur: sqlite3.Cursor) -> tuple[list, dict]:
-        """Commit outcomes and return keys/deltas for anchor manager."""
-        # Aggregate by destination state
+    def _commit_outcomes(self, transitions: dict[tuple[str, str], list[float]], cur: sqlite3.Cursor) -> None:
+        # aggregate by destination state
         state_updates: dict[str, list[float]] = defaultdict(lambda: [0.0, 0.0, 0.0])
         for (_, to_hash), counts in transitions.items():
             state_updates[to_hash][0] += counts[0]
@@ -100,10 +67,6 @@ class MarkovMemory(GameMemory):
                 losses = losses + excluded.losses""",
             [(s, c[0], c[1], c[2]) for s, c in state_updates.items()],
         )
-
-        keys = list(state_updates.keys())
-        deltas = {k: (v[0], v[1], v[2]) for k, v in state_updates.items()}
-        return keys, deltas
 
     def _get_mode_specific_info(self) -> dict[str, Any]:
         states = self.conn.execute("SELECT COUNT(*) FROM states").fetchone()[0]

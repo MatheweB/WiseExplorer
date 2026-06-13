@@ -148,16 +148,6 @@ def any_memory(request, temp_db_path: Path) -> Generator[GameMemory, None, None]
 # Selection Fixtures
 # =============================================================================
 
-@pytest.fixture
-def anchor_stats_varied() -> dict[int, Stats]:
-    """Anchor stats with varied win/tie/loss distributions."""
-    return {
-        0: Stats(100, 10, 10),
-        1: Stats(10, 80, 10),
-        2: Stats(10, 10, 100),
-        3: Stats(1, 1, 1),
-    }
-
 
 @pytest.fixture
 def moves_with_stats() -> list[tuple[np.ndarray, Stats]]:

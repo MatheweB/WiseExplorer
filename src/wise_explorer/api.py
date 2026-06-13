@@ -139,8 +139,7 @@ def start_simulations(
                 base_units_text = "transitions"
             print(
                 f"Final: {base_units_num} {base_units_text}, "
-                f"{info['anchors']} anchors, "
-                f"{info['total_samples']} samples"
+                                f"{info['total_samples']} samples"
             )
 
             # Surface what training discovered (terse; full view via `invent`).

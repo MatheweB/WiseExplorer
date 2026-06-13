@@ -70,52 +70,7 @@ class TransitionMemory(GameMemory):
         ).fetchone()
         return Stats(*row) if row else Stats()
 
-    def get_stats_by_key(self, key: tuple[str, str]) -> Stats:
-        return self.get_move_stats(key[0], key[1])
-
-    def _cache_key(self, from_hash: str, to_hash: str) -> tuple[str, str]:
-        return (from_hash, to_hash)
-
-    def _fetch_anchor_id(self, from_hash: str, to_hash: str) -> int | None:
-        row = self.conn.execute(
-            "SELECT anchor_id FROM transitions WHERE from_hash=? AND to_hash=?",
-            (from_hash, to_hash)
-        ).fetchone()
-        return row[0] if row else None
-
-    def batch_get_anchor_ids(self, keys: list[tuple[str, str]], cur: sqlite3.Cursor) -> dict[tuple[str, str], int | None]:
-        result = {}
-        for from_hash, to_hash in keys:
-            row = cur.execute(
-                "SELECT anchor_id FROM transitions WHERE from_hash=? AND to_hash=?",
-                (from_hash, to_hash)
-            ).fetchone()
-            result[(from_hash, to_hash)] = row[0] if row else None
-        return result
-
-    def set_anchor_id(self, key: tuple[str, str], anchor_id: int, cur: sqlite3.Cursor) -> None:
-        cur.execute(
-            "UPDATE transitions SET anchor_id=? WHERE from_hash=? AND to_hash=?",
-            (anchor_id, key[0], key[1])
-        )
-
-    def key_to_repr(self, key: tuple[str, str]) -> str:
-        return f"{key[0][:8]}→{key[1][:8]}"
-
-    def collect_units(self) -> list[tuple[tuple[str, str], Counts]]:
-        rows = self.conn.execute(
-            "SELECT from_hash, to_hash, wins, ties, losses FROM transitions WHERE wins+ties+losses > 0"
-        ).fetchall()
-        return [((fh, th), (w, t, l)) for fh, th, w, t, l in rows]
-
-    def write_anchor_ids(self, membership: dict[tuple[str, str], int], cur: sqlite3.Cursor) -> None:
-        cur.executemany(
-            "UPDATE transitions SET anchor_id=? WHERE from_hash=? AND to_hash=?",
-            [(aid, key[0], key[1]) for key, aid in membership.items()]
-        )
-
-    def _commit_outcomes(self, transitions: dict[tuple[str, str], list[float]], cur: sqlite3.Cursor) -> tuple[list, dict]:
-        """Commit outcomes and return keys/deltas for anchor manager."""
+    def _commit_outcomes(self, transitions: dict[tuple[str, str], list[float]], cur: sqlite3.Cursor) -> None:
         cur.executemany(
             """INSERT INTO transitions (from_hash, to_hash, wins, ties, losses)
             VALUES (?,?,?,?,?)
@@ -125,10 +80,6 @@ class TransitionMemory(GameMemory):
                 losses = losses + excluded.losses""",
             [(fh, th, c[0], c[1], c[2]) for (fh, th), c in transitions.items()],
         )
-
-        keys = list(transitions.keys())
-        deltas = {k: (c[0], c[1], c[2]) for k, c in transitions.items()}
-        return keys, deltas
 
     def _record_cross_scores(self, cross_scores: dict) -> None:
         """Write accumulated cross-scores to the database."""
@@ -190,21 +141,13 @@ class TransitionMemory(GameMemory):
             return row[0]
         return None
 
-    def batch_get_moves_from(self, from_hash: str) -> dict[str, tuple[Stats, int | None, float | None]]:
-        """Fetch stats, anchor_id, and bell score for ALL transitions from a position.
-
-        Returns {to_hash: (Stats, anchor_id, propagated_score)} in a single query.
-        Replaces 3 individual queries per move (get_move_stats + get_anchor_id + get_propagated_score).
-        """
+    def batch_stats(self, from_hash: str, to_hashes: list[str]) -> dict[str, Stats]:
+        """All known transitions out of a position: {to_hash: stats}, one query."""
         rows = self.conn.execute(
-            "SELECT to_hash, wins, ties, losses, anchor_id, propagated_score "
-            "FROM transitions WHERE from_hash=?",
+            "SELECT to_hash, wins, ties, losses FROM transitions WHERE from_hash=?",
             (from_hash,)
         ).fetchall()
-        return {
-            r[0]: (Stats(r[1], r[2], r[3]), r[4], r[5])
-            for r in rows
-        }
+        return {r[0]: Stats(r[1], r[2], r[3]) for r in rows}
 
     def _compute_alpha(self, child_from: str, child_to: str) -> float:
         """

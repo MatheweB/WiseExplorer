@@ -2,7 +2,7 @@
 Game AI - Pattern-based learning for game AI using Monte Carlo simulations.
 
 This package provides tools for training game-playing agents through
-parallel simulations with Bayes factor clustering.
+parallel simulations.
 
 Quick Start:
     from wise_explorer import start_simulations, GameMemory
@@ -13,7 +13,7 @@ Quick Start:
     start_simulations(swarms, game, turn_depth=20, simulations=200, memory=memory)
 
 Modules:
-    core       - Fundamental types (Stats), hashing, Bayes factor statistics
+    core       - Fundamental types (Stats) and hashing
     memory     - GameMemory database for storing and retrieving learned moves
     selection  - Move selection strategies for training and inference
     simulation - Parallel game execution and training orchestration

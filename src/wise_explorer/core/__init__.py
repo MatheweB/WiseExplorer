@@ -16,7 +16,6 @@ from wise_explorer.core.types import (
     OUTCOME_INDEX,
 )
 from wise_explorer.core.hashing import hash_board
-from wise_explorer.core.bayes import compatible, similarity
 
 __all__ = [
     # Types
@@ -32,6 +31,4 @@ __all__ = [
     "OUTCOME_INDEX",
     # Functions
     "hash_board",
-    "compatible",
-    "similarity",
 ]

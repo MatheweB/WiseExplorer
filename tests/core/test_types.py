@@ -13,7 +13,6 @@ from wise_explorer.core.types import (
     SCORE_MIN, SCORE_MAX, SCORE_RANGE,
     OUTCOME_INDEX
 )
-from wise_explorer.memory.game_memory import UNEXPLORED_ANCHOR_ID
 
 
 class TestConstants:
@@ -30,10 +29,6 @@ class TestConstants:
         assert State.WIN in OUTCOME_INDEX
         assert State.TIE in OUTCOME_INDEX
         assert State.LOSS in OUTCOME_INDEX
-
-    def test_unexplored_anchor_negative(self):
-        """Sentinel is negative (won't conflict with real IDs)."""
-        assert UNEXPLORED_ANCHOR_ID < 0
 
 
 class TestStatsBasic:
