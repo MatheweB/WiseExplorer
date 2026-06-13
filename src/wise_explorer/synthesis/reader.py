@@ -5,7 +5,7 @@ from __future__ import annotations
 import numpy as np
 
 from wise_explorer.synthesis.exprs import (
-    Expr, Cell, Lit, BinOp, Named, Elem, Fold, CellDomain, BoardDomain,
+    Expr, Cell, Lit, BinOp, UnaryOp, Named, Elem, Fold, CellDomain, BoardDomain,
     GroupDomain, Concept, _OPS, _WORD, _FOLD,
 )
 from wise_explorer.synthesis.engine import Rule, InventionResult
@@ -215,6 +215,8 @@ def _pretty(e: Expr, names: dict[str, str]) -> str:
         if e.op in _FOLD:                                   # the associative ops
             return "(" + f" {w} ".join(_pretty(p, names) for p in _chain(e, e.op)) + ")"
         return f"({_pretty(e.a, names)} {w} {_pretty(e.b, names)})"
+    if isinstance(e, UnaryOp):
+        return f"{e.op}({_pretty(e.a, names)})"
     if isinstance(e, Fold):
         return f"fold({e.op}, {e.domain}, {_pretty(e.body, names)})"
     return s

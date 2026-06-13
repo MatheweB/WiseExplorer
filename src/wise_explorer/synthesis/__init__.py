@@ -10,9 +10,9 @@ Public entry point: ``invent(memory, game_id)`` -> ``InventionResult``.
 See ``docs/concept-invention.md`` and the ``invent`` CLI verb.
 """
 from wise_explorer.synthesis.exprs import (
-    Expr, Cell, Lit, BinOp, Named, Elem, Fold,
+    Expr, Cell, Lit, BinOp, UnaryOp, Named, Elem, Fold,
     CellDomain, BoardDomain, GroupDomain, Concept,
-    expr_to_dict, expr_from_dict, _OPS, _FOLD, _WORD,
+    expr_to_dict, expr_from_dict, _OPS, _FOLD, _UNARY, _WORD,
 )
 from wise_explorer.synthesis.engine import (
     Rule, RoundInfo, InventionResult, invent, invent_from_boards,

@@ -21,6 +21,11 @@ _OPS = {
 # How to say an op out loud — symbols a reader won't recognise become words.
 _WORD = {"⊕": "xor", "&": "and", "|": "or", "∣·∣": "dist"}
 
+# Unary projections: sgn(x) = sign (−1/0/+1), abs(x) = magnitude. On a signed board
+# they separate ownership from piece-type; over groups, sgn(played) turns a count into
+# a presence indicator (so fold(+, groups, sgn(played)) = "how many lines I'm in").
+_UNARY = {"sgn": np.sign, "abs": np.abs}
+
 
 class Expr:
     # every program reads the board ``B`` and, optionally, ``m`` = the token the last
@@ -55,6 +60,16 @@ class BinOp(Expr):
     def eval(self, B, m=None):
         return _OPS[self.op](self.a.eval(B, m), self.b.eval(B, m)).astype(np.int64)
     def __str__(self): return f"({self.a} {_WORD.get(self.op, self.op)} {self.b})"
+
+
+class UnaryOp(Expr):
+    """A unary projection (sgn / abs) of a sub-program. Costs +1 over what it wraps."""
+    def __init__(self, op: str, a: Expr):
+        self.op, self.a = op, a
+        self.size = 1 + a.size
+    def eval(self, B, m=None):
+        return _UNARY[self.op](self.a.eval(B, m)).astype(np.int64)
+    def __str__(self): return f"{self.op}({self.a})"
 
 
 class Named(Expr):
@@ -190,6 +205,8 @@ def expr_to_dict(e: Expr) -> dict:
         return {"t": "BinOp", "op": e.op, "a": expr_to_dict(e.a), "b": expr_to_dict(e.b)}
     if isinstance(e, Named):
         return {"t": "Named", "inner": expr_to_dict(e.inner)}
+    if isinstance(e, UnaryOp):
+        return {"t": "UnaryOp", "op": e.op, "a": expr_to_dict(e.a)}
     if isinstance(e, Elem):
         return {"t": "Elem", "j": e.j, "names": list(e.names)}
     if isinstance(e, Fold):
@@ -215,6 +232,8 @@ def expr_from_dict(d: dict) -> Expr:
         return BinOp(d["op"], expr_from_dict(d["a"]), expr_from_dict(d["b"]))
     if t == "Named":
         return Named(expr_from_dict(d["inner"]), np.empty(0, dtype=np.int64))
+    if t == "UnaryOp":
+        return UnaryOp(d["op"], expr_from_dict(d["a"]))
     if t == "Elem":
         return Elem(d["j"], tuple(d["names"]))
     if t == "Fold":

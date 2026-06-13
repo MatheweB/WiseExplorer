@@ -9,8 +9,8 @@ from dataclasses import dataclass
 import numpy as np
 
 from wise_explorer.synthesis.exprs import (
-    Expr, Cell, Lit, BinOp, Named, Elem, Fold,
-    CellDomain, BoardDomain, GroupDomain, Concept, _OPS, _FOLD,
+    Expr, Cell, Lit, BinOp, UnaryOp, Named, Elem, Fold,
+    CellDomain, BoardDomain, GroupDomain, Concept, _OPS, _UNARY, _FOLD,
 )
 
 
@@ -49,6 +49,16 @@ def _synthesize(terminals: list[Expr], B: np.ndarray, max_size: int, cap: int | 
     for t in terminals:
         add(t)
     for s in range(2, max_size + 1):
+        for u in _UNARY:                                  # sgn / abs of a smaller program
+            for ea, va in by_size[s - 1]:
+                if cap and len(by_size[s]) >= cap:
+                    break
+                vec = _UNARY[u](va).astype(np.int64)
+                key = vec.tobytes()
+                if key not in seen:
+                    e = UnaryOp(u, ea)
+                    seen[key] = e
+                    by_size[s].append((e, vec))
         for op in _OPS:
             for i in range(1, s - 1):
                 j = s - 1 - i
