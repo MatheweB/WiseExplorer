@@ -1,46 +1,42 @@
 """
-Game AI - Pattern-based learning for game AI using Monte Carlo simulations.
+Wise Explorer — zero-knowledge self-play that learns readable rules.
 
-This package provides tools for training game-playing agents through
-parallel simulations.
+Quick start:
+    from wise_explorer import train, play
+    from wise_explorer.memory import for_game
+    from wise_explorer.games import TicTacToe
 
-Quick Start:
-    from wise_explorer import start_simulations, GameMemory
-    
-    game = YourGame()
-    memory = GameMemory.for_game(game)
-    swarms = {1: [Agent() for _ in range(20)], 2: [Agent() for _ in range(20)]}
-    start_simulations(swarms, game, turn_depth=20, simulations=200, memory=memory)
+    game, memory = TicTacToe(), for_game(TicTacToe())
+    train(memory, game, games=2000)
+    play(memory, game, human_players=[1])
 
 Modules:
     core       - Fundamental types (Stats) and hashing
-    memory     - GameMemory database for storing and retrieving learned moves
-    selection  - Move selection strategies for training and inference
-    simulation - Parallel game execution and training orchestration
-    debug      - Visualization tools for development
+    memory     - GameMemory: stored transitions, the value loop, certificates
+    selection  - Move selection (the evidence ladder)
+    simulation - Parallel self-play and training orchestration
 """
 
 from wise_explorer.api import (
+    train,
+    play,
     start_simulations,
     GameMemory,
     select_move,
-    select_move_for_training,
     SimulationRunner,
     DEFAULT_WORKER_COUNT,
 )
-
 from wise_explorer.core import Stats
 
-__version__ = "1.0.0"
+__version__ = "2.0.0"
 
 __all__ = [
-    # Main API
+    "train",
+    "play",
     "start_simulations",
     "GameMemory",
     "select_move",
-    "select_move_for_training",
     "SimulationRunner",
     "DEFAULT_WORKER_COUNT",
-    # Types
     "Stats",
 ]

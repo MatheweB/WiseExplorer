@@ -1,15 +1,13 @@
 """
-Configuration and game registry.
+Game registry and paths.
 """
 
-import math
 from pathlib import Path
 
 import numpy as np
 
 from wise_explorer.games import TicTacToe, MiniChess, Nim
 from wise_explorer.games.game_state import GameState
-from wise_explorer.simulation import DEFAULT_WORKER_COUNT
 
 
 # ---------------------------------------------------------------------------
@@ -49,43 +47,27 @@ INITIAL_STATES = {
     ),
 }
 
-
-# ---------------------------------------------------------------------------
-# Default Settings
-# ---------------------------------------------------------------------------
-
-def _round_epochs_for_clean_split(epochs: int, num_players: int) -> int:
-    """Round epochs up to ensure clean division in training phases."""
-    divisor = num_players + 1
-    return math.ceil(epochs / divisor) * divisor
+# Max turns per simulated game, by game. The cap bounds cyclic games;
+# acyclic games end on their own well before it.
+TURN_DEPTHS = {
+    "tic_tac_toe": 20,
+    "minichess": 80,
+    "nim": 60,
+}
 
 
-class Config:
-    """Training configuration with sensible defaults."""
-
-    def __init__(
-        self,
-        game_name: str = "tic_tac_toe",
-        epochs: int = 100,
-        turn_depth: int = 40,
-        num_workers: int = DEFAULT_WORKER_COUNT,
-        gamma: float = 1.0,
-        max_ply: int | None = None,
-    ):
-        self.game_name = game_name
-        self.turn_depth = turn_depth
-        self.num_workers = num_workers
-        self.gamma = gamma
-        self.max_ply = max_ply
-
-        # Derive dependent values
-        game_class = GAMES[game_name]
-        num_players = game_class().num_players()
-
-        self.epochs = _round_epochs_for_clean_split(epochs, num_players)
-        self.num_agents = num_workers
-        self.simulations = self.epochs * self.num_agents
+def default_turn_depth(game_id: str) -> int:
+    return TURN_DEPTHS.get(game_id, 40)
 
 
-# Default configuration
-DEFAULT_CONFIG = Config()
+# Self-play games run from the current position before each AI move during
+# `play` — local learning. Light enough to be near-instant per move.
+PONDER = {
+    "tic_tac_toe": 100,
+    "minichess": 200,
+    "nim": 150,
+}
+
+
+def default_ponder(game_id: str) -> int:
+    return PONDER.get(game_id, 100)

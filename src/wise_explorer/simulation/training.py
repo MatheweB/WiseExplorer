@@ -21,15 +21,20 @@ def run_training(
     game: GameBase,
     simulations: int,
     turn_depth: int,
+    final_cycle: bool = True,
 ) -> int:
     """
-    Run training with 50/50 Prune vs Exploit split.
-    
+    Run training with a 50/50 prune/exploit split.
+
+    ``final_cycle=False`` skips the closing value-loop cycle; callers that
+    train in many small bursts (pondering, chunked progress reporting) rely on
+    the in-run doubling cadence and run one cycle themselves at the end.
+
     Returns total transitions recorded.
     """
     player_ids = sorted(swarms.keys())
     num_players = len(player_ids)
-    
+
     if simulations <= 0 or num_players == 0:
         return 0
 
@@ -41,7 +46,7 @@ def run_training(
     if prune_sims > 0:
         sims_per_player = prune_sims // num_players
         remainder = prune_sims % num_players
-        
+
         for i, pid in enumerate(player_ids):
             batch = sims_per_player + (1 if i < remainder else 0)
             if batch > 0:
@@ -61,10 +66,10 @@ def run_training(
             prune_players=set(),
         )
 
-    # Discover from the converged values, then let the library heal the value
-    # graph's blind spots (the value loop). Any in-flight mid-run turn joins first
-    # so two turns never interleave their writes.
-    runner.join_wheel()
-    runner.memory.grow_concepts(game=game)
+    if final_cycle:
+        # One closing value-loop cycle: solve, complete, fit, prove, forget.
+        # Any in-flight mid-run cycle joins first so writes never interleave.
+        runner.join_wheel()
+        runner.memory.grow_concepts(game=game)
 
     return total
