@@ -8,6 +8,7 @@ Subclasses implement the mode-specific storage.
 
 from __future__ import annotations
 
+import os
 import sqlite3
 from abc import ABC, abstractmethod
 from collections import defaultdict
@@ -330,21 +331,23 @@ class GameMemory(ABC):
         return boards, trans_scores
 
     def grow_concepts(self, game=None) -> int:
-        """Turn the value loop's wheel once: evidence → heal → distill → re-heal.
+        """Run one value-loop cycle: solve → complete → fit → complete → prove → forget.
 
-        ``solve_graph`` re-derives every value from raw counts (evidence re-anchors the
-        loop each cycle), ``complete_values`` lets the library price the legal replies
-        nobody has played so the backup stops trusting blind spots, and ``rebuild`` then
-        fits discovery on the completed values — the system's best current belief — before
-        a final heal with the rules just distilled. (Measured, seeded 8-pile Nim: fitting
-        on evidence-only values instead collapses play 80→32/200 — with ~93% of positions
-        never visited the un-healed backup is mostly noise and the refit shreds the
-        transferred rules. Fitting on healed values holds ~99%. The guard against
-        self-echo is the evidence re-anchor plus the MDL gate, not starving discovery of
-        its own signal.)
+        ``solve_graph`` recomputes every value from raw counts (the evidence re-enters
+        each cycle), ``complete_values`` prices the legal replies nobody has played with
+        the library and pins proven boards to their certified values, and ``rebuild``
+        fits discovery on those completed values — the system's best current belief.
+        ``frontier_certify`` then proves whatever now chains to the game's terminals,
+        and ``collapse_proven`` deletes the rows those proofs reproduce
+        (WISE_COLLAPSE=0 disables deletion).
 
-        This is discovery's only venue — between calls the library is the last considered
-        fit. Without a ``game`` the heals are skipped (values stay evidence-only)."""
+        Fitting completed values rather than evidence-only values is measured, not
+        stylistic: on seeded 8-pile Nim the evidence-only fit collapses (most positions
+        unvisited, so the bare backup is mostly noise). The guards against self-echo are
+        the raw-count re-anchor and the MDL gate.
+
+        This is discovery's only venue — between calls the library is the last fit.
+        Without a ``game`` the completion passes are skipped."""
         if self.read_only or getattr(self, "is_markov", False):
             return 0
         from wise_explorer import synthesis
@@ -363,14 +366,17 @@ class GameMemory(ABC):
             self.concept_library.rebuild(*synthesis._boards_values(self))
             if not self.concept_library.rules:
                 return len(self.concept_library.kept)
-        # one structural enumeration serves the whole boundary: the loop's beats never
-        # add boards or transitions, so both healing passes share this reply graph and
-        # the refit reuses its loaded boards
+        # one structural enumeration serves the whole cycle: its steps never add
+        # boards or transitions, so every pass shares this reply graph and the
+        # refit reuses its loaded boards
         graph = self.reply_graph(game)
         self.complete_values(game, graph)
         B, V, M = synthesis._boards_values(self, graph["boards"] if graph else None)
         kept = self.concept_library.rebuild(B, V, M)
         self.complete_values(game, graph)        # re-price with the rules just distilled
+        self.frontier_certify(game, graph)       # prove what now chains to terminals
+        if os.environ.get("WISE_COLLAPSE", "1") != "0":
+            self.collapse_proven()               # forget what the proofs reproduce
         return kept
 
     def _record_cross_scores(self, cross_scores: dict) -> None:
@@ -391,6 +397,14 @@ class GameMemory(ABC):
 
     def complete_values(self, game, graph=None) -> int:
         """Library-completed value pass. No-op for Markov memory."""
+        return 0
+
+    def frontier_certify(self, game, graph=None) -> int:
+        """Inductive proof pass. No-op for Markov memory."""
+        return 0
+
+    def collapse_proven(self, eps: float = 0.25) -> int:
+        """Proof-licensed deletion. No-op for Markov memory."""
         return 0
 
     def _commit(self, transitions: dict[tuple[str, str], list[float]]) -> int:

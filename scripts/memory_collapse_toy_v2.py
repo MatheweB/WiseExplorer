@@ -41,8 +41,8 @@ PRICE_EPS = 0.1     # a certificate/refutation survives while the price moves le
 
 
 def set_steering(on: bool) -> None:
-    os.environ["WISE_CERT_AWARE"] = "2" if on else "0"
-    selection_mod.CERT_AWARE = 2 if on else 0
+    os.environ["WISE_STEERING"] = "1" if on else "0"
+    selection_mod.STEERING = on
 
 
 def price_all(mem, adapter) -> dict[str, float]:

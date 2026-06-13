@@ -459,7 +459,7 @@ class TransitionMemory(GameMemory):
             novel_m = np.zeros(0, dtype=np.int64)
 
         return {
-            "boards": boards, "index": index, "V0": V0,
+            "boards": boards, "index": index, "V0": V0, "fixed": fixed,
             "known": known_a, "starts": starts,
             "has_kids": (starts < ends) & ~fixed,
             "novel_rows": np.array(novel_of, dtype=np.int64),
@@ -501,16 +501,25 @@ class TransitionMemory(GameMemory):
             consts[graph["novel_rows"]] = prices
             priced = int(np.count_nonzero(~np.isnan(prices)))
 
+        # proven boards are pinned to their certified value — ground truth
+        # outranks any backup
+        V = graph["V0"].copy()
+        pinned = graph["fixed"].copy()
+        for h, v in self.certified_values.items():
+            i = index.get(h)
+            if i is not None:
+                V[i] = v
+                pinned[i] = True
+
         # the same backup as solve_graph — V(b) = 1 − max over replies — but the max now
         # ranges over every legal reply, library-priced where unvisited
-        V = graph["V0"].copy()
         for _ in range(200):
             cand = np.where(known >= 0, V[np.maximum(known, 0)], consts)
             cand = np.where(np.isnan(cand), -np.inf, cand)
             best = np.full(n, -np.inf)
             if has_kids.any():
                 best[has_kids] = np.maximum.reduceat(cand, starts[has_kids])
-            newV = np.where(has_kids & np.isfinite(best), 1.0 - best, V)
+            newV = np.where(has_kids & np.isfinite(best) & ~pinned, 1.0 - best, V)
             if np.allclose(newV, V, atol=1e-9):
                 V = newV
                 break
@@ -522,3 +531,88 @@ class TransitionMemory(GameMemory):
         )
         self.conn.commit()
         return priced
+
+    def frontier_certify(self, game, graph: dict | None = None) -> int:
+        """Prove board values by induction from the game's terminals.
+
+        A board is proven once every legal reply is proven; its value is then
+        the exact backup 1 − max(reply values). No play is involved — the game
+        supplies moves and terminal verdicts, prior certificates supply the
+        inductive step — so there is nothing the theory can bias; its prices
+        appear nowhere in the check. Zero-sum backup; cyclic regions never
+        satisfy the all-replies-proven condition and are simply left unproven.
+
+        Writes new certificates and returns how many were added.
+        (docs/certified-forgetting-v3.md)
+        """
+        if graph is None:
+            graph = self.reply_graph(game)
+        if graph is None:
+            return 0
+        index, known, starts = graph["index"], graph["known"], graph["starts"]
+        n = len(graph["V0"])
+
+        proven = np.full(n, np.nan)
+        proven[graph["fixed"]] = graph["V0"][graph["fixed"]]
+        certs = self.certified_values
+        for h, v in certs.items():
+            i = index.get(h)
+            if i is not None:
+                proven[i] = v
+
+        # unstored replies count as proven only when terminal (their verdict
+        # is the game's own)
+        novel_vals = np.full(len(known), np.nan)
+        if len(graph["novel_boards"]):
+            shape = game.get_state().board.shape
+            seats = range(1, game.num_players() + 1)
+            vals = []
+            for raw in graph["novel_boards"]:
+                probe = game.deep_clone()
+                probe.set_state(GameState(
+                    raw.reshape(shape).astype(np.int8).copy(), current_player=1))
+                vals.append(max(OUTCOME_SCORE[probe.get_result(p)] for p in seats)
+                            if probe.is_over() else np.nan)
+            novel_vals[graph["novel_rows"]] = vals
+
+        hk = np.flatnonzero(graph["has_kids"])
+        if len(hk):
+            seg = starts[hk]
+            while True:
+                cand = np.where(known >= 0, proven[np.maximum(known, 0)], novel_vals)
+                gaps = np.isnan(cand)
+                all_proven = np.maximum.reduceat(gaps.astype(np.int8), seg) == 0
+                ready = all_proven & np.isnan(proven[hk])
+                if not ready.any():
+                    break
+                mx = np.maximum.reduceat(np.where(gaps, -np.inf, cand), seg)
+                proven[hk[ready]] = 1.0 - mx[ready]
+
+        new = [(h, float(proven[i])) for h, i in index.items()
+               if h not in certs and not np.isnan(proven[i])]
+        if new:
+            self.conn.cursor().executemany(
+                "INSERT OR REPLACE INTO certificates VALUES (?,?)", new)
+            self.conn.commit()
+            self._certified_cache = None
+        return len(new)
+
+    def collapse_proven(self, eps: float = 0.25) -> int:
+        """Delete transitions whose completed value the proof reproduces.
+
+        Sound regardless of the library's state: the comparison is against the
+        certified value, which is the game's. Rows the proof cannot reproduce
+        stay — they mark stale values, not deletable redundancy. Returns the
+        number of rows deleted.
+        """
+        cur = self.conn.cursor()
+        cur.execute(
+            "DELETE FROM transitions WHERE propagated_score IS NOT NULL "
+            "AND EXISTS (SELECT 1 FROM certificates c "
+            "WHERE c.board_hash = transitions.to_hash "
+            "AND ABS(transitions.propagated_score - c.value) <= ?)",
+            (eps,),
+        )
+        deleted = cur.rowcount
+        self.conn.commit()
+        return deleted
