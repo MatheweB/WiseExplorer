@@ -1,8 +1,9 @@
 # v3 — the unified loop: steer, prove, forget
 
-> Status: validated on Nim-4 and Tic-Tac-Toe (`scripts/memory_collapse_toy_v3.py`);
-> measured results at the bottom. v1 validated collapse + self-heal, v2 validated
-> steering; v3 composes them and replaces rollout confirmations with proofs.
+> Status: validated on Nim-4, Nim-6 and Tic-Tac-Toe; probed at Nim-8
+> (`scripts/memory_collapse_toy_v3.py`); measured results at the bottom. v1
+> validated collapse + self-heal, v2 validated steering; v3 composes them and
+> replaces rollout confirmations with proofs.
 
 ## The whole idea in one paragraph
 
@@ -117,3 +118,32 @@ Two insights from the run, both pointing at the next iteration:
    the ~31% the rollout era found by playing games, now computed in one vectorized
    pass per cycle. Those mispriced-but-proven boards are also a ready-made target
    set for discovery: ground-truth labels the MDL search could fit directly.
+
+## Later findings (ablation + scale probes)
+
+**Play needs neither bell nor anchors in this loop.** Hiding both from competitive
+selection (concepts + raw counts only, same seeds, same eval) *improved* TTT play at
+every checkpoint (e.g. 238 vs 226), and under corruption the ablated arm fell less far
+(80/300 vs 51) — because bell's gaps are filled by the library, a corrupted theory
+flows *through* bell, while raw counts are the one signal no theory can touch. Bell's
+enduring job is internal: producing the completed values discovery fits (removing it
+there is the measured clean-room collapse). The play-time ladder is simply:
+proofs → theory → raw statistics. Anchors earned nothing measurable; their remaining
+candidate role is the pre-theory opening of training.
+
+**Scale (1,000-game probes).** Nim-6 (5,040 positions): everything works unmodified —
+theory found, 2,567 boards proven, 40% collapsed, corruption recovered in one chunk.
+Nim-8 (362,880 positions) taught three things:
+
+1. **Steered discovery reached further than unsteered ever has**: the nim-sum was
+   found from scratch in ~1,600 steered games and play hit 200/200 — the documented
+   unsteered baseline finds nothing in 3,000 games. (Single run; replication pending.)
+2. **The audit's authority is proportional to frontier coverage.** With proofs
+   covering only a near-terminal shell (0.7% of the space), "theory agrees with every
+   proof" no longer implies globally right — a shell-fitting theory passed the audit
+   while playing at 32/200. On games the frontier spans, the audit is strong.
+3. **Recovery time is re-discovery time.** Where statistics cover ~nothing, a
+   corrupted theory costs however long discovery takes to re-find the rule (the climb
+   was monotone and unsealed — 0 → 32 → 65 in two chunks — just not finished). The
+   safety floor held throughout: a weak theory is never granted deletion authority,
+   because collapse answers to proofs, not to the library.

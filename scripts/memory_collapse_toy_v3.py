@@ -146,9 +146,18 @@ def main():
     ap.add_argument("--chunks", type=int, default=2)
     ap.add_argument("--chunk-games", type=int, default=300)
     ap.add_argument("--reuse", action="store_true")
+    ap.add_argument("--ablate", action="store_true",
+                    help="hide bell + anchor from competitive selection: play "
+                         "stands on concepts + raw stats (+ proofs via the loop)")
     a = ap.parse_args()
     adapter = NimAdapter(a.piles) if a.game == "nim" else TTTAdapter()
     random.seed(7); np.random.seed(7)
+    if a.ablate:
+        import os
+        import wise_explorer.selection as selection_mod
+        os.environ["WISE_ABLATE"] = "bell,anchor"
+        selection_mod.ABLATE = {"bell", "anchor"}
+        print("── ABLATION: competitive selection sees neither bell nor anchors ──")
 
     proven: dict[bytes, float] = {}
 

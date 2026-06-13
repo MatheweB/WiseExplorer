@@ -76,21 +76,39 @@ class NimAdapter:
             return "no opinion"
         return f"{'HEALTHY' if vw > vl else 'WRONG'} ({vw:.2f}/{vl:.2f})"
 
+    def _check(self, mem, b) -> bool:
+        g = self.new_game()
+        g.set_state(GameState(b.copy(), current_player=1))
+        mv = select_move(g, mem)
+        nb = b.copy()
+        nb[int(mv[0])] -= int(mv[1])
+        return _nim_sum(nb) == 0
+
     def optimal_rate(self, mem) -> tuple[int, int]:
-        """EXACT: every winning position, no sampling."""
-        opt = tot = 0
-        for tup in itertools.product(*(range(i + 2) for i in range(self.piles))):
-            b = np.array(tup, dtype=np.int8)
+        """Exact over every winning position when the space is small; a seeded
+        200-position sample on bigger boards."""
+        space = 1
+        for i in range(self.piles):
+            space *= i + 2
+        if space <= 1000:
+            opt = tot = 0
+            for tup in itertools.product(*(range(i + 2) for i in range(self.piles))):
+                b = np.array(tup, dtype=np.int8)
+                if b.sum() == 0 or _nim_sum(b) == 0:
+                    continue
+                tot += 1
+                opt += self._check(mem, b)
+            return opt, tot
+        rng = random.Random(7)
+        opt = tried = 0
+        while tried < 200:
+            b = np.array([rng.randint(0, i + 1) for i in range(self.piles)],
+                         dtype=np.int8)
             if b.sum() == 0 or _nim_sum(b) == 0:
                 continue
-            tot += 1
-            g = self.new_game()
-            g.set_state(GameState(b.copy(), current_player=1))
-            mv = select_move(g, mem)
-            nb = b.copy()
-            nb[int(mv[0])] -= int(mv[1])
-            opt += _nim_sum(nb) == 0
-        return opt, tot
+            tried += 1
+            opt += self._check(mem, b)
+        return opt, tried
 
 
 def _nim_sum(b) -> int:
