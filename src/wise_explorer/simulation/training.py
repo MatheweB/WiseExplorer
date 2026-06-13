@@ -68,8 +68,6 @@ def run_training(
 
     if final_cycle:
         # One closing value-loop cycle: solve, complete, fit, prove, forget.
-        # Any in-flight mid-run cycle joins first so writes never interleave.
-        runner.join_wheel()
         runner.memory.grow_concepts(game=game)
 
     return total

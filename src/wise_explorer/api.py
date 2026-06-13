@@ -59,7 +59,6 @@ def train(
             done += batch
             if progress:
                 progress(done, games, memory)
-        runner.join_wheel()
         memory.grow_concepts(game=game)
     if progress:
         progress(games, games, memory)

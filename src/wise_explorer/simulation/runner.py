@@ -55,18 +55,6 @@ def register_memory(memory: GameMemory) -> None:
         _active_memories.append(memory)
 
 
-def _wheel_worker(db_path: str, game):
-    """Run one value-loop turn in its own process. Training never reads the turn's
-    outputs (selection explores by uncertainty alone), so the turn can overlap play —
-    its results matter at the next turn and at evaluation, both of which join first."""
-    from wise_explorer.memory import TransitionMemory
-    mem = TransitionMemory(db_path)
-    try:
-        mem.grow_concepts(game=game)
-    finally:
-        mem.close()
-
-
 def _worker_init_wrapper(db_path: str, is_markov: bool):
     """Workers ignore SIGINT — only main process handles Ctrl+C."""
     signal.signal(signal.SIGINT, signal.SIG_IGN)
@@ -110,7 +98,6 @@ class SimulationRunner:
         # large accumulated DB that stalls the first wave for minutes). The end-of-run
         # turn in run_training still leaves every session with a considered fit.
         self._wheel_turned_at = 0
-        self._wheel_proc: mp.Process | None = None
         if not memory.read_only:
             try:
                 self._wheel_turned_at = memory.conn.execute(
@@ -143,19 +130,12 @@ class SimulationRunner:
         return self._pool
 
     def join_wheel(self) -> None:
-        """Wait for any in-flight value-loop turn — call before a synchronous turn
-        or evaluation, so library writes never interleave."""
-        if self._wheel_proc is not None:
-            self._wheel_proc.join()
-            self._wheel_proc = None
-            self.memory.concept_library._load()      # pick up what the turn persisted
+        """No-op — value-loop cycles now run synchronously in :meth:`run_batch`.
+        Kept for call-site compatibility."""
 
     def shutdown(self, force: bool = False) -> None:
         if self in _active_runners:
             _active_runners.remove(self)
-        if self._wheel_proc is not None:
-            (self._wheel_proc.terminate if force else self._wheel_proc.join)()
-            self._wheel_proc = None
 
         if self._pool is None:
             return
@@ -208,26 +188,17 @@ class SimulationRunner:
                 transitions, _swaps = self._commit(wave_results)
                 total_transitions += transitions
 
-                # Turn the value loop's wheel whenever the evidence graph has doubled
-                # (docs/value-loop.md): solve → heal → distill → re-heal. O(log N) turns
-                # per run, so early knowledge starts healing the backup long before the
-                # end-of-run turn — measured on seeded 8-pile Nim: a single end-of-run
-                # turn after 3,000 games leaves bell unhealed throughout and scores
-                # 176/400 optimal; chunked turns hold ~200/200 per chunk.
+                # Run one value-loop cycle (docs/value-loop.md) whenever the evidence
+                # graph has doubled: solve → complete → fit → prove → forget. O(log N)
+                # cycles per run, so discovery and forgetting happen *during* training,
+                # not only at the end. Synchronous and in-process — cycles are fast
+                # post-refactor (~1s), and running here (while the pool is idle between
+                # waves) avoids the cross-process DB contention a background worker hit.
                 graph = self.memory.conn.execute(
                     f"SELECT COUNT(*) FROM {self.memory.main_table}").fetchone()[0]
                 if graph >= max(2 * self._wheel_turned_at, synthesis.MIN_BOARDS):
-                    # mid-run turns overlap play in their own process; one at a time,
-                    # so two turns never interleave their library writes
-                    if self._wheel_proc is None or not self._wheel_proc.is_alive():
-                        if self._wheel_proc is not None:
-                            self._wheel_proc.join()
-                        self._wheel_proc = mp.Process(
-                            target=_wheel_worker,
-                            args=(str(self.memory.db_path), game.deep_clone()),
-                            daemon=True)
-                        self._wheel_proc.start()
-                        self._wheel_turned_at = graph
+                    self.memory.grow_concepts(game=game)
+                    self._wheel_turned_at = graph
 
                 job_idx += len(wave_jobs)
 
