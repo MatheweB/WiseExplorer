@@ -76,7 +76,21 @@ def run_train(argv: list[str]) -> None:
     print("\n")
     summary = memory.concept_library.summary()
     print(summary if summary else "(no concepts discovered yet — try more games)")
+    _print_optimal_rate(memory, game)
     memory.close()
+
+
+def _print_optimal_rate(memory, game) -> None:
+    """Print the optimal-move rate against the game's oracle, if one exists."""
+    if memory.is_markov:
+        return
+    from wise_explorer.benchmark import optimal_rate
+    result = optimal_rate(memory, game)
+    if result is None:
+        return
+    opt, total, desc = result
+    pct = 100 * opt / total if total else 0
+    print(f"\nOptimal play: {opt}/{total} ({pct:.1f}%) — {desc} (vs oracle).")
 
 
 # ---------------------------------------------------------------------------
@@ -85,19 +99,20 @@ def run_train(argv: list[str]) -> None:
 
 def run_play(argv: list[str]) -> None:
     p = argparse.ArgumentParser(prog="wise-explorer play",
-                                description="Play against the AI (it learns as you play).")
+                                description="Play against the AI (uses trained rules; "
+                                            "--learn to learn while playing).")
     p.add_argument("--game", "-g", choices=GAME_CHOICES, default="tic_tac_toe")
     p.add_argument("--size", "-n", type=int, default=None,
                    help="Board size where supported (Nim: piles; default 4)")
     p.add_argument("--players", "-p", default=None,
                    help="Human seats, comma-separated (default: 1)")
     p.add_argument("--watch", action="store_true",
-                   help="AI plays every seat — watch it play (and learn from) itself")
+                   help="AI plays every seat — watch it play itself")
+    p.add_argument("--learn", action="store_true",
+                   help="Learn while playing: self-play from the current position "
+                        "before each AI move (off by default)")
     p.add_argument("--ponder", type=int, default=None,
-                   help="Self-play games per AI move, learned from the current "
-                        "position (default: per-game; 0 = frozen)")
-    p.add_argument("--no-learn", action="store_true",
-                   help="Play from existing memory only; learn nothing")
+                   help="Self-play games per AI move (implies --learn); 0 = frozen")
     p.add_argument("--explain", action="store_true",
                    help="Show why each AI move was chosen")
     p.add_argument("--verbose", action="store_true",
@@ -110,16 +125,50 @@ def run_play(argv: list[str]) -> None:
     memory = Memory.for_game(game, base_dir=MEMORY_DIR, markov=a.markov)
     humans = [] if a.watch else parse_human_players(
         a.players, game.num_players(), game.game_id())
-    ponder = 0 if a.no_learn else (
-        a.ponder if a.ponder is not None else default_ponder(game.game_id()))
+    # frozen by default; --ponder N or --learn opts into live learning
+    if a.ponder is not None:
+        ponder = a.ponder
+    elif a.learn:
+        ponder = default_ponder(game.game_id())
+    else:
+        ponder = 0
 
     info = memory.get_info()
     if info.get("transitions", info.get("unique_states", 0)) == 0:
         print(f"(No training yet for {game.game_id()}. "
-              f"Run `wise-explorer train -g {a.game}` for stronger play.)\n")
+              f"Run `wise-explorer train -g {a.game}` for a strong opponent.)\n")
 
     play(memory, game, human_players=humans, ponder=ponder,
          explain=a.explain, verbose=a.verbose, workers=a.workers)
+
+
+def run_eval(argv: list[str]) -> None:
+    """Score a trained model's play against a perfect oracle (Nim, Tic-Tac-Toe)."""
+    from wise_explorer.benchmark import optimal_rate
+
+    p = argparse.ArgumentParser(
+        prog="wise-explorer eval",
+        description="Optimal-move rate of a trained model vs a perfect solver.")
+    p.add_argument("--game", "-g", choices=GAME_CHOICES, default="nim")
+    p.add_argument("--size", "-n", type=int, default=None,
+                   help="Board size where supported (Nim: piles; default 4)")
+    a = p.parse_args(argv)
+
+    game = create_game(a.game, size=a.size)
+    db_path = Path(MEMORY_DIR) / f"{game.game_id()}.db"
+    if not db_path.exists():
+        print(f"No trained model for '{game.game_id()}'. Train one:")
+        print(f"  wise-explorer train -g {a.game} --games 2000")
+        return
+    memory = Memory.for_game(game, base_dir=MEMORY_DIR, read_only=True)
+    result = optimal_rate(memory, game)
+    if result is None:
+        print(f"No oracle available for '{game.game_id()}'.")
+    else:
+        opt, total, desc = result
+        pct = 100 * opt / total if total else 0
+        print(f"{game.game_id()}: {opt}/{total} ({pct:.1f}%) optimal — {desc} (vs oracle).")
+    memory.close()
 
 
 # ---------------------------------------------------------------------------
@@ -288,8 +337,9 @@ def run_transfer(argv: list[str]) -> None:
 
 _HELP = """wise-explorer — zero-knowledge self-play that learns readable rules
 
-  wise-explorer play   [-g GAME]   play against the AI (default; it learns as you play)
+  wise-explorer play   [-g GAME]   play against the AI (default; uses trained rules)
   wise-explorer train  [-g GAME]   run self-play training
+  wise-explorer eval   [-g GAME]   score the trained model vs a perfect oracle
   wise-explorer invent [-g GAME]   show the concepts it discovered
   wise-explorer transfer           discover on 4-pile Nim, play big Nim zero-shot
 
@@ -307,7 +357,7 @@ def main() -> None:
     else:
         verb, rest = "play", argv
 
-    commands = {"play": run_play, "train": run_train,
+    commands = {"play": run_play, "train": run_train, "eval": run_eval,
                 "invent": run_invent, "transfer": run_transfer}
     if verb not in commands:
         print(f"Unknown command '{verb}'.\n")
