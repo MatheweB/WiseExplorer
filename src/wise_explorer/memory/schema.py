@@ -10,7 +10,7 @@ the destination state alone, V(s) = f(s).
 `propagated_score` holds the value engine's output (Bellman solve + library
 completion). The engine writes it and discovery fits it; move selection never
 reads it. `certificates` holds game-proven board values
-(docs/certified-forgetting-v3.md).
+(docs/certified-forgetting.md).
 """
 
 # Raw board arrays by hash — the concept library reads these to turn stored

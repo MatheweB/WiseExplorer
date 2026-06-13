@@ -8,15 +8,16 @@ self-play never reached, then refits the model on the filled-in graph.
 It is deliberately decoupled from training: exploration never reads the loop's outputs,
 so the loop changes nothing about what data gets collected. What it changes is how much
 correct play the system extracts from a given amount of data — the same 3,000 games of
-8-pile Nim yield 52/400 optimal moves without the loop and 400/400 with it. At 7%
+8-pile Nim yield ~51/400 optimal moves without the loop and 400/400 with it. At 7%
 coverage, evidence alone cannot converge no matter how long training runs; the loop
 substitutes the library's generalization for the coverage that is missing.
 
 Entry points: `TransitionMemory.complete_values` (the completion pass) and
 `GameMemory.grow_concepts` (one full cycle). The companion note
 [concept-invention.md](concept-invention.md) explains where concepts come from; this one
-explains how they are used during training. (Code comments call the completion pass
-"healing" and one cycle a "turn of the wheel" — same things.)
+explains how the values are computed and why fitting *completed* values (not raw counts)
+is what makes the theory sound. The prove-and-forget tail of the cycle is its own note,
+[certified-forgetting.md](certified-forgetting.md).
 
 ## The problem: a max over a sample
 
@@ -85,10 +86,14 @@ run, plus once at the end of training. One cycle, in order:
    cycle's completions are discarded, not accumulated: library prices never persist
    into the evidence pass.
 3. **`complete_values`** — widen every backup's max to all legal replies, pricing
-   unvisited ones with the current library.
+   unvisited ones with the current library and pinning proven boards to their
+   certified values (game truth outranks any backup).
 4. **Discovery** — refit the concept library on the completed values; the MDL gate
    decides what is kept ([concept-invention.md](concept-invention.md)).
 5. **`complete_values`** again — so the stored values reflect the library just fitted.
+6. **Prove + forget** — `frontier_certify` proves whatever now chains to the game's
+   terminals, and `collapse_proven` deletes the rows those proofs reproduce
+   ([certified-forgetting.md](certified-forgetting.md)).
 
 ```mermaid
 flowchart LR
@@ -102,14 +107,21 @@ flowchart LR
     S --> C1["3 · complete_values<br/>bell ← max over ALL legal replies;<br/>library prices the unvisited"]:::co
     C1 --> D["4 · discovery<br/>library ← refit on completed values<br/>(seeded with the current library)"]:::di
     D --> C2["5 · complete_values<br/>bell ← completed with the refit library"]:::co
-    C2 --> OUT(["competitive selection & evaluation<br/>(bell ranked first, concepts second)"]):::pl
+    C2 --> PR["6 · prove + forget<br/>certify from terminals · delete proven rows"]:::db
+    PR --> OUT(["the theory + proofs<br/>feed competitive play & the next cycle"]):::pl
 ```
 
 Note the shape: the two loops touch only through the counts. Self-play never reads the
-cycle's outputs — training-time selection is uncertainty over raw counts — so a cycle's
-results matter to competitive play, to evaluation, and to the *next* cycle, never to
-exploration. That is also why a cycle can safely run in its own process while waves
-keep playing. Terminal values stay pinned to game truth throughout.
+cycle's outputs — training-time selection is uncertainty over raw counts, tilted only by
+which boards are *proven* — so a cycle's results matter to competitive play, to
+evaluation, and to the *next* cycle, never to which moves exploration records. That is
+also why a cycle can run in its own process while waves keep playing. Terminal values
+stay pinned to game truth throughout.
+
+`bell` (`propagated_score`) is **not** a move-time signal — it is the internal value the
+loop computes and discovery fits. Competitive play ranks the evidence ladder instead
+(proven value > concept value > raw statistics); `bell` earns its keep entirely as the
+fit target, where its completion fixes the coverage blind spot above.
 
 Update semantics, per store:
 
@@ -193,7 +205,7 @@ So the loop's failure mode is "no better than before", not "confidently wrong".
 Protocol: 4-pile Nim trained 2,000 games (discovers the nim-sum), its library seeded
 into a fresh 8-pile memory (362,880 positions — training will visit ~7%), then 6 chunks
 × 500 games. After each chunk, optimal-move rate on 200 sampled winning positions using
-the full competitive selection (`bell` ranked first), against the nim-sum oracle. The
+the full competitive selection, against the nim-sum oracle. The
 control is byte-identical except `complete_values` is a no-op. (Measured with one cycle
 per chunk, before the in-run doubling cadence landed; the cadence only cycles more
 often, and the seeded-then-retrained 400/400 above is the shipped code end to end.)
@@ -263,6 +275,7 @@ recovered it to 200/200 — the same mechanism, run in reverse.
 | reply enumeration (built once per cycle) | `TransitionMemory.reply_graph` |
 | the completed backup | `TransitionMemory.complete_values` |
 | cycle ordering + bootstrap | `GameMemory.grow_concepts` |
+| prove + forget (cycle tail) | `TransitionMemory.frontier_certify` · `collapse_proven` ([certified-forgetting.md](certified-forgetting.md)) |
 | the doubling cadence | `SimulationRunner.run_batch` |
 | end-of-run cycle | `run_training` passes the game |
 | inert default | `GameMemory.complete_values` returns 0 (Markov mode, empty library) |

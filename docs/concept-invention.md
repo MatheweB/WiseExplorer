@@ -439,9 +439,9 @@ Measured (run `wise-explorer transfer --full`):
 ## Running it
 
 ```bash
+wise-explorer train -g nim --games 2000      # train first (cumulative); then invent reads it
 wise-explorer invent -g nim                  # the persisted library — what play actually uses
-wise-explorer invent -g nim --remine         # re-run discovery, with the full bits ledger
-wise-explorer invent -g nim --fresh 2000     # train a throwaway demo first, then invent
+wise-explorer invent -g nim --ledger         # re-run discovery, with the full bits ledger
 wise-explorer invent -g nim --expand         # every formula fully spelled out (verbose)
 wise-explorer transfer                       # discover on 4 piles, play 8 piles zero-shot
 ```

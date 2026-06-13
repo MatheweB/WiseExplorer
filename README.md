@@ -1,23 +1,25 @@
 # Wise Explorer
 
 **Zero-knowledge self-play that learns _human-readable rules_ and game-theoretic
-values for any N-player game — no heuristics, no training data, no game-specific code.**
+values for any N-player game — then proves what it can and forgets the games it no
+longer needs. No heuristics, no training data, no game-specific code.**
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 &nbsp;·&nbsp; 📄 [Research paper](https://digitalcommons.oberlin.edu/honors/116/)
 &nbsp;·&nbsp; 🌐 [mathewe.com](https://www.mathewe.com)
 
-Given only a record of which moves led to wins, Wise Explorer builds four kinds of
-knowledge — raw statistics, statistical clusters, minimax values, and **invented
-concepts you can read** — and lets the *data itself* decide which to trust, move by move.
+Given only a record of which moves led to wins, Wise Explorer builds a theory of the
+game — **invented concepts you can read** plus game-theoretic values — and lets the
+*data itself* decide which to trust, move by move. Where the game can confirm a value by
+exhaustive proof, it stores the proof and **deletes the transitions that proof makes
+redundant**: on a solved game the database empties to nothing while play stays perfect.
 
-## It invents the theorem that solves Nim
+## It invents the theorem that solves Nim — then proves it and forgets
 
-Nim has been *solved* since 1901: you win by always moving so that the bitwise **XOR of the
+Nim has been *solved* since 1901: you win by always moving so the bitwise **XOR of the
 pile sizes is zero** — the "nim-sum" (Bouton's theorem). **Wise Explorer was never told
-this.** Given only a record of which moves won, it *invents* that formula during training —
-as a program, built from nothing but cell reads, arithmetic, and one `fold` combinator —
-and prints it when training ends:
+this.** From a record of which moves won, it *invents* that formula during training — a
+program built from nothing but cell reads, arithmetic, and one `fold` combinator:
 
 ```text
 Discovered 1 concept, 2 rules:
@@ -28,11 +30,16 @@ Discovered 1 concept, 2 rules:
   K₁ = fold(⊕, board, cell)
 ```
 
-Playing with that two-line model, it makes the optimal move in **every** winning
-position of 4-pile Nim (96/96). See it derive the theorem yourself, in under a minute:
+Then it goes further. The game itself is a **replayable oracle**, so the system *proves*
+each board's value by induction from the terminal positions — no play, nothing the
+theory can bias — and **deletes every stored game the proof reproduces**. On 4-pile Nim
+the transition table collapses **594 rows → 0** while play stays optimal in **every**
+winning position (96/96). The two-line theorem is the only thing left. Watch it, in
+seconds:
 
 ```bash
-wise-explorer invent -g nim --fresh 2000
+wise-explorer train -g nim --games 2000   # discovers the nim-sum, proves it, empties the table
+wise-explorer invent -g nim               # prints the two-line theorem it plays with
 ```
 
 ## …and the theorem transfers: discover small, play big
@@ -79,96 +86,49 @@ wise-explorer transfer --piles 10 --full  # bigger target, plus the honest contr
 
 ## How it works, in one picture
 
-Every move is recorded as a **transition** — *this board → that board → who won* — and
-from that one stream Wise Explorer grows four independent "views" of the game. For each
-decision it trusts whichever view most *sharply separates* the moves on offer — the one
-whose scores disagree the most (its **variance**).
+Every move is recorded as a **transition** — *this board → that board → who won*. From
+that one stream the system computes game-theoretic values, **invents concepts** that
+explain them, **proves** the values the game can confirm, and **forgets** the rows those
+proofs make redundant. What remains stored is exactly what the theory cannot yet account
+for — the map of where to look next.
 
 ```mermaid
 flowchart LR
-    classDef src fill:#1f2937,stroke:#475569,color:#e5e7eb
-    classDef sig fill:#0e7490,stroke:#155e75,color:#ecfeff
-    classDef arb fill:#9a3412,stroke:#7c2d12,color:#ffedd5
-    SP["self-play waves<br/>prune + exploit"] --> T[("transitions<br/>from → to · W/T/L")]
-    T --> S1["① solo stats"]
-    T --> S2["② anchors"]
-    T --> S3["③ Bellman"]
-    T --> S4["④ concepts"]
-    S4 -.->|"the value loop: ④ prices<br/>the replies ③ never saw"| S3
-    S1 --> V{{"variance<br/>arbitration"}}
-    S2 --> V
-    S3 --> V
-    S4 --> V
-    V --> M(["move"])
-    M --> SP
-    class SP,T,M src
-    class S1,S2,S3,S4 sig
-    class V arb
+    classDef play  fill:#1f2937,stroke:#475569,color:#e5e7eb
+    classDef db    fill:#0e7490,stroke:#155e75,color:#ecfeff
+    classDef think fill:#065f46,stroke:#047857,color:#d1fae5
+    classDef prove fill:#713f12,stroke:#a16207,color:#fef9c3
+    SP["self-play<br/>(uncertainty-driven)"]:::play --> T[("transitions<br/>raw W/T/L counts")]:::db
+    T -->|"solve + complete"| V["game-theoretic values"]:::db
+    V -->|"MDL fit"| R["invented concepts<br/>(the theory)"]:::think
+    V -->|"prove by induction<br/>from terminals"| C["certificates<br/>(game-checked values)"]:::prove
+    C -->|"forget what the<br/>proof reproduces"| T
+    R --> SP
+    C --> SP
 ```
 
-The agent never knows *which* game it's playing — so different games simply light up
-different views:
+At move time the system ranks each option by a single **evidence ladder** — strongest
+form of evidence first — so there is no signal to arbitrate and nothing to tune:
 
-| In this game… | …the deciding view is | because |
+| rung | evidence | available |
 |---|---|---|
-| **Nim** | ③ Bellman (minimax) | value is purely game-theoretic |
-| **Tic-Tac-Toe** | ② anchors (pooled stats of similar positions) | positions repeat and pool cleanly |
-| **a position never seen before** | ④ invented concepts | only a formula generalizes from board *shape* |
+| ① **proven** | the game's own verdict for the board (a certificate) | last — spreads from the endgame |
+| ② **concept** | the invented theory's value for the board | once a theory forms |
+| ③ **statistics** | the raw win/tie/loss counts | immediately, everywhere |
+
+A move with a proven win outranks any unproven move; among unproven moves the theory
+decides; where the theory is silent, the statistics do. Each rung is a cleaner estimate
+of the same quantity, `V(board)`, and the higher rungs retire the lower ones region by
+region as the game is understood.
 
 ---
 
-## Quick start
-
-```bash
-git clone https://github.com/MatheweB/WiseExplorer
-cd WiseExplorer
-pip install -e .            # add ".[dev]" for the test suite
-```
-
-```bash
-wise-explorer                              # play Tic-Tac-Toe vs the AI (default)
-wise-explorer --game nim --epochs 2000     # train harder, on another game
-wise-explorer --game minichess --self-play # watch the AI play itself
-wise-explorer --no-training                # play from existing memory only
-```
-
-**See what it discovered** — `invent` prints the library your trained model plays with;
-`--remine` re-runs discovery with the full bits-saved-vs-cost ledger, and `--fresh N`
-trains a quick throwaway demo first:
-
-```bash
-wise-explorer invent -g nim                  # the library your trained model plays with
-wise-explorer invent -g nim --fresh 2000     # ← train a demo, then watch it derive the nim-sum
-wise-explorer transfer                       # ← discover on 4 piles, play 8 zero-shot
-```
-
-<details>
-<summary><b>All CLI options</b></summary>
-
-| Flag | Short | Description |
-|------|-------|-------------|
-| `--game` | `-g` | `tic_tac_toe`, `minichess`, `nim` (default: `tic_tac_toe`) |
-| `--size` | `-n` | Board size, for games that support it (Nim: piles; default 4) |
-| `--epochs` | `-e` | Training epochs — scales the number of self-play simulations (default: 100) |
-| `--turn-depth` | `-t` | Max turns per simulated game (default: 40) |
-| `--workers` | `-w` | Parallel worker processes (default: CPU count − 1) |
-| `--no-training` | | Play using existing memory only |
-| `--self-play` | | AI plays for all players (no humans) |
-| `--players` | `-p` | Comma-separated human player numbers, e.g. `1,2` (overrides `--self-play`) |
-| `--markov` | | Use Markov (path-independent) states instead of transitions |
-
-Training is **cumulative** — every run adds to the same database. Expect a few thousand
-epochs before strong play emerges.
-</details>
-
----
-
-## The one idea: transitions
+## The one idea: transitions are a cache
 
 Most game AIs evaluate **positions** (*how good is this board?*). Wise Explorer evaluates
 **transitions** (*this board → that board, and what became of the player who moved?*).
 The outcome is always stored **from the mover's perspective** — and that single choice is
-what makes everything else game- and player-count-agnostic. Watch one game decompose:
+what makes everything game- and player-count-agnostic. Watch one game decompose:
 
 ```mermaid
 flowchart LR
@@ -192,97 +152,23 @@ The *same game* feeds opposite tallies — each move is credited with **its own 
 eventual result, so nobody tracks whose turn it is, and the same `from → to` reached in
 other games pools into one tally (`W=128 · T=14 · L=37 → 0.74`).
 
-Because every player records *its own* moves tagged with *its own* result, the identical
-loop runs for two players or seven. A new game only has to describe its boards and say who
-won ([custom games ↓](#implementing-a-custom-game)) — the learner never knows it's playing
+But a transition record is **a cache, not the ground truth.** The ground truth is the
+game — a pure function you can call any time. A stored transition is just a memoized
+observation of it. That reframing is what licenses forgetting: once a rule's value for a
+region is *proven against the game*, the stored rows in that region carry no information
+the rule doesn't, and can be deleted. (In MDL terms the database is exactly the residual
+`|data given theory|`, so a true theory drives it to zero — see
+[certified forgetting](docs/certified-forgetting.md).)
+
+A new game only has to describe its boards and say who won
+([custom games ↓](#implementing-a-custom-game)) — the learner never knows it's playing
 Nim versus chess, only that some moves tend to precede wins.
-
----
-
-## Four signals, and which to trust
-
-Each legal move is scored by up to four signals — same transition record, four different
-questions:
-
-| | Signal | Asks | Generalizes to unseen boards? |
-|--|--|--|:--:|
-| ① | **solo** | "What happened the last time I made this *exact* move?" | — |
-| ② | **anchor** | "What usually happens in positions *like* this one?" | — |
-| ③ | **Bellman** | "What's the *true game-theoretic* value of this?" | — |
-| ④ | **concept** | "What does the *formula I invented* say this is worth?" | ✅ the only one |
-
-**The deciding move** — variance arbitration — is what makes the agent tick. For each
-signal it computes how much it actually disagrees about the `k` moves on offer,
-
-$$\mathrm{Var}(s) \;=\; \tfrac{1}{k}\sum_{i=1}^{k}\bigl(s_i - \bar{s}\bigr)^2
-\qquad\begin{aligned} s_i &= \text{signal } s\text{'s score for move } i\\ \bar{s} &= \text{the mean of those } k \text{ scores}\end{aligned}$$
-
-and trusts the **most discriminating** one. A signal that scores every move alike has
-variance ≈ 0 — useless for *this* decision, by construction.
-
-| signal | move A | move B | move C | variance | rank |
-|---|:--:|:--:|:--:|:--:|:--|
-| ① solo | 0.55 | 0.52 | 0.58 | 0.0006 | 4th · nearly flat |
-| ② anchor | 0.60 | 0.58 | 0.61 | 0.0002 | 3rd · nearly flat |
-| ④ concept | 0.45 | 0.66 | 0.52 | 0.0078 | 2nd |
-| **③ Bellman** | **0.00** | **1.00** | **0.50** | **0.1667** | **1st · sharp ✦** |
-
-*Ranked by the sharpest signal, ties broken by the next ⇒ the agent plays **move B**.*
-
-Here **Bellman** separates a forced loss (`0.00`) from a forced win (`1.00`), so it decides.
-In a midgame position where Bellman is flat, the *same* mechanism switches to whichever
-signal does separate — **the data decides; nothing is hard-coded.** (Competitive play
-refines this to reliability-first: Bellman ranks primary and the rest break ties, since
-raw-count noise would otherwise out-shout a correct value. Training explores by a different
-rule, [below ↓](#self-play-training).)
-
-<details>
-<summary><b>Under the hood: how each signal is computed</b></summary>
-
-- **① solo** — the raw win/tie/loss tally `(w, t, l)` for this transition, scored with a
-  **Bayesian mean**:
-
-  $$\text{score} = \frac{(w+1)\cdot 1 + (t+1)\cdot \tfrac12 + (l+1)\cdot 0}{w+t+l+3}$$
-
-  Wins are worth 1, ties ½, losses 0; the three `+1`s are *pseudocounts* — one imaginary
-  game of each outcome (hence the `+3` below) — so a move seen once sits near `0.5` instead
-  of swinging on a lucky result ([`core/types.py`](src/wise_explorer/core/types.py)).
-- **② anchor** — positions whose win/tie/loss distributions are *statistically
-  indistinguishable* are clustered, and a thinly-seen position borrows its cluster's pooled
-  stats:
-
-  ```mermaid
-  flowchart LR
-      classDef p fill:#1f2937,stroke:#475569,color:#e5e7eb
-      classDef k fill:#0e7490,stroke:#155e75,color:#ecfeff
-      A["position A<br/>3 games · 67% wins"] --> K["anchor<br/>18 games · 61% wins"]
-      B["position B<br/>5 games · 60% wins"] --> K
-      C["position C<br/>10 games · 60% wins"] --> K
-      class A,B,C p
-      class K k
-  ```
-
-  "Indistinguishable" is a **Bayes factor** test
-  ([`core/bayes.py`](src/wise_explorer/core/bayes.py)) — one shared win-rate vs. two
-  separate ones — not a hand-tuned threshold.
-- **③ Bellman** — minimax value over the transition graph ([details ↓](#game-theoretic-propagation-bellman--n-player)).
-- **④ concept** — the value the invented rule tree assigns to the resulting board
-  ([details ↓](#inventing-concepts-the-discovery-engine)). Because a concept is a program,
-  it values boards training never visited — this is the signal behind the zero-shot result.
-- **Scoring & tie-breaks** — each move becomes a *tuple* in rank order (e.g.
-  `(bell, concept, anchor, solo)`), compared lexicographically. When a signal's evidence is
-  *unanimous and significant* it sharpens from the Bayesian mean to the exact ratio
-  (`is_decisive`); and as Bellman values converge their variance grows, so game-theoretic
-  truth tends to win the ranking long-run — auto-correcting any rule trusted too early.
-  ([`selection/__init__.py`](src/wise_explorer/selection/__init__.py))
-
-</details>
 
 ---
 
 ## Inventing concepts (the discovery engine)
 
-Most self-play agents end up as an opaque table of numbers. Wise Explorer additionally
+Most self-play agents end up an opaque table of numbers. Wise Explorer additionally
 **invents the concepts** that explain its experience — as readable programs, *while it
 trains*.
 
@@ -344,14 +230,13 @@ flowchart TD
 
 The three stages, briefly — the full anatomy lives in
 [docs/concept-invention.md](docs/concept-invention.md), including **a toy example that
-builds one rule end to end on 2-pile Nim** (six boards, every number checkable by eye),
-the enumeration counts, the mask/split data structures, and the honest limits:
+builds one rule end to end on 2-pile Nim** (six boards, every number checkable by eye):
 
-- **Enumerate**, don't guess: every program up to a size budget is built
-  smallest-first, the six whole-board folds always offered (`fold(⊕, board, cell)` exists
-  *before* anything knows it matters), and two formulas that behave identically on the
-  data count as one concept — on 3-pile Nim that collapses the formula space to ≈ 13,600
-  distinct behaviors, all scored in one vectorized pass.
+- **Enumerate**, don't guess: every program up to a size budget is built smallest-first,
+  the six whole-board folds always offered (`fold(⊕, board, cell)` exists *before*
+  anything knows it matters), and two formulas that behave identically on the data count
+  as one concept — on 3-pile Nim that collapses the space to ≈ 13,600 distinct
+  behaviors, all scored in one vectorized pass.
 - **Fit**: on the data a program is a *column*, a threshold makes it a *mask*, and a
   tree node is just an array of row indices the mask partitions. The node goes to the mask
   saving the most bits:
@@ -369,123 +254,145 @@ the enumeration counts, the mask/split data structures, and the honest limits:
 **Where the `[WIN]` / `[DRAW]` / `[LOSS]` labels come from.** No thresholds: each board's
 value splits its mass between the two **outcome anchors** it sits between — `{0, ½, 1}`,
 the game's own utility scale. A leaf pools its boards' masses; the heaviest mass names the
-leaf, and the entropy of the masses is the leaf's cost in bits:
+leaf, and the entropy of the masses is the leaf's cost in bits. The label is for reading —
+play ranks moves by the leaf's *value*, never the word.
+
+**Discovery fits values the theory can trust.** Discovery runs inside the
+[value loop](docs/value-loop.md): each cycle recomputes values from raw counts, completes
+them with the current library (pricing the replies training never played), and *then*
+fits over those completed values — the system's best current belief. A sufficient library
+self-limits (the MDL search finds nothing left that pays). A library can also be **seeded
+from another game's DB** (`ConceptLibrary.seed_from`) — that's the transfer demo:
+programs carry over; their worth is re-fit locally.
+
+---
+
+## The value loop: the theory teaches itself good targets
+
+Discovery is only as good as the values it fits, and raw self-play values have a blind
+spot. A Bellman backup takes its max over replies somebody **played** — so when ~93% of
+positions are never visited, a position whose refutation is among them gets *overvalued*,
+and a fit on those values learns the error. The value loop closes the gap with the
+system's own discoveries. Each time the stored evidence has doubled, one cycle runs:
 
 ```mermaid
 flowchart LR
-    classDef v fill:#1f2937,stroke:#475569,color:#e5e7eb
-    classDef m fill:#0e7490,stroke:#155e75,color:#ecfeff
-    classDef o fill:#065f46,stroke:#047857,color:#d1fae5
-    V1["V = 0.95"] -->|"0.90 win · 0.10 draw"| POOL
-    V2["V = 0.59"] -->|"0.18 win · 0.82 draw"| POOL
-    V3["V = 0.05"] -->|"0.90 loss · 0.10 draw"| POOL
-    POOL["the leaf pools the masses<br/>LOSS 0.90 · DRAW 1.02 · WIN 1.08"]
-    POOL --> VER["label = heaviest mass → [WIN]"]
-    POOL --> COST["cost = n · H(masses)<br/>mixed → expensive → worth splitting"]
-    class V1,V2,V3 v
-    class POOL m
-    class VER,COST o
+    classDef ev fill:#0e7490,stroke:#155e75,color:#ecfeff
+    classDef co fill:#9a3412,stroke:#7c2d12,color:#ffedd5
+    classDef di fill:#065f46,stroke:#047857,color:#d1fae5
+    classDef pr fill:#713f12,stroke:#a16207,color:#fef9c3
+    classDef pl fill:#1f2937,stroke:#475569,color:#e5e7eb
+    P(["self-play<br/>raw W/D/L counts"]):::pl -->|"evidence ×2"| S["1 · solve<br/>values from raw counts only"]:::ev
+    S --> C1["2 · complete<br/>library prices never-played replies;<br/>proven boards pinned to game truth"]:::co
+    C1 --> D["3 · fit<br/>refit the theory on the completed values"]:::di
+    D --> C2["4 · complete<br/>re-price with the fresh rules"]:::co
+    C2 --> PR["5 · prove + forget<br/>certify from terminals, delete<br/>the rows the proofs reproduce"]:::pr
+    PR --> P
 ```
 
-A value sitting *on* an anchor is pure mass (V = 1.0 is all win); anything between is
-honestly mixed. The label is for reading — play ranks moves by the leaf's *value*, never
-the word. (Hard cuts at 0.40/0.60 used to do this job; benched head-to-head, the soft
-masses matched every result with half the duplicate concepts and less junk, so the cuts
-were deleted.)
+Three anchors keep the feedback honest: values always restart from raw counts (the
+library fills gaps, never overwrites a count); the MDL gate discards any concept that
+merely restates the library; and training itself never reads the theory — its
+uncertainty-driven exploration keeps the evidence independent of the theory it feeds.
+Measured on 8-pile Nim seeded with the 4-pile library: without the loop, every refit fits
+coverage noise and eventually destroys the library it started with; with it,
+**seeded-then-retrained play is 400/400 — indistinguishable from the zero-shot rule**.
+The full anatomy — equations, the doubling-cadence rationale, the self-distillation guard
+rails, and the alignment factor for N-player games — is in
+[docs/value-loop.md](docs/value-loop.md).
 
-**Discovery runs where the values are trustworthy.** Discovery happens inside the
-[value loop](docs/value-loop.md): each time the evidence has doubled, values are
-recomputed from raw counts, completed by the current library (which prices the replies
-training never played), and discovery refits on those completed values; a sufficient
-library self-limits (the MDL search finds nothing left that pays). The persisted model is
-always the last considered fit. A library can also be **seeded from another game's DB**
-(`ConceptLibrary.seed_from`) — that's the transfer demo: programs carry over; their worth
-is re-fit locally.
+---
 
-<details>
-<summary><b>Verified run — Nim, 2,000 self-play games</b></summary>
+## Certified forgetting: rules replace transitions
 
-```text
-$ wise-explorer invent -g nim --fresh 2000
+A rule isn't just a fit — it's an **executable claim** the game can adjudicate. So the
+system proves the values the game can confirm, and deletes the stored games those proofs
+make redundant. Proofs come by **induction from the terminal positions**: a board is
+proven once every legal reply is proven, and its value is then the exact backup
+`1 − max(reply values)`. No play is involved — the game supplies the moves and the
+terminal verdicts, prior certificates supply the inductive step — so there is **nothing
+the theory can bias**; its prices appear nowhere in the check. (On Nim the system is, in
+effect, proving Bouton's theorem layer by layer over its own certificate set.)
 
-══ CONCEPT INVENTION — NIM4 ══   (119 boards · baseline 86 bits to explain)
-
-ROUND 1  ✓ pays — saved 86 bits  vs  12 cost   (1 concept invented)
-        + K₁ = 0      K₁ = fold(⊕, board, cell)
-          ⟺ the xor of every cell is 0
-ROUND 2  ✗ stop — saved 0 bits  vs  0 cost   (nothing new pays for itself)
-
-→ stopped after round 1;  1 concept(s) kept.
-
-RULES — one tree, each split shown once:
-   K₁ = 0   ⟺ the xor of every cell is 0
-   ├─ yes → [WIN ] n=24     avg=1.00
-   └─ no  → [LOSS] n=95     avg=0.00
-
-KEY — every name above, derived from the program (never hand-labeled):
-   K₁ = fold(⊕, board, cell)
-        [= 0]  ⟺ the xor of every cell is 0
+```mermaid
+flowchart LR
+    classDef game fill:#713f12,stroke:#a16207,color:#fef9c3
+    classDef db   fill:#0e7490,stroke:#155e75,color:#ecfeff
+    classDef cut  fill:#9a3412,stroke:#7c2d12,color:#ffedd5
+    G[("the GAME<br/>replayable oracle")]:::game -->|"terminal verdicts +<br/>legal moves"| F["FRONTIER<br/>prove a board once every<br/>reply is proven (induction)"]:::game
+    F --> C["delete the transitions<br/>whose value the proof reproduces;<br/>keep the exceptions"]:::cut
+    C --> M[("what's left =<br/>the unproven residue")]:::db
+    M -.->|"steer exploration here"| F
 ```
 
-The reader mirrors the search's own compression: every discovered **program gets a handle**
-(`K₁, K₂ …`), the rules print as **one tree** with each split shown once, and the KEY
-defines each handle **one floor deep** — in the handles of the floor below — so a deep
-concept tower stays a page of one-line definitions. Every `⟺` reading is *enumerated from
-the program* (fold bodies over their finite inputs; cell chains over the board's observed
-token alphabet), never hand-labeled — and discovered regions earn nicknames with *derived*
-geometry. On Tic-Tac-Toe:
+Deletion is sound even while the theory is wrong, because it compares each row against the
+**proven** value (the game's), never the library's. The result, by game:
 
-```text
-groups — discovered as cell-sets; geometry derived from the board's shape:
-  g₁ = (c2·c4·c6)   ↗ diagonal
-  g₂ = (c0·c4·c8)   ↘ diagonal
-  g₃ = (c0·c1·c2)   row 0
-  …
-K₁ = (c2 and c4 and c6)
-     [= 0]  ⟺ c2·c4·c6 are not all one player's
-K₁₃ = fold(max, groups, (played xor (played max empty)))
-     [= 0]  ⟺ no group is you 0 · empty 1 · them 2 or you 0 · empty 2 · them 1 or …
-```
+| | complete theory (Nim-4) | partial theory (Tic-Tac-Toe) |
+|---|---|---|
+| frontier proves | all 120 boards, one sweep | 2,192 → 5,234 boards (grows with discovery) |
+| memory | **594 rows → 0**, every cycle | 7,108 → ~3,000 (empties only where proven) |
+| play | 96/96 optimal | 234/300, steady |
+| verification cost | **zero playouts** | **zero playouts** |
 
-— the regions it found are the win-lines (it is never told that), and `K₁₃ = 0` reads:
-*no line holds two opponent pieces and one empty cell — no one is a move from completing
-one.* `--expand` prints the raw nested formulas instead.
+On a solved game the table empties entirely; on a partial theory it empties *exactly where
+the theory holds* and stays dense where it doesn't — so **the database becomes a map of
+what the system doesn't yet understand**. And it self-heals: corrupt the theory after the
+data is gone and play craters, but one training cycle refits from fresh evidence and
+recovers (Nim-4: 8/96 → 96/96 in one cycle). The full account — the deletion invariant,
+why proofs need no expiry, the partial-theory and scale results — is in
+[docs/certified-forgetting.md](docs/certified-forgetting.md).
 
-The engine was never given the rules of Nim, yet it compresses its experience to the
-two-line theorem — provably correct against the nim-sum it was never told about.
-(Exact bit counts vary slightly per run.)
+---
 
-</details>
+## Steering: explore what you can't yet prove
+
+Training explores by **uncertainty** — and the residue above tells it exactly where the
+uncertainty lives. Each move's exploration drive is its total remaining uncertainty:
+statistical noise and theory–evidence disagreement, combined in quadrature, and **zero
+once the board is proven**:
+
+$$\text{drive} = \begin{cases} 0 & \text{proven (nothing left to learn)} \\ \sqrt{\,\mathrm{se}^2 + (\text{concept} - \text{stat})^2\,} & \text{the theory makes a claim} \\ \mathrm{se} & \text{the theory is silent} \end{cases}$$
+
+This is parameter-free — no tuned multipliers — and **direction-blind**: the theory pulls
+attention toward boards where it is *informative and untested*, never toward boards it
+merely favors. A confidently wrong claim attracts exactly the games that will refute it;
+a confirmed claim fades to plain statistical noise and then to nothing. The drive is then
+spent on whichever side of the value the phase is pinning down (below), so the agent
+charts both how to win and how to lose. Measured on Tic-Tac-Toe, steering discovers ~1.5×
+more new territory per game than uniform exploration, with no loss of play strength.
+
+### Why *"Wise"* Explorer
+
+A naive learner only ever chases moves that look good; it never builds certainty about what
+*loses*. Wise Explorer splits its budget and deliberately explores **both** extremes:
+
+| Phase | Behavior | Purpose |
+|-------|----------|---------|
+| **Prune** | one player deliberately plays its *worst* moves | charts and confirms losing lines, so they're never wandered into |
+| **Exploit** | all players play their *best* moves | reinforces and sharpens winning strategy |
+
+Half the training budget goes to pruning — each player taking its turn as the one dragged
+through its worst lines — and half to a shared exploit phase. Within a phase, the move is a
+weighted draw: exploit weights a move by `drive · value`, prune by `drive · (1 − value)`.
+Both skip moves already pinned down — sampling a move shrinks its uncertainty, so attention
+drifts onward by itself. Deliberately playing badly is the *wisdom*: the agent that has
+thoroughly charted how to lose is the one that never stumbles into it.
 
 ---
 
 ## Game-theoretic propagation (Bellman → N-player)
 
-The Bellman signal runs value iteration over the transition graph. After each game the
-played line is swept **backward**: to score the move `a` that lands in position `s`, take
-the best reply available *from* `s` and flip it — *good for them is bad for me*:
+The value engine runs value iteration over the transition graph. After each cycle the
+graph is swept: to score the move `a` that lands in position `s`, take the best reply
+available *from* `s` and flip it — *good for them is bad for me*:
 
 $$V(a) \;=\; 1 - \max_{b \,\in\, \text{replies}(s)} V(b)
-\qquad\begin{aligned} V(a) &= \text{the mover's value for } a\\ \text{replies}(s) &= \textit{every} \text{ known move out of } s \text{, not just the one played}\end{aligned}$$
+\qquad\begin{aligned} V(a) &= \text{the mover's value for } a\\ \text{replies}(s) &= \textit{every} \text{ known move out of } s\end{aligned}$$
 
-Ranging over *every* known reply is how it sees through a lucky win — watch the values
-flow up the tree:
-
-```mermaid
-flowchart TD
-    classDef me   fill:#1f2937,stroke:#475569,color:#e5e7eb
-    classDef good fill:#065f46,stroke:#047857,color:#d1fae5
-    classDef bad  fill:#7f1d1d,stroke:#b91c1c,color:#fee2e2
-    A["my move a → position s<br/><b>V(a) = 1 − max(0.30, 1.00) = 0.00</b><br/>a LOSS — though this game was won"] --> R1 & R2
-    R1["reply actually played · V = 0.30<br/>…and I went on to win ✦"]
-    R2["reply b′ — never played, but known<br/><b>V(b′) = 1.00 · forces their win</b>"]
-    class A bad
-    class R1 good
-    class R2 bad
-```
-
-Raw statistics would praise `a` for sitting on a winning line; minimax sees the opponent
-*could* have punished it. The agent learns the move was lucky, not good.
+Ranging over *every* known reply is how it sees through a lucky win: raw statistics would
+praise a move for sitting on a winning line, but minimax sees the opponent *could* have
+punished it.
 
 For games that aren't strictly adversarial (more than two players, or non-zero-sum), Wise
 Explorer also records every *other* player's outcome and computes an **alignment factor α**
@@ -500,146 +407,94 @@ costs nothing in the classic case.
 `α = max(0, μ_cross + μ_mover − 1)`, where `μ_cross` is the average outcome observed by the
 *other* players and `μ_mover` the mover's own empirical mean. α is positive only when mover
 and observers tend to do well *together* (aligned incentives); the backup is then
-`α·v_next + (1−α)·(1−v_next)`, blending cooperative and adversarial values.
+`α·v_next + (1−α)·(1−v_next)`, blending cooperative and adversarial values. (The proof
+backup uses the pure zero-sum form; threading α through induction is the open path to
+non-zero-sum proofs.)
 
 </details>
 
 ---
 
-## Self-play training
-
-Wise Explorer learns by playing **itself** — no opponent, no dataset. Games run in
-**synchronized waves** ([`simulation/runner.py`](src/wise_explorer/simulation/runner.py)):
-play a wave in parallel → commit transitions + Bellman sweep → consolidate anchors →
-repeat — so every wave learns from fresh statistics. Whenever the evidence has doubled,
-the [value loop](docs/value-loop.md) runs in a background process: values are recomputed
-from raw counts, completed with library estimates for never-played replies, and the
-concept library is refit — discovery happens *during* training, not after it.
-Exploration never reads the loop's outputs; they matter to competitive play and the
-next cycle, which is why the two can safely overlap.
-
-### Why *"Wise"* Explorer
-
-A naive learner only ever chases moves that look good; it never builds certainty about what
-*loses*. Wise Explorer splits its budget and deliberately explores **both** extremes:
-
-| Phase | Behavior | Purpose |
-|-------|----------|---------|
-| **Prune** | one player deliberately plays its *worst* moves | charts and confirms losing lines, so they're never wandered into |
-| **Exploit** | all players play their *best* moves | reinforces and sharpens winning strategy |
-
-Half the training budget goes to pruning — each player taking its turn as the one dragged
-through its worst lines — and half to a shared exploit phase.
-
-Within a phase, the move is a weighted draw — each candidate's weight is its uncertainty
-times the side of the value still being pinned down:
-
-$$w_{\text{exploit}} = \mathrm{se} \cdot v \qquad\qquad w_{\text{prune}} = \mathrm{se} \cdot (1 - v)$$
-
-(`se` = the move's standard error — how unsure we still are; `v` = its score; the two
-weights are mirror images summing to `se`.) Exploit leans to strong-but-unsettled moves,
-prune to weak-but-unsettled ones, both skip moves already pinned down. No dials: sampling
-a move shrinks its `se`, so attention drifts onward by itself.
-
-Deliberately playing badly is the *wisdom*: the agent that has thoroughly charted how to
-lose is the one that never stumbles into it.
-
----
-
 ## Why it converges — the certainty frontier
 
-The raw counts (`solo`, `anchor`) are **noisy** — they measure average, mixed-quality play.
-**Bellman** is game-theoretic truth, but only *where it has converged* — and it converges
-from the game's **end backward**, since a position is only as reliable as everything
-explored beneath it. So a *frontier of certainty* advances from the terminal states toward
-the opening, and the middlegame clears last:
-
-| games | opening | middlegame | endgame |
-|---|---|---|---|
-| 8k | ░ foggy | ░ → ▒ converging | █ sharp |
-| 24k | ▒ converging | █ sharp | █ sharp |
-
-Ahead of the frontier the agent leans on discrimination (trustworthy for obvious tactics,
-noise for subtle ones); behind it, Bellman decides. Exploration — which deliberately plays
-losing lines too — is what moves the frontier. Measured against perfect Tic-Tac-Toe play
-(800 uniformly-sampled reachable positions vs. minimax):
+The raw counts are **noisy** — they measure average, mixed-quality play. Game-theoretic
+truth converges from the game's **end backward**, since a position is only as reliable as
+everything explored beneath it. So a *frontier of certainty* advances from the terminal
+states toward the opening, and the middlegame clears last — the same direction the proof
+frontier grows. Measured against perfect Tic-Tac-Toe play (uniformly-sampled reachable
+positions vs. minimax):
 
 | after | optimal play |
 |---|--:|
-| 3,000 games | 81.8% |
-| 8,000 games | 93.1% |
-| 24,000 games | **99.9%** |
+| 3,000 games | ~78% |
+| 8,000 games | ~93% |
+| 24,000 games | **~99.9%** |
 
 The system is **exploration-limited, not decision-limited**: give it coverage and play
-converges to optimal.
+converges to optimal. (Removing the old four-signal stack in favor of the evidence ladder
+*improved* measured Tic-Tac-Toe play at every checkpoint — raw counts can't be poisoned by
+a partial theory the way a coverage-biased value signal can.)
 
 ---
 
-## The value loop: concepts fill the evidence gaps
+## Quick start
 
-And where coverage *can't* be given, the discovered concepts substitute for it. A Bellman
-backup can only take its max over replies somebody **played** — when ~93% of positions
-have never been visited, a position whose refutation is among them gets *overvalued*,
-and the error propagates into the exact signal competitive play ranks first. The value
-loop fixes this with the system's own discoveries. Each time the stored evidence has
-doubled, it runs four steps in order:
-
-```mermaid
-flowchart LR
-    classDef pl fill:#1f2937,stroke:#475569,color:#e5e7eb
-    classDef db fill:#713f12,stroke:#a16207,color:#fef9c3
-    classDef ev fill:#0e7490,stroke:#155e75,color:#ecfeff
-    classDef co fill:#9a3412,stroke:#7c2d12,color:#ffedd5
-    classDef di fill:#065f46,stroke:#047857,color:#d1fae5
-    P["self-play — every wave<br/>moves picked by uncertainty alone;<br/>never reads bell or concepts"]:::pl -->|"appends"| K[("raw W/D/L<br/>counts")]:::db
-    K -->|"counts ×2<br/>⇒ one cycle"| S["1 · bell ← solve(counts)<br/>full rebuild from counts alone;<br/>last cycle's output discarded"]:::ev
-    S --> C1["2 · bell ← complete(bell, lib)<br/>max over ALL legal replies —<br/>the library prices the never-played"]:::co
-    C1 --> D["3 · lib ← refit on completed bell<br/>seeded with itself — concepts are<br/>the only state that carries forward"]:::di
-    D --> C2["4 · bell ← complete(bell, lib′)"]:::co
-    C2 --> OUT(["competitive play & evaluation<br/>(bell ranked first)"]):::pl
+```bash
+git clone https://github.com/MatheweB/WiseExplorer
+cd WiseExplorer
+pip install -e .            # add ".[dev]" for the test suite
 ```
 
-The loop's outputs flow right, never back into training: self-play explores by
-uncertainty over raw counts alone, so each cycle's results are consumed by competitive
-play, evaluation, and the next cycle. Per store: the **counts** are append-only ground
-truth, **bell** is a derived cache rebuilt from scratch each cycle, and the **library**
-is the only state that carries across cycles. Three anchors keep the feedback honest:
-values always restart from raw counts (the library fills gaps, never overwrites a
-count); the MDL gate discards any concept that merely restates the library; and
-training's concept-blind exploration keeps the evidence independent of the theory it
-feeds.
-Measured on 8-pile Nim seeded with the 4-pile library: without the loop, every refit
-fits coverage noise and eventually destroys the library it started with; with it,
-**seeded-then-retrained play is 400/400 — indistinguishable from the zero-shot rule**.
-Equations, the doubling-cadence rationale, self-distillation guard rails, and the honest
-costs are in [docs/value-loop.md](docs/value-loop.md).
+```bash
+wise-explorer train -g nim --games 2000    # self-play training (cumulative)
+wise-explorer play  -g tic_tac_toe         # play the AI — it learns as you play
+wise-explorer play  -g nim --watch         # watch it play (and learn from) itself
+wise-explorer invent -g nim                # print the rules it discovered
+wise-explorer transfer                     # discover on 4 piles, play 8 zero-shot
+```
+
+`play` learns as it goes: before each of its moves it runs a few self-play games *from the
+current position*, so the theory sharpens around the line you're actually in (`--no-learn`
+to play frozen). `--explain` shows the evidence ladder behind each move; `--verbose` dumps
+every candidate.
+
+<details>
+<summary><b>All commands and flags</b></summary>
+
+| Command | Key flags | Description |
+|---|---|---|
+| `play` | `-g` game · `--watch` · `--ponder N` · `--explain` · `--verbose` · `--no-learn` | Play (default). Ponders N self-play games from the current position per AI move. |
+| `train` | `-g` game · `--games N` (default 2000) · `-w` workers · `--markov` | Run N self-play games into the cumulative database. |
+| `invent` | `-g` game · `--ledger` · `--expand` | Print the discovered rules. `--ledger` re-runs discovery with the full bits ledger. |
+| `transfer` | `--piles N` · `--full` | Discover the nim-sum on 4 piles, play N-pile Nim zero-shot. |
+
+Common: `-g {tic_tac_toe, nim, minichess}` · `-n SIZE` (Nim: piles). Training is
+**cumulative** — every run adds to the same per-game database; expect a few thousand games
+before strong play emerges. Turn depth is set per game; there is no epochs knob.
+
+</details>
 
 ---
 
 ## Using it as a library
 
 ```python
-from wise_explorer.api import start_simulations
+from wise_explorer import train, play
 from wise_explorer.memory import for_game, open_readonly
 from wise_explorer.games import TicTacToe
-from wise_explorer.utils.factory import create_agent_swarms
 
 game = TicTacToe()
-swarms = create_agent_swarms(players=[1, 2], agents_per_player=20)
-memory = for_game(game)                       # data/memory/tic_tac_toe.db by default
+memory = for_game(game)                 # data/memory/tic_tac_toe.db by default
 
-start_simulations(
-    agent_swarms=swarms, game=game,
-    turn_depth=20, simulations=200,
-    memory=memory, training_enabled=True,
-)
-print(memory.get_info())                      # {'anchors': ..., 'concepts': ..., 'transitions': ...}
-print(memory.concept_library.summary())       # the rules it invented, spelled out
-memory.close()
+train(memory, game, games=2000)         # cumulative self-play
+print(memory.get_info())                # {'concepts': ..., 'transitions': ...}
+print(memory.concept_library.summary()) # the rules it invented, spelled out
+
+play(memory, game, human_players=[1])   # play it; [] = watch it play itself
 
 # Markov mode: only the resulting position matters, V(s)=f(s) — faster, but discards
 # path context (e.g. castling rights).  →  for_game(game, markov=True)
-# Read-only handle (parallel workers / inspection)  →  open_readonly("data/memory/tic_tac_toe.db")
+# Read-only handle (parallel inspection) →  open_readonly("data/memory/tic_tac_toe.db")
 ```
 
 `for_game()` returns a `TransitionMemory` (default) or `MarkovMemory`; `GameMemory` is the
@@ -672,7 +527,7 @@ class MyGame(GameBase):
     def state_string(self) -> str: ...       # pretty-print for debugging
 ```
 
-Then add it to `GAMES` and `INITIAL_STATES` in
+Then add it to `GAMES`, `INITIAL_STATES`, and `TURN_DEPTHS` in
 [`utils/config.py`](src/wise_explorer/utils/config.py). See
 [`games/nim.py`](src/wise_explorer/games/nim.py) (minimal) and
 [`games/minichess.py`](src/wise_explorer/games/minichess.py) (full) for examples.
@@ -683,26 +538,25 @@ Then add it to `GAMES` and `INITIAL_STATES` in
 
 ```
 src/wise_explorer/
-├── cli.py · api.py             # CLI (train·play·invent·transfer) + public API (start_simulations)
+├── cli.py · api.py             # CLI (play·train·invent·transfer) + library API (train·play)
 ├── synthesis.py                # the discovery engine: fold programs, MDL, the readable reader
 ├── agent/agent.py              # Agent dataclass and State enum
-├── core/                       # types.py (Bayesian scoring) · hashing.py · bayes.py (Bayes factor)
+├── core/                       # types.py (Bayesian scoring) · hashing.py
 ├── games/                      # game_base.py · tic_tac_toe.py · nim.py · minichess.py
 │
 ├── memory/                     # ── the heart of the system ──
-│   ├── game_memory.py          # shared base: recording, scoring, signal fusion
-│   ├── transition_memory.py    # path-dependent memory + Bellman / value loop / N-player α
+│   ├── game_memory.py          # shared base: recording, the value-loop cycle, certificates
+│   ├── transition_memory.py    # Bellman / completion / frontier proofs / collapse / α
 │   ├── markov_memory.py        # path-independent (state) memory
-│   ├── anchor_manager.py       # Bayes-factor clustering
-│   └── concept_library.py      # persisted invented concepts (the value signal)
+│   └── concept_library.py      # persisted invented concepts (the theory)
 │
-├── selection/                  # variance arbitration · training (explore) · inference (compete)
+├── selection/                  # the evidence ladder (play) · uncertainty + steering (training)
 ├── simulation/                 # runner.py (waves + value-loop cadence) · worker.py · training.py
 └── utils/ · debug/
 
-scripts/transfer_demo.py        # thin wrapper — prefer `wise-explorer transfer`
 docs/concept-invention.md       # the discovery engine, in depth
-docs/value-loop.md              # how discoveries repair the value graph
+docs/value-loop.md              # how values are computed and the theory is taught
+docs/certified-forgetting.md    # proofs replace transitions; the table empties
 tests/                          # mirrors src/   ·   data/memory/  SQLite DBs (auto-created)
 ```
 
@@ -717,21 +571,27 @@ zero-prior-knowledge and game-agnostic:
    (cell reads, arithmetic, one `fold` combinator) that invents the features explaining
    its experience, MDL-gated and reusing its own discoveries to build higher ones
    (lines → threats). On Nim it independently re-derives **Bouton's 1901 theorem**.
-2. **Cross-scale knowledge transfer** — invented concepts are width-free programs, so a
+2. **Certified forgetting** — invented values are proven by induction from the game's
+   terminals, and the transitions a proof reproduces are deleted. On a solved game the
+   database empties to nothing while play stays optimal; on a partial theory the residue
+   is a map of what remains unexplained. Self-healing: the proofs are facts, so they stand
+   even when the theory is corrupted.
+3. **Cross-scale knowledge transfer** — invented concepts are width-free programs, so a
    rule discovered on a 120-position game plays a 362,880-position game perfectly with
    zero training on it. Discover where the game is small; apply where it is big.
-3. **The value loop** — discoveries feed back into the value graph: Bellman backups
-   range over *all* legal replies, with never-played ones priced by the invented
-   concepts. Self-distillation anchored by raw evidence and the MDL gate; at 1%
-   coverage it keeps retraining at 400/400 where the uncorrected system collapses.
-4. **Variance-arbitrated multi-signal selection** — letting the data decide, per position,
-   whether statistics, clustering, game value, or an invented concept should drive the choice.
-5. **A principled N-player / non-zero-sum generalization of minimax** via an alignment
+4. **The value loop** — discoveries feed back into the value graph: backups range over
+   *all* legal replies, never-played ones priced by the concepts, proven boards pinned to
+   game truth. Self-distillation anchored by raw evidence and the MDL gate; at 1% coverage
+   it keeps retraining at 400/400 where the uncorrected system collapses.
+5. **The evidence ladder + parameter-free steering** — a single deterministic ranking
+   (proven > concept > statistics) replaces tuned multi-signal arbitration and *improves*
+   measured play; exploration drive is total remaining uncertainty in quadrature, zero on
+   proven ground, direction-blind so the theory can never wall off its own errors.
+6. **A principled N-player / non-zero-sum generalization of minimax** via an alignment
    factor learned from cross-player outcomes, recovering zero-sum minimax as a special case.
 
-> Re-imagined and extended from my Oberlin honors thesis. The anchors,
-> concept invention, Bellman propagation, and distribution sampling are independent
-> research since 2019.
+> Re-imagined and extended from my Oberlin honors thesis. The concept invention, certified
+> forgetting, Bellman propagation, and distribution sampling are independent research since 2019.
 
 ---
 
@@ -741,10 +601,10 @@ zero-prior-knowledge and game-agnostic:
 pytest                  # full suite   ·   pytest tests/test_synthesis.py  for the engine
 ```
 
-- **Play feels weak?** Training is cumulative — keep running; strong play can take thousands of epochs.
-- **Experiment** by tuning the outcome weights atop [`core/types.py`](src/wise_explorer/core/types.py).
+- **Play feels weak?** Training is cumulative — keep running; strong play can take thousands of games.
 - **Start over** by deleting the `.db` files in `data/memory/`.
 - **`database is locked`?** Delete the matching `.db-shm` / `.db-wal` files.
+- **Keep the table from emptying?** Set `WISE_COLLAPSE=0` to disable proof-licensed deletion.
 - **Performance** is workload-dependent — simple games run many hundreds of self-play games/sec
   on one worker and scale with `--workers`; move selection for known positions is ~constant-time.
 

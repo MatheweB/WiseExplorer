@@ -115,7 +115,7 @@ class GameMemory(ABC):
 
     @property
     def certified_values(self) -> dict[str, float]:
-        """Game-proven board values, by board hash (docs/certified-forgetting-v3.md).
+        """Game-proven board values, by board hash (docs/certified-forgetting.md).
         Loaded once per session; invalidated when certificates are written."""
         if self._certified_cache is None:
             try:

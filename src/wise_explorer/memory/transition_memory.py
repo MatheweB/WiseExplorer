@@ -543,7 +543,7 @@ class TransitionMemory(GameMemory):
         satisfy the all-replies-proven condition and are simply left unproven.
 
         Writes new certificates and returns how many were added.
-        (docs/certified-forgetting-v3.md)
+        (docs/certified-forgetting.md)
         """
         if graph is None:
             graph = self.reply_graph(game)
