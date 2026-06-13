@@ -80,7 +80,7 @@ class TestConceptLibrary:
 class TestBoundedRebuild:
     def test_rebuild_subsamples_past_the_cap(self, monkeypatch):
         # discovery's data view is bounded: past the cap, rebuild fits a uniform sample
-        monkeypatch.setattr(S, "CAP", 32)
+        monkeypatch.setattr(S.engine, "CAP", 32)   # CAP lives in synthesis.engine
         B, V, M = _xor_data()                                      # 64 rows > 32
         lib = ConceptLibrary(sqlite3.connect(":memory:"))
         assert lib.rebuild(B, V, M, max_size=5) >= 1               # nim-sum still found in the sample
