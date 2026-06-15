@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Callable
 
 import numpy as np
 
+from wise_explorer.core.hashing import hash_board
 from wise_explorer.memory import GameMemory
 from wise_explorer.selection import select_move
 from wise_explorer.simulation import SimulationRunner, DEFAULT_WORKER_COUNT, run_training
@@ -51,6 +52,12 @@ def train(
     swarms = create_agent_swarms(list(range(1, game.num_players() + 1)), _SWARM)
     step = max(1, games // 20)
     done = 0
+    # The initial position: once the proof frontier certifies IT, the game is solved by
+    # backward induction from the terminals — nothing more can be learned, and further
+    # self-play only re-records already-proven transitions. Stopping then is GUARANTEED
+    # correct (a proof is a proof); unsolved games (TTT, minichess) never certify the root,
+    # so they run their full budget. Markov memory has no certificates → never early-stops.
+    root_hash = hash_board(game.get_state().board)
     with SimulationRunner(memory, workers) as runner:
         while done < games:
             batch = min(step, games - done)
@@ -59,9 +66,11 @@ def train(
             done += batch
             if progress:
                 progress(done, games, memory)
+            if root_hash in memory.certified_values:    # solved → remaining games are waste
+                break
         memory.grow_concepts(game=game)
     if progress:
-        progress(games, games, memory)
+        progress(done, games, memory)            # `done` < games when solved early
 
 
 def play(
