@@ -172,8 +172,9 @@ Most self-play agents end up an opaque table of numbers. Wise Explorer additiona
 **invents the concepts** that explain its experience — as readable programs, *while it
 trains*.
 
-The whole language is three primitives — cell reads, arithmetic/bitwise operators, and one
-combinator, **`fold(op, domain, body)`**: reduce a formula over a region of the board.
+The whole language is three primitives — cell reads, a few operators (arithmetic, bitwise,
+sign/magnitude), and one combinator, **`fold(op, domain, body)`**: reduce a formula over a
+region of the board.
 Everything it has ever discovered is some nesting of that one shape, and each round builds
 its concepts *out of* the previous round's. The same loop runs a different number of
 rounds per game:
@@ -415,10 +416,10 @@ non-zero-sum proofs.)
 
 ---
 
-## Why it converges — the certainty frontier
+## Coverage and the certainty frontier
 
 The raw counts are **noisy** — they measure average, mixed-quality play. Game-theoretic
-truth converges from the game's **end backward**, since a position is only as reliable as
+truth firms up from the game's **end backward**, since a position is only as reliable as
 everything explored beneath it. So a *frontier of certainty* advances from the terminal
 states toward the opening, and the middlegame clears last — the same direction the proof
 frontier grows. Measured against perfect Tic-Tac-Toe play (uniformly-sampled reachable
@@ -426,14 +427,16 @@ positions vs. minimax):
 
 | after | optimal play |
 |---|--:|
-| 3,000 games | ~78% |
-| 8,000 games | ~93% |
-| 24,000 games | **~99.9%** |
+| 3,000 games | ~84% |
+| 8,000 games | ~85% |
+| more coverage | plateaus **~90%** |
 
-The system is **exploration-limited, not decision-limited**: give it coverage and play
-converges to optimal. (Removing the old four-signal stack in favor of the evidence ladder
-*improved* measured Tic-Tac-Toe play at every checkpoint — raw counts can't be poisoned by
-a partial theory the way a coverage-biased value signal can.)
+Play improves with coverage as the frontier advances, then **plateaus around ~90%** — short
+of perfect. Closing that last gap is an open limitation, not a solved convergence: once
+discovery saturates, more games deepen the evidence but stop lifting late-game play.
+(Removing the old four-signal stack in favor of the evidence ladder *improved* measured play
+at every checkpoint — raw counts can't be poisoned by a partial theory the way a
+coverage-biased value signal can.)
 
 ---
 
@@ -447,24 +450,26 @@ pip install -e .            # add ".[dev]" for the test suite
 
 ```bash
 wise-explorer train -g nim --games 2000    # self-play training (cumulative)
-wise-explorer play  -g tic_tac_toe         # play the AI — it learns as you play
-wise-explorer play  -g nim --watch         # watch it play (and learn from) itself
+wise-explorer play  -g tic_tac_toe         # play the AI (frozen; --learn to learn as you play)
+wise-explorer play  -g nim --watch         # watch it play itself
 wise-explorer invent -g nim                # print the rules it discovered
+wise-explorer eval   -g nim                # optimal-move rate vs a perfect oracle
 wise-explorer transfer                     # discover on 4 piles, play 8 zero-shot
 ```
 
-`play` learns as it goes: before each of its moves it runs a few self-play games *from the
-current position*, so the theory sharpens around the line you're actually in (`--no-learn`
-to play frozen). `--explain` shows the evidence ladder behind each move; `--verbose` dumps
-every candidate.
+`play` is **frozen by default** — it uses the rules already trained. Add `--learn` (or
+`--ponder N`) and before each of its moves it runs a few self-play games *from the current
+position*, so the theory sharpens around the line you're actually in. `--explain` shows the
+evidence ladder behind each move; `--verbose` dumps every candidate.
 
 <details>
 <summary><b>All commands and flags</b></summary>
 
 | Command | Key flags | Description |
 |---|---|---|
-| `play` | `-g` game · `--watch` · `--ponder N` · `--explain` · `--verbose` · `--no-learn` | Play (default). Ponders N self-play games from the current position per AI move. |
+| `play` | `-g` game · `-p` seats · `--watch` · `--learn` · `--ponder N` · `--explain` · `--verbose` | Play (default), **frozen**. `--learn` / `--ponder N` self-plays from the current position before each AI move (`--ponder 0` = frozen). |
 | `train` | `-g` game · `--games N` (default 2000) · `-w` workers · `--markov` | Run N self-play games into the cumulative database. |
+| `eval` | `-g` game · `-n` size | Optimal-move rate of the trained model vs a perfect oracle (Nim, Tic-Tac-Toe). |
 | `invent` | `-g` game · `--ledger` · `--expand` | Print the discovered rules. `--ledger` re-runs discovery with the full bits ledger. |
 | `transfer` | `--piles N` · `--full` | Discover the nim-sum on 4 piles, play N-pile Nim zero-shot. |
 
@@ -538,8 +543,8 @@ Then add it to `GAMES`, `INITIAL_STATES`, and `TURN_DEPTHS` in
 
 ```
 src/wise_explorer/
-├── cli.py · api.py             # CLI (play·train·invent·transfer) + library API (train·play)
-├── synthesis.py                # the discovery engine: fold programs, MDL, the readable reader
+├── cli.py · api.py             # CLI (play·train·eval·invent·transfer) + library API (train·play)
+├── synthesis/                  # the discovery engine — exprs (fold algebra) · engine (search + MDL) · reader (readable render)
 ├── agent/agent.py              # Agent dataclass and State enum
 ├── core/                       # types.py (Bayesian scoring) · hashing.py
 ├── games/                      # game_base.py · tic_tac_toe.py · nim.py · minichess.py

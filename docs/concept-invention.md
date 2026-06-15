@@ -5,8 +5,9 @@
 > own discoveries to reach richer ones, and knows when to stop — all under one rule: **prefer
 > the shortest description of the data**.*
 
-This note describes the **concept-invention** engine (`wise_explorer/synthesis.py`, exposed as
-the `wise-explorer invent` command) — the system's one discovery mechanism. Instead of splitting
+This note describes the **concept-invention** engine (`wise_explorer/synthesis/` — `exprs`
+the fold algebra, `engine` the search + MDL, `reader` the readable render; exposed as the
+`wise-explorer invent` command) — the system's one discovery mechanism. Instead of splitting
 on a fixed vocabulary of board features, it **searches for new features to build** out of
 generic primitives, scores them by how much they compress the game's learned values (the
 completed Bellman values — not the raw game records), and reuses its own discoveries to
@@ -216,7 +217,7 @@ flowchart TD
     classDef gate fill:#9a3412,stroke:#7c2d12,color:#ffedd5
     D["self-play transitions A → B<br/>each gives a board, its value,<br/>and the move m (the placed token)"] --> R1
     subgraph R1["ROUND 1 · build from cells"]
-      P["primitives: cells · ops ⊕ &amp; | + dist max min · the move m"]
+      P["primitives: cells · ops ⊕ &amp; | + dist max min · sgn abs · the move m"]
       P --> S["bottom-up search,<br/>deduped by observational equivalence,<br/>scored by MDL"]
       S --> L["keeps: nim-sum, the lines, …"]
     end

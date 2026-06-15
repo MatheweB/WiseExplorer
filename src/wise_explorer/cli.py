@@ -3,6 +3,7 @@ Command-line interface.
 
     wise-explorer play   [-g GAME]   play against the AI (default)
     wise-explorer train  [-g GAME]   run self-play training
+    wise-explorer eval   [-g GAME]   score the trained model vs a perfect oracle
     wise-explorer invent [-g GAME]   show the concepts it discovered
     wise-explorer transfer           discover on small Nim, play big Nim zero-shot
 """
