@@ -53,10 +53,12 @@ def train(
     step = max(1, games // 20)
     done = 0
     # The initial position: once the proof frontier certifies IT, the game is solved by
-    # backward induction from the terminals — nothing more can be learned, and further
-    # self-play only re-records already-proven transitions. Stopping then is GUARANTEED
-    # correct (a proof is a proof); unsolved games (TTT, minichess) never certify the root,
-    # so they run their full budget. Markov memory has no certificates → never early-stops.
+    # backward induction from the terminals. We also wait for a discovered concept, because
+    # proofs reach the root FASTER than discovery finds the law (Nim's root is proven by ~game
+    # 200; the nim-sum forms later) — and that concept is the readable theory the showcase
+    # prints and the width-free program that TRANSFERS to bigger boards, so stopping on the
+    # proof alone would skip it. With both, nothing more can be learned. Unsolved games (TTT,
+    # minichess) never certify the root, so they run their full budget.
     root_hash = hash_board(game.get_state().board)
     with SimulationRunner(memory, workers) as runner:
         while done < games:
@@ -66,8 +68,8 @@ def train(
             done += batch
             if progress:
                 progress(done, games, memory)
-            if root_hash in memory.certified_values:    # solved → remaining games are waste
-                break
+            if root_hash in memory.certified_values and memory.concept_library.rules:
+                break                                    # solved AND theory captured → done
         memory.grow_concepts(game=game)
     if progress:
         progress(done, games, memory)            # `done` < games when solved early

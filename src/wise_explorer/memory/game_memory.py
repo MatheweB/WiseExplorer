@@ -374,30 +374,31 @@ class GameMemory(ABC):
         self.solve_graph()
         if game is None:
             return self.concept_library.rebuild(*synthesis._boards_values(self))
-        # one structural enumeration serves the whole cycle: its steps never add boards or
-        # transitions, so every pass shares this reply graph and the refit reuses its boards
-        graph = self.reply_graph(game)
         if not self.concept_library.rules:
             # bootstrap: completion can't lend prices from an empty head. On a rule-less
-            # boundary (cold start, or a freshly seeded library whose rules are cleared) the
-            # evidence fit IS the first beat. (Measured: skipping it leaves the first boundary
-            # fitting on raw evidence AND healing with it — 87/200 on seeded 8-pile Nim vs ~199
-            # once rules exist.) If it pays nothing, the rules-gated block below is skipped — a
-            # concept-less game (minichess) never pays two full searches a turn.
+            # boundary (cold start, or a freshly seeded library whose rules are cleared)
+            # the evidence fit IS the first beat. (Measured: skipping it leaves the first
+            # boundary fitting on raw evidence AND healing with it — 87/200 on seeded
+            # 8-pile Nim vs ~199 once rules exist.) If nothing pays, stop here: prove + forget
+            # are gated behind a discovered theory — collapse deletes the very boards the
+            # first concept is fit from, so forgetting before a concept exists starves
+            # discovery (measured: TTT → 0 concepts), and a second search over the same
+            # evidence would re-find the same nothing (keeps minichess from two searches a turn).
             self.concept_library.rebuild(*synthesis._boards_values(self))
-        if self.concept_library.rules:
-            self.complete_values(game, graph)    # price never-played replies for the fit
-            B, V, M = synthesis._boards_values(self, graph["boards"] if graph else None)
-            self.concept_library.rebuild(B, V, M)
-        # Proof + collapse are induction from the game's TERMINALS — sound and useful with or
-        # without a theory, so they run EVERY cycle. (They used to be gated behind concept
-        # discovery, which left a solvable game's table un-collapsed until a concept happened to
-        # form — Nim did all its proving and forgetting only in the final end-of-run cycle.)
+            if not self.concept_library.rules:
+                return len(self.concept_library.kept)
+        # one structural enumeration serves the whole cycle: its steps never add
+        # boards or transitions, so every pass shares this reply graph and the
+        # refit reuses its loaded boards
+        graph = self.reply_graph(game)
+        self.complete_values(game, graph)
+        B, V, M = synthesis._boards_values(self, graph["boards"] if graph else None)
+        kept = self.concept_library.rebuild(B, V, M)
+        self.complete_values(game, graph)        # re-price with the rules just distilled
         self.frontier_certify(game, graph)       # prove what now chains to terminals
-        self.complete_values(game, graph)        # converge values + PIN the just-proven boards
         if os.environ.get("WISE_COLLAPSE", "1") != "0":
-            self.collapse_proven()               # forget what the proofs reproduce (precisely)
-        return len(self.concept_library.kept)
+            self.collapse_proven()               # forget what the proofs reproduce
+        return kept
 
     def _record_cross_scores(self, cross_scores: dict) -> None:
         """Hook for recording cross-scores. No-op for Markov memory."""
