@@ -93,17 +93,12 @@ class SimulationRunner:
         self.memory = memory
         self.num_workers = num_workers
         self._pool: Pool | None = None
-        # The wheel turns when the evidence has doubled SINCE THIS SESSION BEGAN — a
-        # resumed run must not re-turn for evidence that was already considered (on a
-        # large accumulated DB that stalls the first wave for minutes). The end-of-run
-        # turn in run_training still leaves every session with a considered fit.
-        self._wheel_turned_at = 0
-        if not memory.read_only:
-            try:
-                self._wheel_turned_at = memory.conn.execute(
-                    f"SELECT COUNT(*) FROM {memory.main_table}").fetchone()[0]
-            except Exception:
-                pass
+        # The cycle fires when GAMES SEEN THIS SESSION doubles (see run_batch). Games always
+        # grow, so cycles keep firing as coverage deepens — unlike the old distinct-row trigger,
+        # which saturated on a small game (TTT/Nim) and froze the proof frontier + collapse
+        # mid-run. Session-local, so a resumed run starts fresh and never re-fires on old rows.
+        self._games_seen = 0
+        self._games_at_last_cycle = 0
 
         _active_runners.append(self)
         register_memory(memory)
@@ -188,17 +183,15 @@ class SimulationRunner:
                 transitions, _swaps = self._commit(wave_results)
                 total_transitions += transitions
 
-                # Run one value-loop cycle (docs/value-loop.md) whenever the evidence
-                # graph has doubled: solve → complete → fit → prove → forget. O(log N)
-                # cycles per run, so discovery and forgetting happen *during* training,
-                # not only at the end. Synchronous and in-process — cycles are fast
-                # post-refactor (~1s), and running here (while the pool is idle between
-                # waves) avoids the cross-process DB contention a background worker hit.
-                graph = self.memory.conn.execute(
-                    f"SELECT COUNT(*) FROM {self.memory.main_table}").fetchone()[0]
-                if graph >= max(2 * self._wheel_turned_at, synthesis.MIN_BOARDS):
+                # Run one value-loop cycle (docs/value-loop.md) whenever GAMES SEEN this session
+                # doubles: solve → complete → prove → forget (+ fit). O(log games) cycles per
+                # run, spread across the whole run, so discovery and forgetting keep happening
+                # *during* training — not front-loaded then frozen once the row count saturates.
+                # Synchronous and in-process (cycles are ~1s), run while the pool is idle.
+                self._games_seen += len(wave_jobs)
+                if self._games_seen >= max(2 * self._games_at_last_cycle, synthesis.MIN_BOARDS):
                     self.memory.grow_concepts(game=game)
-                    self._wheel_turned_at = graph
+                    self._games_at_last_cycle = self._games_seen
 
                 job_idx += len(wave_jobs)
 
