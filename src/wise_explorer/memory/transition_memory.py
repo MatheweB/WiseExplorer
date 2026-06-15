@@ -483,8 +483,6 @@ class TransitionMemory(GameMemory):
         never-played replies were priced.
         """
         lib = self.concept_library
-        if not lib.rules:
-            return 0                                    # nothing known → nothing to lend
         if graph is None:
             graph = self.reply_graph(game)
         if graph is None:
@@ -493,10 +491,13 @@ class TransitionMemory(GameMemory):
         starts, has_kids = graph["starts"], graph["has_kids"]
         n = len(graph["V0"])
 
-        # price the never-played replies with the *current* rules (they change between heals)
+        # price the never-played replies with the *current* rules (they change between heals).
+        # Pricing needs a theory; the proven-board PINNING below does not — it is ground truth,
+        # so this pass still converges values and pins proofs even with an empty library, which
+        # is what lets collapse delete precisely before any concept forms.
         consts = np.full(len(known), np.nan)
         priced = 0
-        if len(graph["novel_boards"]):
+        if lib.rules and len(graph["novel_boards"]):
             prices = lib.values_for(graph["novel_boards"], graph["novel_m"])
             consts[graph["novel_rows"]] = prices
             priced = int(np.count_nonzero(~np.isnan(prices)))
