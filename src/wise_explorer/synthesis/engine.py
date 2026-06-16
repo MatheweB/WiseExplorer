@@ -59,11 +59,15 @@ def _synthesize(terminals: list[Expr], B: np.ndarray, max_size: int, cap: int | 
                     e = UnaryOp(u, ea)
                     seen[key] = e
                     by_size[s].append((e, vec))
-        for op in _OPS:
-            for i in range(1, s - 1):
-                j = s - 1 - i
-                for ea, va in by_size[i]:
-                    for eb, vb in by_size[j]:
+        for op in _OPS:                                   # every _OP is commutative, so only
+            for i in range(1, s - 1):                      # enumerate i ≤ j — (j,i) would just
+                j = s - 1 - i                              # repeat (i,j) with the operands swapped
+                if i > j:
+                    continue
+                left = by_size[i]
+                for ai, (ea, va) in enumerate(left):
+                    rest = by_size[j][ai:] if i == j else by_size[j]   # same size ⇒ upper triangle
+                    for eb, vb in rest:
                         if cap and len(by_size[s]) >= cap:
                             break
                         vec = _OPS[op](va, vb).astype(np.int64)
@@ -85,7 +89,13 @@ def _candidate_concepts(seen, B, V, min_leaf) -> list[Concept]:
     once per split, which is almost all per-call overhead on these small arrays. (A fully
     batched flat-bincount version was built and benched: bit-identical results, 0.9× —
     the time lives in admitting kept candidates, not in the per-program numpy calls — so
-    the simpler per-program form stays.)"""
+    the simpler per-program form stays.)
+
+    Ranks by variance, NOT the tree's exact `_bits` entropy gain. Making the two consistent
+    was measured and reverted: the exact criterion fires `gain>0` on nearly every split
+    (~15k candidates) and ranks pure-tiny-group isolators top, starving the group-fold layer
+    — TTT discovery collapsed (0 concepts at 2k; cryptic xor/dist composites by 5k). Variance
+    is the better *prefilter*; acceptance still uses `_bits`."""
     N = len(V)
     V2 = V * V
     S = float(V.sum())
@@ -148,6 +158,8 @@ def _cell_group(e: Expr) -> tuple[int, ...]:
         elif isinstance(x, BinOp):
             walk(x.a)
             walk(x.b)
+        elif isinstance(x, UnaryOp):
+            walk(x.a)
         elif isinstance(x, Named):
             walk(x.inner)
         elif isinstance(x, Fold):
@@ -168,6 +180,8 @@ def _is_atomic(e: Expr) -> bool:
     No size or shape rule — any coherent cell region qualifies."""
     if isinstance(e, BinOp):
         return _is_atomic(e.a) and _is_atomic(e.b)
+    if isinstance(e, UnaryOp):
+        return _is_atomic(e.a)
     return isinstance(e, (Cell, Lit))
 
 
@@ -367,7 +381,16 @@ def _invent_round(kept, prior_rules, resid, model, B, V, M, min_leaf, base, max_
     seen = _synthesize(library, B, max_size, cap)
     cands = _candidate_concepts(seen, B, V, min_leaf)
     have = {c.mask.tobytes() for c in kept}
-    pool_new = [c for c in (extra_atoms + cands) if c.mask.tobytes() not in have][:POOL]
+    seen_masks = set(have)
+    pool_new = []                                          # dedup within the pool too, not just
+    for c in extra_atoms + cands:                          # vs kept — so POOL slots aren't wasted
+        key = c.mask.tobytes()                             # on two equivalent new atoms
+        if key in seen_masks:
+            continue
+        seen_masks.add(key)
+        pool_new.append(c)
+        if len(pool_new) >= POOL:
+            break
     if not pool_new:
         return [], prior_rules, resid, model, 0.0, 0.0, False
     rules = _build_rules(kept + pool_new, V, min_leaf)
