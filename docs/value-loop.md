@@ -75,8 +75,8 @@ evidence for the unexplored moves themselves.
 
 ## One cycle
 
-The loop runs whenever the number of stored transitions has **doubled** since the last
-run, plus once at the end of training. One cycle, in order:
+The loop runs whenever the number of **self-play games this session** has doubled, plus
+once at the end of training. One cycle, in order:
 
 1. **Self-play** (between cycles) appends transitions with raw win/draw/loss counts,
    and keeps `bell` roughly fresh with a cheap backward sweep along each played line
@@ -141,21 +141,31 @@ then runs discovery once on the evidence-only values to produce a provisional fi
 proceeds normally (3 → 4 → 5). Measured on seeded 8-pile Nim: skipping this leaves the
 first cycle fitting *and completing* on raw evidence (87/200 optimal); with it, 191/200.
 
-## Why doubling
+## Why doubling on games
 
-The trigger is deliberately dumb. An adaptive trigger would have to watch some statistic
-for "knowledge has changed", and every such statistic needs its own threshold (a pure
-insufficiency trigger was benched in this codebase's history: it fires in storms).
-Doubling has no parameter, and buys three properties:
+The trigger is deliberately dumb — no statistic to watch, no threshold to tune (a pure
+insufficiency trigger was benched in this codebase's history: it fires in storms). It
+counts **games seen this session**. It once counted *stored transitions*, but that
+**saturates**: a small game's reachable states fill, the row count stops doubling, and the
+loop froze mid-run — on Tic-Tac-Toe the proof frontier stuck while thousands of late games
+added nothing. Games always grow, so the cadence keeps firing as coverage deepens. Doubling
+on them has no parameter and buys three properties:
 
-- **Bounded cost.** Each cycle processes a graph ~2× the last, so total loop work over
-  a run is about twice the final cycle — amortized constant per game, the same argument
-  that makes dynamic arrays cheap.
-- **Density matches need.** Cycles are frequent early (small graph, cheap cycles,
-  library still forming) and rare late (large graph, expensive cycles, library stable).
-- **Waiting loses nothing.** A concept is a program: a regularity visible in N
-  transitions is still visible in 2N. Postponing discovery delays a concept by at most
-  one doubling and never destroys it. `bell` is never more than one doubling stale.
+- **Bounded cost.** `O(log games)` cycles over a run, each bounded by the graph — itself
+  bounded by the reachable state space — so the loop is never more than logarithmic overhead.
+- **Density matches need.** Cycles are frequent early (small graph, cheap, library still
+  forming) and rare late (the doublings spread out), exactly when the library has stabilized.
+- **Waiting loses nothing.** A concept is a program: a regularity visible in N games is
+  still visible in 2N. Postponing discovery delays a concept by at most one doubling and
+  never destroys it. `bell` is never more than one doubling stale.
+
+**Stopping early when solved.** Training runs its full budget unless the game is *solved*:
+once the frontier certifies the **initial position** and a concept has formed, backward
+induction has reached the start — nothing is left to learn, and further self-play only
+re-records already-proven transitions. Nim hits this at ~400 games (of a 2,000 budget); a
+partial game never certifies its root, so it runs the full budget. The concept condition
+matters because proofs reach the root *faster* than discovery finds the law — stopping on
+the proof alone would skip the readable theory and the program that transfers (`api.train`).
 
 Measured on seeded 8-pile Nim: a single end-of-run cycle after 3,000 games leaves `bell`
 uncompleted the whole way and scores 176/400; cycling at doublings scores **400/400** —
@@ -276,6 +286,7 @@ recovered it to 200/200 — the same mechanism, run in reverse.
 | the completed backup | `TransitionMemory.complete_values` |
 | cycle ordering + bootstrap | `GameMemory.grow_concepts` |
 | prove + forget (cycle tail) | `TransitionMemory.frontier_certify` · `collapse_proven` ([certified-forgetting.md](certified-forgetting.md)) |
-| the doubling cadence | `SimulationRunner.run_batch` |
+| the games-doubling cadence | `SimulationRunner.run_batch` |
 | end-of-run cycle | `run_training` passes the game |
+| early-stop when the root is certified | `api.train` |
 | inert default | `GameMemory.complete_values` returns 0 (Markov mode, empty library) |

@@ -34,11 +34,12 @@ Then it goes further. The game itself is a **replayable oracle**, so the system 
 each board's value by induction from the terminal positions — no play, nothing the
 theory can bias — and **deletes every stored game the proof reproduces**. On 4-pile Nim
 the transition table collapses **594 rows → 0** while play stays optimal in **every**
-winning position (96/96). The two-line theorem is the only thing left. Watch it, in
-seconds:
+winning position (96/96) — and once the opening itself is proven, **training halts on its
+own** (~400 games, not the 2,000 you asked for: the game is solved, there is nothing left to
+learn). The two-line theorem is the only thing left. Watch it, in seconds:
 
 ```bash
-wise-explorer train -g nim --games 2000   # discovers the nim-sum, proves it, empties the table
+wise-explorer train -g nim --games 2000   # discovers the nim-sum, proves it, empties the table, stops when solved
 wise-explorer invent -g nim               # prints the two-line theorem it plays with
 ```
 
@@ -274,7 +275,7 @@ Discovery is only as good as the values it fits, and raw self-play values have a
 spot. A Bellman backup takes its max over replies somebody **played** — so when ~93% of
 positions are never visited, a position whose refutation is among them gets *overvalued*,
 and a fit on those values learns the error. The value loop closes the gap with the
-system's own discoveries. Each time the stored evidence has doubled, one cycle runs:
+system's own discoveries. Each time the games this session double, one cycle runs:
 
 ```mermaid
 flowchart LR
@@ -283,7 +284,7 @@ flowchart LR
     classDef di fill:#065f46,stroke:#047857,color:#d1fae5
     classDef pr fill:#713f12,stroke:#a16207,color:#fef9c3
     classDef pl fill:#1f2937,stroke:#475569,color:#e5e7eb
-    P(["self-play<br/>raw W/D/L counts"]):::pl -->|"evidence ×2"| S["1 · solve<br/>values from raw counts only"]:::ev
+    P(["self-play<br/>raw W/D/L counts"]):::pl -->|"games ×2"| S["1 · solve<br/>values from raw counts only"]:::ev
     S --> C1["2 · complete<br/>library prices never-played replies;<br/>proven boards pinned to game truth"]:::co
     C1 --> D["3 · fit<br/>refit the theory on the completed values"]:::di
     D --> C2["4 · complete<br/>re-price with the fresh rules"]:::co
