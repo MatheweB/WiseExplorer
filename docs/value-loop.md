@@ -73,27 +73,37 @@ marked refuted even though move 5 was never played. The loop repairs the evidenc
 explored moves by accounting for the unexplored alternatives — it does not fabricate
 evidence for the unexplored moves themselves.
 
-## One cycle
+## Two tiers
 
-The loop runs whenever the number of **self-play games this session** has doubled, plus
-once at the end of training. One cycle, in order:
+The loop is split by cost. The **cheap tail runs every wave**; the **expensive rebuild runs
+on a schedule** — every time the self-play games since the last rebuild have doubled, plus
+once at the end of training.
 
-1. **Self-play** (between cycles) appends transitions with raw win/draw/loss counts,
+**Every wave — prove + forget** (`prove_and_forget`): `frontier_certify` proves whatever now
+chains to the game's terminals, and `collapse_proven` deletes the rows those proofs reproduce
+([certified-forgetting.md](certified-forgetting.md)). It is pure structural induction from the
+terminals — it reads no library prices and no `bell` — so it needs no re-solve, which is what
+lets it run every wave. The proof frontier thus advances continuously, never in jumps. (Gated
+behind a discovered concept: collapse must not delete the boards the first fit is built from.)
+
+**On games-doubling — the full rebuild** (`grow_concepts`), in order:
+
+1. **Self-play** (between rebuilds) appends transitions with raw win/draw/loss counts,
    and keeps `bell` roughly fresh with a cheap backward sweep along each played line
-   (`propagate_bellman`, every wave). The cycle's full rebuild below subsumes those
-   incremental updates — the sweep is a cache refresh, not a second source of truth.
+   (`propagate_bellman`, every wave). The rebuild below subsumes those incremental
+   updates — the sweep is a cache refresh, not a second source of truth.
 2. **`solve_graph`** — recompute every value from raw counts alone. The previous
-   cycle's completions are discarded, not accumulated: library prices never persist
+   rebuild's completions are discarded, not accumulated: library prices never persist
    into the evidence pass.
 3. **`complete_values`** — widen every backup's max to all legal replies, pricing
    unvisited ones with the current library and pinning proven boards to their
    certified values (game truth outranks any backup).
 4. **Discovery** — refit the concept library on the completed values; the MDL gate
-   decides what is kept ([concept-invention.md](concept-invention.md)).
+   decides what is kept ([concept-invention.md](concept-invention.md)). The search runs
+   unconditionally on the schedule; its own MDL gate is the sole judge of what pays, so a
+   rebuild that finds nothing simply keeps the library it had.
 5. **`complete_values`** again — so the stored values reflect the library just fitted.
-6. **Prove + forget** — `frontier_certify` proves whatever now chains to the game's
-   terminals, and `collapse_proven` deletes the rows those proofs reproduce
-   ([certified-forgetting.md](certified-forgetting.md)).
+6. **Prove + forget** — the same cheap tail, closing the rebuild on the freshest library.
 
 ```mermaid
 flowchart LR
@@ -103,12 +113,13 @@ flowchart LR
     classDef co fill:#9a3412,stroke:#7c2d12,color:#ffedd5
     classDef di fill:#065f46,stroke:#047857,color:#d1fae5
     P["1 · self-play — every wave<br/>selection = uncertainty over raw counts<br/>(never reads bell or the library)"]:::pl -->|"appends"| K[("raw W/D/L<br/>counts")]:::db
-    K -->|"transitions ×2<br/>⇒ one cycle"| S["2 · solve_graph<br/>bell ← values from counts alone<br/>(last cycle's completions discarded)"]:::ev
+    K -->|"every wave"| PR["prove + forget<br/>certify from terminals · delete proven rows"]:::db
+    K -->|"games ×2<br/>⇒ one rebuild"| S["2 · solve_graph<br/>bell ← values from counts alone<br/>(last rebuild's completions discarded)"]:::ev
     S --> C1["3 · complete_values<br/>bell ← max over ALL legal replies;<br/>library prices the unvisited"]:::co
     C1 --> D["4 · discovery<br/>library ← refit on completed values<br/>(seeded with the current library)"]:::di
     D --> C2["5 · complete_values<br/>bell ← completed with the refit library"]:::co
-    C2 --> PR["6 · prove + forget<br/>certify from terminals · delete proven rows"]:::db
-    PR --> OUT(["the theory + proofs<br/>feed competitive play & the next cycle"]):::pl
+    C2 --> PR
+    PR --> OUT(["the theory + proofs<br/>feed competitive play & the next rebuild"]):::pl
 ```
 
 Note the shape: the two loops touch only through the counts. Self-play never reads the
@@ -143,17 +154,19 @@ first cycle fitting *and completing* on raw evidence (87/200 optimal); with it, 
 
 ## Why doubling on games
 
-The trigger is deliberately dumb — no statistic to watch, no threshold to tune (a pure
-insufficiency trigger was benched in this codebase's history: it fires in storms). It
-counts **games seen this session**. It once counted *stored transitions*, but that
-**saturates**: a small game's reachable states fill, the row count stops doubling, and the
-loop froze mid-run — on Tic-Tac-Toe the proof frontier stuck while thousands of late games
-added nothing. Games always grow, so the cadence keeps firing as coverage deepens. Doubling
-on them has no parameter and buys three properties:
+The rebuild trigger is deliberately dumb — no statistic to watch, no threshold to tune (a
+pure insufficiency trigger was benched in this codebase's history: it fires in storms). It
+counts **games seen since the last rebuild**. It once keyed the whole loop on *stored
+transitions*, but that **saturates**: a small game's reachable states fill, the row count
+stops doubling, and the loop froze mid-run — on Tic-Tac-Toe the proof frontier stuck while
+thousands of late games added nothing. Splitting the loop fixes that at the root — prove +
+forget now runs every wave, so the frontier never waits on the rebuild clock at all — and the
+rebuild keys on games, which always grow. Doubling on them has no parameter and buys three
+properties:
 
-- **Bounded cost.** `O(log games)` cycles over a run, each bounded by the graph — itself
-  bounded by the reachable state space — so the loop is never more than logarithmic overhead.
-- **Density matches need.** Cycles are frequent early (small graph, cheap, library still
+- **Bounded cost.** `O(log games)` rebuilds over a run, each bounded by the graph — itself
+  bounded by the reachable state space — so the search is never more than logarithmic overhead.
+- **Density matches need.** Rebuilds are frequent early (small graph, cheap, library still
   forming) and rare late (the doublings spread out), exactly when the library has stabilized.
 - **Waiting loses nothing.** A concept is a program: a regularity visible in N games is
   still visible in 2N. Postponing discovery delays a concept by at most one doubling and
@@ -284,9 +297,9 @@ recovered it to 200/200 — the same mechanism, run in reverse.
 | batched pricing `L(r)` | `ConceptLibrary.values_for` |
 | reply enumeration (built once per cycle) | `TransitionMemory.reply_graph` |
 | the completed backup | `TransitionMemory.complete_values` |
-| cycle ordering + bootstrap | `GameMemory.grow_concepts` |
-| prove + forget (cycle tail) | `TransitionMemory.frontier_certify` · `collapse_proven` ([certified-forgetting.md](certified-forgetting.md)) |
-| the games-doubling cadence | `SimulationRunner.run_batch` |
-| end-of-run cycle | `run_training` passes the game |
+| rebuild ordering + bootstrap | `GameMemory.grow_concepts` |
+| prove + forget — every wave + rebuild tail | `GameMemory.prove_and_forget` · `TransitionMemory.frontier_certify` · `collapse_proven` ([certified-forgetting.md](certified-forgetting.md)) |
+| the two tiers (prove every wave · search on games-doubling) | `SimulationRunner.run_batch` |
+| end-of-run rebuild | `run_training` passes the game |
 | early-stop when the root is certified | `api.train` |
 | inert default | `GameMemory.complete_values` returns 0 (Markov mode, empty library) |

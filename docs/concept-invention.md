@@ -12,7 +12,7 @@ on a fixed vocabulary of board features, it **searches for new features to build
 generic primitives, scores them by how much they compress the game's learned values (the
 completed Bellman values — not the raw game records), and reuses its own discoveries to
 reach concepts that were out of reach from scratch. It runs inside the
-[value loop](value-loop.md) — whenever the games this session double — and its
+[value loop](value-loop.md) — whenever the games since the last search double — and its
 discoveries are consumed in exactly two places: competitive move selection (the only
 signal that generalizes to boards training never visited) and the value loop's
 completion pass. Training-time selection never reads them — exploration is
@@ -399,8 +399,8 @@ round stops paying. (Exact numbers vary per run.)
 
 ## When it runs: inside the value loop
 
-Discovery runs at one venue, on one kind of target: whenever the games this session
-double (and once more at the end of training), the [value loop](value-loop.md)
+Discovery runs at one venue, on one kind of target: whenever the games since the last
+search double (and once more at the end of training), the [value loop](value-loop.md)
 recomputes all values from raw counts, completes them with the current library (pricing
 the replies training never played), and *then* runs discovery over those completed
 values — the system's best current belief. The search is seeded with the current

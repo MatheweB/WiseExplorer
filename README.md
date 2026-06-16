@@ -275,7 +275,10 @@ Discovery is only as good as the values it fits, and raw self-play values have a
 spot. A Bellman backup takes its max over replies somebody **played** — so when ~93% of
 positions are never visited, a position whose refutation is among them gets *overvalued*,
 and a fit on those values learns the error. The value loop closes the gap with the
-system's own discoveries. Each time the games this session double, one cycle runs:
+system's own discoveries. It runs in two tiers: the cheap **prove + forget** runs every
+wave, so the proof frontier always advances; the expensive **rebuild** (solve → fit) fires
+on a clock — each time the games since the last rebuild double — and once it runs, its MDL
+gate decides what pays:
 
 ```mermaid
 flowchart LR
@@ -284,11 +287,12 @@ flowchart LR
     classDef di fill:#065f46,stroke:#047857,color:#d1fae5
     classDef pr fill:#713f12,stroke:#a16207,color:#fef9c3
     classDef pl fill:#1f2937,stroke:#475569,color:#e5e7eb
-    P(["self-play<br/>raw W/D/L counts"]):::pl -->|"games ×2"| S["1 · solve<br/>values from raw counts only"]:::ev
+    P(["self-play<br/>raw W/D/L counts"]):::pl -->|"every wave"| PR["prove + forget<br/>certify from terminals, delete<br/>the rows the proofs reproduce"]:::pr
+    P -->|"games ×2"| S["1 · solve<br/>values from raw counts only"]:::ev
     S --> C1["2 · complete<br/>library prices never-played replies;<br/>proven boards pinned to game truth"]:::co
     C1 --> D["3 · fit<br/>refit the theory on the completed values"]:::di
     D --> C2["4 · complete<br/>re-price with the fresh rules"]:::co
-    C2 --> PR["5 · prove + forget<br/>certify from terminals, delete<br/>the rows the proofs reproduce"]:::pr
+    C2 --> PR
     PR --> P
 ```
 
