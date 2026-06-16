@@ -303,6 +303,12 @@ def _model_bits(rules: list[Rule], n_atoms: int) -> float:
     return sum(len(r.path) * a + math.log2(3) for r in rules)
 
 
+def _min_leaf(cap: int = None) -> int:
+    """The rule tree's leaf floor: the smallest value-group whose own bits could ever cover a
+    split's description cost. Derived from the candidate budget, not tuned (cap=6000 → 10)."""
+    return math.ceil((math.log2(cap or CAP) + 2) / math.log2(3))
+
+
 def _fit(kept: list[Concept], B, V, M, min_leaf) -> tuple[list[Rule], float, float]:
     """Fit the existing library to this data: re-derive each concept's mask on these boards,
     rebuild the rule tree over them, and report ``(rules, resid, model)`` — how well what we
@@ -403,9 +409,7 @@ def invent_from_boards(B: np.ndarray, V: np.ndarray, M: np.ndarray | None = None
         max_size = 7 if n_cells <= 5 else 5     # reach: narrow boards may still need size-7 programs
     if cap == "auto":
         cap = CAP                               # but ALWAYS bound the search (cap=None was the explosion)
-    # the smallest value-group worth naming: one whose own bits could ever cover a split's
-    # description cost — derived from the candidate budget, not tuned (cap=6000 -> 10)
-    min_leaf = math.ceil((math.log2(cap) + 2) / math.log2(3))
+    min_leaf = _min_leaf(cap)   # smallest value-group worth naming (derived from the budget)
 
     # base building blocks: cell reads + the small integer literals on the board
     base: list[Expr] = [Cell(i) for i in range(n_cells)]

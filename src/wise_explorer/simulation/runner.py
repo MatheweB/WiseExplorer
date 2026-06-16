@@ -93,13 +93,12 @@ class SimulationRunner:
         self.memory = memory
         self.num_workers = num_workers
         self._pool: Pool | None = None
-        # The cycle fires when GAMES SEEN THIS SESSION doubles (see run_batch). Games always
-        # grow, so cycles keep firing as coverage deepens — unlike the old distinct-row trigger,
-        # which saturated on a small game (TTT/Nim) and froze the proof frontier + collapse
-        # mid-run. Session-local, so a resumed run starts fresh and never re-fires on old rows.
-        self._games_seen = 0
-        self._games_at_last_cycle = 0
-
+        # The value loop runs two tiers (see run_batch). The cheap march — prove + forget —
+        # runs EVERY wave, so the proof frontier keeps advancing. The expensive synthesis search
+        # runs on a geometric schedule (the games since the last search double), O(log games)
+        # times spread across the run; its own MDL gate decides what actually pays.
+        self._since = 0                       # games since the last search
+        self._wait = synthesis.MIN_BOARDS     # games to accumulate before the next one
         _active_runners.append(self)
         register_memory(memory)
 
@@ -183,15 +182,18 @@ class SimulationRunner:
                 transitions, _swaps = self._commit(wave_results)
                 total_transitions += transitions
 
-                # Run one value-loop cycle (docs/value-loop.md) whenever GAMES SEEN this session
-                # doubles: solve → complete → prove → forget (+ fit). O(log games) cycles per
-                # run, spread across the whole run, so discovery and forgetting keep happening
-                # *during* training — not front-loaded then frozen once the row count saturates.
-                # Synchronous and in-process (cycles are ~1s), run while the pool is idle.
-                self._games_seen += len(wave_jobs)
-                if self._games_seen >= max(2 * self._games_at_last_cycle, synthesis.MIN_BOARDS):
+                # Value loop (docs/value-loop.md), run while the pool is idle. Every wave: the
+                # cheap march — prove what now chains to terminals, forget the rows it reproduces.
+                # The expensive search runs on a geometric schedule — every time the games since the
+                # last search double — so it fires O(log games) times spread across the run, never
+                # in a burst. Its own MDL gate decides what actually pays; stragglers are caught at
+                # the next doubling and the closing fit. No threshold, no cadence to persist.
+                self.memory.prove_and_forget(game)
+                self._since += len(wave_jobs)
+                if self._since >= self._wait:
+                    self._since = 0
+                    self._wait *= 2
                     self.memory.grow_concepts(game=game)
-                    self._games_at_last_cycle = self._games_seen
 
                 job_idx += len(wave_jobs)
 

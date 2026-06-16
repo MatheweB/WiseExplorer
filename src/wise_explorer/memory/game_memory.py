@@ -400,6 +400,25 @@ class GameMemory(ABC):
             self.collapse_proven()               # forget what the proofs reproduce
         return kept
 
+    def prove_and_forget(self, game) -> int:
+        """The cheap half of the value loop, run every wave between fits: prove the
+        boards that now chain to terminals and forget the rows those proofs reproduce.
+
+        ``frontier_certify`` is pure structural induction from terminals — it reads no
+        library prices and no propagated scores (record_round's Bellman pass keeps those
+        current) — so this needs neither a re-solve nor a re-fit. Gated behind a concept:
+        collapse must not delete the boards the first fit is built from. Decoupling it from
+        the fit cadence is the point — board growth saturates on a finite game, but proofs
+        must keep advancing on the values that keep refining after it does."""
+        if self.read_only or getattr(self, "is_markov", False):
+            return 0
+        if not self.concept_library.rules:
+            return 0
+        new = self.frontier_certify(game)
+        if os.environ.get("WISE_COLLAPSE", "1") != "0":
+            self.collapse_proven()
+        return new
+
     def _record_cross_scores(self, cross_scores: dict) -> None:
         """Hook for recording cross-scores. No-op for Markov memory."""
         pass
