@@ -138,23 +138,24 @@ they are facts, and deletion stayed sound against them the whole time.
 
 | | complete theory (Nim-4) | partial theory (Tic-Tac-Toe) |
 |---|---|---|
-| frontier proves | all 120 stored boards, one sweep | 2,192 at setup → 5,234 over four cycles |
-| memory | **594 rows → 0**, every cycle | 7,108 → ~3,000 (empties only where proven) |
-| play | 96/96 optimal throughout | 234/300, steady |
+| frontier proves | all 120 stored boards, one sweep | 2,192 at setup → ~5,452 (nearly all 5,478) |
+| memory | **594 rows → 0**, every cycle | **7,108 → 0** (proves through) |
+| play | 96/96 optimal throughout | 300/300 optimal |
 | verification cost | **zero playouts** | **zero playouts** |
-| corruption gate | 8/96 → 96/96 in one cycle | 51/300 → 223/300 in one cycle |
+| corruption gate | 8/96 → 96/96 in one cycle | refits to 300/300 in one cycle |
 
-On a solved game the table empties; on a partial theory it empties *exactly where the theory
-holds* and stays dense elsewhere — the database becomes a map of the theory's blind spots,
-and a free, exact audit of it (`|library(b) − proven(b)|` over proven boards measured the
-TTT library mispricing ~30% of them — matching the ~31% the rollout prototype found by
-playing games).
+Forgetting tracks where the **proof** has reached: a game small enough to prove out empties
+entirely — Nim *and* Tic-Tac-Toe — while a game too large to prove out (minichess) keeps a
+dense residue that maps what's still unproven. Either way the certificates are a free, exact
+audit of the *library*: `|library(b) − proven(b)|` over proven boards measured the TTT library
+mispricing ~30% of them — matching the ~31% the rollout prototype found by playing games.
 
 **The evidence ladder beats the old arbitration.** Ablating the deleted machinery (hiding
 the four-signal stack's bell + anchors from competitive selection, leaving only
-proven > concept > statistics) was an A/B from identical Tic-Tac-Toe snapshots, same
-seeds. The ladder *improved* play at every checkpoint (237 vs 231 at setup, 238 vs 226
+proven > concept > statistics) was an A/B from identical (pre-fix) Tic-Tac-Toe snapshots,
+same seeds. The ladder *improved* play at every checkpoint (237 vs 231 at setup, 238 vs 226
 and 234 vs 226 over two cycles) and degraded *less* under corruption (80/300 vs 51/300) —
+the fix lifts both arms, so the per-arm delta is what isolates the ladder's effect —
 because the old bell signal is filled by the library where coverage runs out, so a
 corrupted theory flows through it, while raw counts are theory-blind and cannot be
 poisoned. Anchors earned nothing measurable. This is why competitive play ranks the
@@ -182,8 +183,12 @@ collapse answers to proofs, not to the library.
 - **Zero-sum proofs.** The proof backup uses the pure `1 − max` form; the cross-player
   alignment factor α ([value-loop.md](value-loop.md)) would need threading through the
   induction for non-zero-sum proofs.
-- **Seat legality.** The ∀-over-replies side tolerates a superset (conservative); the
-  ∃-our-response side needs genuinely legal moves — exact for Nim and Tic-Tac-Toe.
+- **Side to move.** A board's replies are the moves of the player to move, read off its
+  transitions (the placed piece names its mover). This is exact when the board reveals its
+  mover (piece-owning games like Tic-Tac-Toe) or its moves don't depend on turn (Nim, which
+  falls back to the seat-agnostic set); a turn-dependent game with neutral pieces would need
+  the mover supplied explicitly. Merging both seats is *not* a safe superset — the opponent's
+  reply enters the `1 − max` and certifies a forced win or threatened draw as a loss.
 
 ## Where it lives
 

@@ -284,17 +284,19 @@ Deletion is sound even while the theory is wrong, because it compares each row a
 
 | | complete theory (Nim-4) | partial theory (Tic-Tac-Toe) |
 |---|---|---|
-| frontier proves | all 120 boards, one sweep | 2,192 → 5,234 boards (grows with discovery) |
-| memory | **594 rows → 0**, every cycle | 7,108 → ~3,000 (empties only where proven) |
-| play | 96/96 optimal | 234/300, steady |
+| frontier proves | all 120 boards, one sweep | ~5,452 of 5,478 (grows with discovery) |
+| memory | **594 rows → 0**, every cycle | **7,108 → 0** (proves through) |
+| play | 96/96 optimal | 300/300 optimal |
 | verification cost | **zero playouts** | **zero playouts** |
 
-On a solved game the table empties entirely; on a partial theory it empties *exactly where
-the theory holds* and stays dense where it doesn't — so **the database becomes a map of
-what the system doesn't yet understand**. And it self-heals: corrupt the theory after the
-data is gone and play craters, but one training cycle refits from fresh evidence and
-recovers (Nim-4: 8/96 → 96/96 in one cycle). The full account — the deletion invariant,
-why proofs need no expiry, the partial-theory and scale results — is in
+Both clear entirely here — forgetting tracks where the **proof** has reached, not whether the
+theory is complete. A game small enough to prove out empties to zero (Nim *and* Tic-Tac-Toe, even
+though TTT's concepts are only a partial theory — the proof frontier covers the whole small tree
+regardless). A game too large to prove out — minichess — keeps a dense residue, and **that residue
+is a map of what the system hasn't yet proven**. It also self-heals: corrupt the theory after the
+data is gone and play craters, but one training cycle refits from fresh evidence and recovers
+(Nim-4: 8/96 → 96/96 in one cycle). The full account — the deletion invariant, why proofs need no
+expiry, the partial-theory and scale results — is in
 [docs/certified-forgetting.md](docs/certified-forgetting.md).
 
 ---
@@ -380,16 +382,17 @@ positions vs. minimax):
 
 | after | optimal play |
 |---|--:|
-| 3,000 games | ~84% |
-| 8,000 games | ~85% |
-| more coverage | plateaus **~90%** |
+| 3,000 games | **100%** |
 
-Play improves with coverage as the frontier advances, then **plateaus around ~90%** — short
-of perfect. Closing that last gap is an open limitation, not a solved convergence: once
-discovery saturates, more games deepen the evidence but stop lifting late-game play.
-(Removing the old four-signal stack in favor of the evidence ladder *improved* measured play
-at every checkpoint — raw counts can't be poisoned by a partial theory the way a
-coverage-biased value signal can.)
+Play reaches **perfect** — every uniformly-sampled reachable position matches minimax,
+consistently across runs. The certainty frontier advances from the terminals to the opening
+and, on a game small enough to prove out, clears it entirely: once a board is certified its
+raw transitions are forgotten and play runs off the proofs. (An earlier version plateaued
+~90% because the proof enumerated *both* players' replies from each board, so the opponent's
+winning move leaked into the backup and certified some forced wins and threatened draws as
+*losses*; certifying from only the side-to-move's replies restored soundness and the plateau
+vanished. Separately, the evidence ladder beats the old four-signal stack at every checkpoint
+— raw counts can't be poisoned by a partial theory the way a coverage-biased value signal can.)
 
 ---
 

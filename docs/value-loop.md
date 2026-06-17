@@ -268,9 +268,11 @@ recovered it to 200/200 — the same mechanism, run in reverse.
   lines and discovery froze. Guarded by a non-empty tree, so a fresh seed is never stripped before
   it fits.) This holds the library to the model's closure plus its regions (TTT settles ~15–17,
   versus the never-forget accretion that crept to ~28–72).
-- **Union over seats.** Legal replies are enumerated for every seat and merged — exact
-  for games whose legal moves don't depend on whose turn it is (Nim), a conservative
-  superset otherwise (extra candidates can only enter the max).
+- **Side to move.** A board's replies are the moves of the player to move, identified from
+  its transitions — a move's placed piece names its mover (the before→after diff). Merging
+  *both* seats is unsound: the opponent's reply enters the `max`, certifying a forced win or
+  threatened draw as a loss. Games whose legal moves don't depend on whose turn it is (Nim)
+  reveal no mover and fall back to the seat-agnostic set, which is exact there.
 - **Zero-sum flip.** The completed backup uses the pure `1 − max` form. (`solve_graph`'s
   cross-player `α`-blend reduces to the same thing when no cross-score data exists, as
   in all current 2-player games.) A non-zero-sum game would need the blend threaded

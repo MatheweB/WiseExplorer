@@ -23,32 +23,36 @@ from wise_explorer.memory.schema import SCHEMA_TRANSITIONS
 
 def _replies_chunk(args):
     """Pool worker for :meth:`TransitionMemory.reply_graph`: enumerate one chunk of
-    boards' legal replies. Pure game work — all bookkeeping stays in the parent."""
+    boards' legal replies for the side to move. Pure game work — all bookkeeping
+    stays in the parent. Each item is ``(i, board, tm, jm)``: ``tm`` is the seat to
+    move (so the reply set is that player's moves, not a seat-merged superset),
+    ``jm`` the seat that moved in (so a terminal scores for whoever reached it). A
+    board that reveals no mover (neutral pieces, e.g. Nim) carries jm=0 / tm=1 and
+    falls back to the seat-agnostic value, which is exact when moves ignore turn."""
     game, shape, known, chunk = args
-    seats = range(1, game.num_players() + 1)
+    nP = game.num_players()
     out = []
-    for i, raw in chunk:
+    for i, raw, tm, jm in chunk:
         board = raw.reshape(shape)
         probe = game.deep_clone()
-        probe.set_state(GameState(board.copy(), current_player=1))
+        probe.set_state(GameState(board.copy(), current_player=tm if 1 <= tm <= nP else 1))
         if probe.is_over():
-            out.append((i, max(OUTCOME_SCORE[probe.get_result(p)] for p in seats), None))
+            v = (OUTCOME_SCORE[probe.get_result(jm)] if 1 <= jm <= nP
+                 else max(OUTCOME_SCORE[probe.get_result(p)] for p in range(1, nP + 1)))
+            out.append((i, v, None))
             continue
         seen: set = set()
         edges = []
-        for p in seats:
-            seat_game = game.deep_clone()
-            seat_game.set_state(GameState(board.copy(), current_player=p))
-            for mv in seat_game.valid_moves():
-                child_game = seat_game.deep_clone()
-                child_game.apply_move(mv, validated=True)
-                child = child_game.get_state().board
-                ch = hash_board(child)
-                if ch in seen:
-                    continue
-                seen.add(ch)
-                edges.append((ch, None if ch in known
-                              else np.asarray(child).ravel().astype(np.int64)))
+        for mv in probe.valid_moves():
+            child_game = probe.deep_clone()
+            child_game.apply_move(mv, validated=True)
+            child = child_game.get_state().board
+            ch = hash_board(child)
+            if ch in seen:
+                continue
+            seen.add(ch)
+            edges.append((ch, None if ch in known
+                          else np.asarray(child).ravel().astype(np.int64)))
         out.append((i, None, edges))
     return out
 
@@ -404,7 +408,42 @@ class TransitionMemory(GameMemory):
         n = len(hashes)
         shape = game.get_state().board.shape            # stored boards are 2-D-normalized
 
-        items = [(i, boards[h]) for i, h in enumerate(hashes)]
+        # Whose turn it is at each board, read off its transitions: a move's placed
+        # piece names its mover (the before→after diff), so the reply set and a
+        # terminal's value belong to that mover — no turn flag on the board needed.
+        # A board whose pieces don't reveal a mover (Nim) leaves these unset and the
+        # workers fall back to seat-agnostic enumeration, exact when moves ignore turn.
+        all_edges = self.conn.execute("SELECT from_hash, to_hash FROM transitions").fetchall()
+        parent_of, child_of = {}, {}
+        for f, t in all_edges:
+            parent_of.setdefault(t, f)
+            child_of.setdefault(f, t)
+        nP = game.num_players()
+
+        def _mover(before_h, after_h):
+            b = np.asarray(boards[before_h]).ravel()
+            a = np.asarray(boards[after_h]).ravel()
+            chg = (a != b) & (a != 0)
+            return int(a[np.argmax(chg)]) if chg.any() else 0
+
+        to_move = np.ones(n, dtype=np.int64)            # default seat 1 (turn-agnostic games)
+        just_moved = np.zeros(n, dtype=np.int64)
+        for h, i in index.items():
+            p = parent_of.get(h)
+            if p is not None and p in boards:
+                jm = _mover(p, h)
+                just_moved[i] = jm
+                if 1 <= jm <= nP:
+                    to_move[i] = (jm % nP) + 1          # next seat in turn order
+                    continue
+            c = child_of.get(h)                          # root / mover-less: seat that moves out
+            if c is not None and c in boards:
+                m = _mover(h, c)
+                if 1 <= m <= nP:
+                    to_move[i] = m
+
+        items = [(i, boards[h], int(to_move[i]), int(just_moved[i]))
+                 for i, h in enumerate(hashes)]
         pool = getattr(self, "pool", None)
         if pool is not None:
             chunks = max(1, len(pool._pool) * 4)        # a few tasks per worker
@@ -464,7 +503,7 @@ class TransitionMemory(GameMemory):
             "has_kids": (starts < ends) & ~fixed,
             "novel_rows": np.array(novel_of, dtype=np.int64),
             "novel_boards": NB, "novel_m": novel_m,
-            "edges": self.conn.execute("SELECT from_hash, to_hash FROM transitions").fetchall(),
+            "edges": all_edges,
         }
 
     def complete_values(self, game, graph: dict | None = None) -> int:
@@ -565,14 +604,18 @@ class TransitionMemory(GameMemory):
         novel_vals = np.full(len(known), np.nan)
         if len(graph["novel_boards"]):
             shape = game.get_state().board.shape
-            seats = range(1, game.num_players() + 1)
+            nP = game.num_players()
             vals = []
-            for raw in graph["novel_boards"]:
+            for raw, ms in zip(graph["novel_boards"], graph["novel_m"]):
                 probe = game.deep_clone()
                 probe.set_state(GameState(
                     raw.reshape(shape).astype(np.int8).copy(), current_player=1))
-                vals.append(max(OUTCOME_SCORE[probe.get_result(p)] for p in seats)
-                            if probe.is_over() else np.nan)
+                if not probe.is_over():
+                    vals.append(np.nan)                          # only terminals ground
+                elif 1 <= ms <= nP:
+                    vals.append(OUTCOME_SCORE[probe.get_result(int(ms))])  # to the mover
+                else:
+                    vals.append(max(OUTCOME_SCORE[probe.get_result(p)] for p in range(1, nP + 1)))
             novel_vals[graph["novel_rows"]] = vals
 
         hk = np.flatnonzero(graph["has_kids"])
