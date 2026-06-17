@@ -408,39 +408,29 @@ class TransitionMemory(GameMemory):
         n = len(hashes)
         shape = game.get_state().board.shape            # stored boards are 2-D-normalized
 
-        # Whose turn it is at each board, read off its transitions: a move's placed
-        # piece names its mover (the before→after diff), so the reply set and a
-        # terminal's value belong to that mover — no turn flag on the board needed.
-        # A board whose pieces don't reveal a mover (Nim) leaves these unset and the
-        # workers fall back to seat-agnostic enumeration, exact when moves ignore turn.
+        # Whose turn it is at each board comes straight from recording: every move is
+        # logged with its mover (the side to move at the from-board), so to_move is read
+        # back per board — no re-derivation, no enumeration. just_moved(B) = the mover at
+        # B's parent = who moved into B (to score a terminal for whoever reached it). A
+        # board not yet moved from (a frontier leaf) has no logged mover and falls back
+        # to the next seat after just_moved; one with neither (unseen / pre-column) lands
+        # on the seat-agnostic default, which is exact when the turn doesn't matter (Nim).
+        stored = dict(self.conn.execute("SELECT board_hash, to_move FROM boards"))
         all_edges = self.conn.execute("SELECT from_hash, to_hash FROM transitions").fetchall()
-        parent_of, child_of = {}, {}
+        parent_of = {}
         for f, t in all_edges:
             parent_of.setdefault(t, f)
-            child_of.setdefault(f, t)
         nP = game.num_players()
 
-        def _mover(before_h, after_h):
-            b = np.asarray(boards[before_h]).ravel()
-            a = np.asarray(boards[after_h]).ravel()
-            chg = (a != b) & (a != 0)
-            return int(a[np.argmax(chg)]) if chg.any() else 0
-
-        to_move = np.ones(n, dtype=np.int64)            # default seat 1 (turn-agnostic games)
+        to_move = np.zeros(n, dtype=np.int64)
         just_moved = np.zeros(n, dtype=np.int64)
-        for h, i in index.items():
-            p = parent_of.get(h)
-            if p is not None and p in boards:
-                jm = _mover(p, h)
-                just_moved[i] = jm
-                if 1 <= jm <= nP:
-                    to_move[i] = (jm % nP) + 1          # next seat in turn order
-                    continue
-            c = child_of.get(h)                          # root / mover-less: seat that moves out
-            if c is not None and c in boards:
-                m = _mover(h, c)
-                if 1 <= m <= nP:
-                    to_move[i] = m
+        for i, h in enumerate(hashes):
+            jm = int(stored.get(parent_of.get(h), 0))
+            just_moved[i] = jm
+            tm = int(stored.get(h, 0))
+            if tm == 0 and 1 <= jm <= nP:
+                tm = (jm % nP) + 1                       # frontier leaf: alternate from mover-in
+            to_move[i] = tm
 
         items = [(i, boards[h], int(to_move[i]), int(just_moved[i]))
                  for i, h in enumerate(hashes)]

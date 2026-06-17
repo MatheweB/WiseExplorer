@@ -20,7 +20,8 @@ CREATE TABLE IF NOT EXISTS boards (
     board_hash TEXT PRIMARY KEY,
     board_data BLOB NOT NULL,
     board_rows INTEGER NOT NULL,
-    board_cols INTEGER NOT NULL
+    board_cols INTEGER NOT NULL,
+    to_move INTEGER DEFAULT 0
 );
 """
 

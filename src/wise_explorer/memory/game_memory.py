@@ -68,6 +68,10 @@ class GameMemory(ABC):
 
         if not read_only:
             self.conn.executescript(self._schema())
+            try:                                         # add to_move to pre-existing DBs
+                self.conn.execute("ALTER TABLE boards ADD COLUMN to_move INTEGER DEFAULT 0")
+            except sqlite3.OperationalError:
+                pass                                     # column already present
             self.conn.commit()
 
         self.concept_library = ConceptLibrary(self.conn, self.read_only)   # invented concepts, persisted
@@ -230,6 +234,8 @@ class GameMemory(ABC):
         cross_scores: dict[tuple[str, str, int], list[float]] = defaultdict(lambda: [0.0, 0.0])
         # Board storage: hash -> (board_bytes, rows, cols) for concept invention
         boards_to_store: dict[str, tuple[bytes, int, int]] = {}
+        # The mover (side to move) at each from-board — recorded, not re-derived.
+        movers: dict[str, int] = {}
 
         for stack_entry in stacks:
             moves, outcome = stack_entry[0], stack_entry[1]
@@ -258,6 +264,7 @@ class GameMemory(ABC):
 
                 stack_keys.append((from_hash, to_hash))
                 transitions[(from_hash, to_hash)][outcome_idx] += 1.0
+                movers[from_hash] = player          # who is to move at from_hash
 
                 # Accumulate cross-scores: each non-mover's outcome
                 if all_outcomes is not None:
@@ -270,15 +277,18 @@ class GameMemory(ABC):
 
             trajectory_keys.append(stack_keys)
 
-        self._store_boards(boards_to_store)
+        self._store_boards(boards_to_store, movers)
         swaps = self._commit(transitions)
         self._record_cross_scores(cross_scores)
         self._propagate_bellman(trajectory_keys)
 
         return len(transitions), swaps
 
-    def _store_boards(self, boards: dict[str, tuple[bytes, int, int]]) -> None:
-        """Store board arrays for concept invention."""
+    def _store_boards(self, boards: dict[str, tuple[bytes, int, int]],
+                      movers: dict[str, int] | None = None) -> None:
+        """Store board arrays for concept invention, plus each board's side to move
+        (``movers``) — recorded at play time so the value loop reads it back rather
+        than re-deriving it."""
         if not boards:
             return
         cur = self.conn.cursor()
@@ -287,6 +297,11 @@ class GameMemory(ABC):
             "VALUES (?,?,?,?)",
             [(h, data, rows, cols) for h, (data, rows, cols) in boards.items()],
         )
+        if movers:
+            cur.executemany(
+                "UPDATE boards SET to_move=? WHERE board_hash=?",
+                [(p, h) for h, p in movers.items()],
+            )
         self.conn.commit()
 
     def _load_boards(self) -> dict[str, np.ndarray]:
