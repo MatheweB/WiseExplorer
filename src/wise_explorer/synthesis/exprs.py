@@ -158,21 +158,34 @@ class IncidenceDomain:
     def __init__(self, groups):
         self.groups = tuple(tuple(g) for g in groups)
         self.cells = tuple(sorted({c for g in self.groups for c in g}))
+        pos = {c: i for i, c in enumerate(self.cells)}
+        # cell↔group incidence [C, G] (board-independent): a cell's features are the
+        # histogram of its incident groups' states, gathered by a matmul against this.
+        self._inc = np.zeros((len(self.cells), len(self.groups)), dtype=np.int64)
+        for gi, g in enumerate(self.groups):
+            for c in g:
+                self._inc[pos[c], gi] = 1
+        self._gmask = None                                      # [G, W] group membership, lazy
+    def _membership(self, W):
+        if self._gmask is None or self._gmask.shape[1] != W:
+            gm = np.zeros((len(self.groups), W), dtype=np.int64)
+            for gi, g in enumerate(self.groups):
+                gm[gi, list(g)] = 1
+            self._gmask = gm
+        return self._gmask
     def tensor(self, B, m):
-        N = B.shape[0]
+        N, W = B.shape
+        gm = self._membership(W)                                # [G, W]
+        played = (B == m[:, None]).astype(np.int64) @ gm.T      # [N, G] moved token per group
+        empty = (B == 0).astype(np.int64) @ gm.T                # [N, G]
+        other = gm.sum(1) - played - empty                      # [N, G] some other token
+        inc = self._inc.T                                       # [G, C]: scatter groups onto cells
         T = np.zeros((N, len(self.cells), 6), dtype=np.int64)
-        for ci, c in enumerate(self.cells):
-            T[:, ci, 0] = (B[:, c] == 0)                        # the cell's own emptiness
-            for g in self.groups:
-                if c not in g:
-                    continue
-                cols = B[:, list(g)]
-                played = (cols == m[:, None]).sum(1)            # moved token in this incident group
-                other = len(g) - played - (cols == 0).sum(1)    # some other token
-                for k, j in ((0, 1), (1, 2), (2, 3)):           # p0, p1, p2
-                    T[:, ci, j] += (played == k)
-                for k, j in ((1, 4), (2, 5)):                   # o1, o2
-                    T[:, ci, j] += (other == k)
+        T[:, :, 0] = B[:, list(self.cells)] == 0                # the cell's own emptiness
+        for k, j in ((0, 1), (1, 2), (2, 3)):                   # p0, p1, p2 over incident groups
+            T[:, :, j] = (played == k) @ inc
+        for k, j in ((1, 4), (2, 5)):                           # o1, o2
+            T[:, :, j] = (other == k) @ inc
         return T
     def __str__(self): return "cells×groups"
 
