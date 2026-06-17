@@ -68,9 +68,15 @@ thresholds, new leaf values) while the concept underneath it never changes.
 
 The two levels also age differently. The rules are rebuilt from scratch every refit, so a concept
 that stops paying simply stops appearing in the tree. The programs (`kept`) carry forward as
-search seeds — but a program the new tree doesn't use is *forgotten* after the fit
-(`_forget_unused`), re-derived later if the data needs it; a genuinely transferable program that
-explains the data stays, because it gets used.
+search seeds — and after each fit the library forgets the **orphans** (`_forget`): programs the
+new value model neither tests nor is *built from*. What it keeps is the model's dependency
+closure — every program a rule uses, plus every program reused inside a larger one (one `K`
+nested in another) — and it never forgets a region-defining line, because those seed the next
+round's folds (the *raw material* below). So forgetting here is just reachability from the rule
+tree: keep what the model stands on, sweep the disconnected re-spellings, and re-derive anything
+later if the data calls for it. (The earlier rule — drop every program the tree doesn't *directly*
+split on — was abandoned: it freed the building blocks the splits are made of, so the next search
+lost the lines its threats fold over and discovery stalled. Keeping the closure is what fixed it.)
 
 A promoted concept also plays a second role, as raw material: its cell-support becomes a
 *group* that the next round's programs can fold over — round 1's line `(c0·c4·c8)`

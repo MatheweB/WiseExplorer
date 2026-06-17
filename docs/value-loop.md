@@ -257,13 +257,17 @@ recovered it to 200/200 — the same mechanism, run in reverse.
   never reads the concept signal anyway, so nothing else depended on the live fit.
 - **Library forgetting.** The library's two levels age differently. The *rules* are rebuilt from
   scratch every refit, so a concept that stops paying drops out of the tree at once. The
-  *programs* (`kept`) carry forward as search seeds — but after each refit, concepts the new tree
-  doesn't use are **forgotten** (`_forget_unused`): an unused concept pays description cost and
-  inflates every later search's program space for nothing, and is re-derived if the data later
-  needs it. Transfer stays safe — the prune runs only once a fit has produced a tree (a fresh
-  seed is never stripped before it fits), and a genuinely transferable program that explains the
-  data is *used*, so it survives. This holds the library to what the model actually uses (TTT
-  ~halved versus the old never-forget accretion, which crept to ~28–72 concepts).
+  *programs* (`kept`) carry forward as search seeds — and after each refit the library forgets the
+  **orphans** (`_forget`): concepts the new model neither tests nor is *built from*. It keeps the
+  model's dependency closure (every concept a rule uses, plus every one composed inside those) and
+  every region-defining (atomic) concept — so the group/fork layer never loses the lines its folds
+  stand on. An orphan pays description cost and inflates every later search for nothing, and is
+  re-derived if the data later needs it; the rule is just reachability from the rule tree. (The
+  simpler version — drop everything the tree doesn't *directly* split on — was tried and abandoned:
+  it freed the very building blocks and regions the splits are made of, so the next search lost its
+  lines and discovery froze. Guarded by a non-empty tree, so a fresh seed is never stripped before
+  it fits.) This holds the library to the model's closure plus its regions (TTT settles ~15–17,
+  versus the never-forget accretion that crept to ~28–72).
 - **Union over seats.** Legal replies are enumerated for every seat and merged — exact
   for games whose legal moves don't depend on whose turn it is (Nim), a conservative
   superset otherwise (extra candidates can only enter the max).

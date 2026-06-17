@@ -332,6 +332,19 @@ def _used_programs(rules: list[Rule], concepts: list[Concept]) -> list[Concept]:
     return [by_text[t] for t in sorted(needed, key=lambda t: order.get(t, 1 << 30))]
 
 
+def closure_concepts(rules: list[Rule], concepts: list[Concept]) -> list[Concept]:
+    """The rule tree's compositional dependency closure: every concept the rules split on, plus
+    every concept composed (transitively, through a ``Named`` reuse) into them. Reachability over
+    the concept graph — the rule tree is the root set, "built-from" the edge. Returns ALL threshold
+    variants sharing a reachable program (``_used_programs`` keeps one per program for rendering;
+    forgetting must keep every variant the tree actually tests), in library order. NB this follows
+    only the COMPOSITIONAL edge — a fold's dependence on the *regions* it folds over is invisible
+    here (the fold bakes the cells in), so a caller forgetting by this alone must separately pin the
+    region-defining (atomic) concepts, or the group layer can starve."""
+    reachable = {str(_strip(c.expr)) for c in _used_programs(rules, concepts)}
+    return [c for c in concepts if str(_strip(c.expr)) in reachable]
+
+
 def _tree_lines(rules: list[Rule], cond) -> list[str]:
     """Print the rule tree as a tree — each split once, leaves on their branches. The
     leaves carry root-to-leaf paths, so the tree is rebuilt from their shared prefixes.

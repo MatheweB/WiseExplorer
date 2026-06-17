@@ -69,22 +69,23 @@ class ConceptLibrary:
         if len(B) >= S.MIN_BOARDS:
             res = S.invent_from_boards(B, V, M, max_size=max_size, cap=cap, seed=self.kept)
             self.kept, self.rules = res.concepts, res.rules
-            self._forget_unused()
+            self._forget()
         self.save()
         return len(self.kept)
 
-    def _forget_unused(self) -> None:
-        """Drop kept concepts the freshly-built rule tree doesn't use. Forgetting in the same
-        spirit as :meth:`TransitionMemory.collapse_proven`, lifted from rows to concepts: an
-        unused concept is not in the value model, so dropping it changes no value, no proof, no
-        transfer — and it stops paying the description cost AND inflating every later search's
-        program space (each kept concept seeds the synthesis as a building block). If later data
-        needs it, the search re-derives it. Guarded by ``self.rules``: only runs once a fit has
-        produced a tree, so a freshly-seeded library (rules=[]) is never stripped before it fits."""
+    def _forget(self) -> None:
+        """Drop orphan composites — concepts the value model neither tests nor is built from —
+        while NEVER dropping an atomic (region-defining) concept. Keep = the rule tree's
+        compositional closure (the splits + their ``Named`` build-chain) ∪ every atomic concept.
+        Reachability GC over the concept graph that also pins the foundation: regions (hence the
+        group/fork layer, seeded from atomic supports) can't be starved, so unlike the old
+        drop-if-not-a-split this can't freeze discovery — that one freed the build chain AND the
+        regions its splits stood on. An orphan changes no value and is re-derived if later needed.
+        Guarded by a non-empty tree, so a freshly-seeded library (rules=[]) is never swept."""
         if not self.rules:
             return
-        used = {id(con) for r in self.rules for con, _ in r.path}
-        self.kept = [c for c in self.kept if id(c) in used]
+        live = {id(c) for c in S.closure_concepts(self.rules, self.kept)}
+        self.kept = [c for c in self.kept if id(c) in live or S._is_atomic(c.expr)]
 
     def summary(self, expand: bool = False) -> str:
         """What training discovered: the rule tree (each split shown once, with derived

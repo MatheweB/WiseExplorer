@@ -16,9 +16,10 @@ from wise_explorer.synthesis.exprs import (
 )
 from wise_explorer.synthesis.engine import (
     Rule, RoundInfo, InventionResult, invent, invent_from_boards,
-    _boards_values, _supports, _cell_group, _group_fold_candidates, _residual,
+    _boards_values, _supports, _cell_group, _group_fold_candidates, _residual, _is_atomic,
     CAP, MIN_BOARDS,
 )
 from wise_explorer.synthesis.reader import (
     render, meaning, _handles, _pretty, _tree_lines, _key_lines, _region_geometry,
+    closure_concepts,
 )
