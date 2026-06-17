@@ -122,17 +122,11 @@ flowchart LR
     PR --> OUT(["the theory + proofs<br/>feed competitive play & the next rebuild"]):::pl
 ```
 
-Note the shape: the two loops touch only through the counts. Self-play never reads the
-cycle's outputs — training-time selection is uncertainty over raw counts, tilted only by
-which boards are *proven* — so a cycle's results matter to competitive play, to
-evaluation, and to the *next* cycle, never to which moves exploration records. That is
-also why a cycle can run in its own process while waves keep playing. Terminal values
-stay pinned to game truth throughout.
-
-`bell` (`propagated_score`) is **not** a move-time signal — it is the internal value the
-loop computes and discovery fits. Competitive play ranks the evidence ladder instead
-(proven value > concept value > raw statistics); `bell` earns its keep entirely as the
-fit target, where its completion fixes the coverage blind spot above.
+The two loops touch only through the counts: a cycle's outputs feed competitive play, evaluation,
+and the *next* cycle — never the exploration that records the evidence. That keeps the evidence
+independent of the theory it feeds, and lets a cycle run in its own process while waves keep
+playing. `bell` (`propagated_score`) is the loop's internal value — discovery's fit target, never
+a move-time signal; play ranks the evidence ladder (proven > concept > statistics) instead.
 
 Update semantics, per store:
 
@@ -140,7 +134,7 @@ Update semantics, per store:
 |---|---|---|
 | raw W/D/L counts | self-play only | append-only ground truth — the loop never touches them |
 | `bell` (`propagated_score`) | the cycle (and per-wave sweeps along played lines) | derived cache — rebuilt **from scratch** every cycle, then completed; nothing accumulates |
-| concept library | the cycle only | **cumulative** — each refit is seeded with the current library, and `kept` is monotone |
+| concept library | the rebuild only | **carries forward** — each refit is seeded with the current library; concepts the new tree doesn't use are then forgotten (re-derived later if needed) |
 
 So concepts never incrementally patch `bell`: each cycle is a full rewrite of the value
 cache, and the library is the one piece of knowledge that carries forward between
@@ -257,24 +251,19 @@ recovered it to 200/200 — the same mechanism, run in reverse.
 
 ## Costs and edge cases
 
-- **Resolved: mid-training dips.** An earlier architecture kept a second, *live*
-  library, refit every wave on still-drifting evidence values. Benched on this protocol
-  it dipped to 158 and 180 on random chunks: the completion pass occasionally ran with a
-  transiently degenerate live tree. The fix was deletion, not machinery —
-  training-time move selection never reads the concept signal (it explores by
-  uncertainty alone, which also keeps the evidence independent of the library), so the
-  live fitter's only real consumer was the one place it could do harm. With discovery
-  running only at cycle boundaries, the dips vanished.
-- **Library growth.** The library's two levels age oppositely. The *rules* are rebuilt
-  from scratch at every refit, so a concept that stops paying drops out of use
-  immediately. The *programs* (`kept`) are monotone: every refit seeds with all of them
-  and nothing is ever deleted — deliberately, because a transferred program may be
-  impossible to re-derive from the local data (3,000 games of 8-pile Nim cannot
-  re-discover the nim-sum), and one noisy deletion would lose it permanently. The cost: junk variants
-  admitted on one chunk's noisy values never leave (21 → 28 concepts over six chunks,
-  while the rules tighten to ~14 and play holds; the old continuous-search architecture
-  reached 72). Behaviorally cosmetic so far, but unbounded — trimming `kept` without
-  breaking the never-forget transfer guarantee is an open design question.
+- **Discovery at boundaries, not per-wave.** An earlier live-refit-every-wave variant dipped to
+  ~160/200 on random chunks — the completion pass occasionally read a transiently degenerate
+  live tree. Fixed by running discovery only at cycle boundaries; training-time move selection
+  never reads the concept signal anyway, so nothing else depended on the live fit.
+- **Library forgetting.** The library's two levels age differently. The *rules* are rebuilt from
+  scratch every refit, so a concept that stops paying drops out of the tree at once. The
+  *programs* (`kept`) carry forward as search seeds — but after each refit, concepts the new tree
+  doesn't use are **forgotten** (`_forget_unused`): an unused concept pays description cost and
+  inflates every later search's program space for nothing, and is re-derived if the data later
+  needs it. Transfer stays safe — the prune runs only once a fit has produced a tree (a fresh
+  seed is never stripped before it fits), and a genuinely transferable program that explains the
+  data is *used*, so it survives. This holds the library to what the model actually uses (TTT
+  ~halved versus the old never-forget accretion, which crept to ~28–72 concepts).
 - **Union over seats.** Legal replies are enumerated for every seat and merged — exact
   for games whose legal moves don't depend on whose turn it is (Nim), a conservative
   superset otherwise (extra candidates can only enter the max).

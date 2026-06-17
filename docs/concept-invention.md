@@ -66,13 +66,11 @@ rules are stated in — which is why one concept can appear in many rules, why t
 thresholds of the same program share one `K`, and why a rule can be refit (new
 thresholds, new leaf values) while the concept underneath it never changes.
 
-The two levels also age differently. A concept, once kept, is frozen — programs are
-added, never edited or deleted (a transferred program may be impossible to re-derive
-from the current game's data, so deletion is never risked). The rules are rebuilt from scratch
-at every refit, so a concept that stops paying its way simply stops appearing in the
-tree, without leaving the library. "Does the library improve over training?" splits the
-same way: the programs don't change, the set of them grows, and the fit around them —
-thresholds, leaf values, which concepts the tree uses — is re-estimated at every cycle.
+The two levels also age differently. The rules are rebuilt from scratch every refit, so a concept
+that stops paying simply stops appearing in the tree. The programs (`kept`) carry forward as
+search seeds — but a program the new tree doesn't use is *forgotten* after the fit
+(`_forget_unused`), re-derived later if the data needs it; a genuinely transferable program that
+explains the data stays, because it gets used.
 
 A promoted concept also plays a second role, as raw material: its cell-support becomes a
 *group* that the next round's programs can fold over — round 1's line `(c0·c4·c8)`
@@ -281,38 +279,16 @@ value-variance they remove is a single vectorized pass.
 
 ## Fit: a concept is a mask; a split is a partition
 
-On the data, a program *is* a column (it is evaluated on all boards at once), and a
-threshold turns it into a mask:
+On the data a program *is* a column (evaluated on all boards at once); a threshold turns it into
+a **mask**, and a tree node is **nothing but an array of row indices** that the mask partitions —
+no board is ever copied or moved. The node takes whichever mask saves the most bits:
 
-| board | column: `fold(⊕, board, cell)` | mask: `= 0`? | value `V` |
-|---|:--:|:--:|--:|
-| `[1, 2, 3]` | 0 | ✓ | 1.0 |
-| `[2, 2, 0]` | 0 | ✓ | 1.0 |
-| `[2, 1, 0]` | 3 | ✗ | 0.0 |
-| `[1, 0, 0]` | 1 | ✗ | 0.0 |
+$$\text{gain}(c) \;=\; \text{bits}(\text{node}) - \text{bits}(\text{node} \cap c) - \text{bits}(\text{node} \setminus c), \qquad \text{bits}(\cdot) = n\cdot H(\text{outcome masses})$$
 
-A tree node is **nothing but an array of row indices**; splitting partitions that array by
-the mask — no board is ever copied or moved. The node goes to whichever mask saves the most
-bits:
-
-$$\text{gain}(c) \;=\; \text{bits}(\text{node}) \;-\; \text{bits}(\text{node} \cap c) \;-\; \text{bits}(\text{node} \setminus c)$$
-
-```mermaid
-flowchart TD
-    classDef node fill:#1f2937,stroke:#475569,color:#e5e7eb
-    classDef win  fill:#065f46,stroke:#047857,color:#d1fae5
-    classDef loss fill:#7f1d1d,stroke:#b91c1c,color:#fee2e2
-    P["node · rows [0 1 2 3]<br/>bits = 4 · H(½, 0, ½) = 4"]
-    P -->|"mask ✓ → rows [0 1]"| W["V: 1.0 1.0 · bits = 2 · H(0,0,1) = 0<br/><b>[WIN] leaf</b>"]
-    P -->|"mask ✗ → rows [2 3]"| L["V: 0.0 0.0 · bits = 2 · H(1,0,0) = 0<br/><b>[LOSS] leaf</b>"]
-    class P node
-    class W win
-    class L loss
-```
-
-Here gain = 4 − 0 − 0 = 4 bits, and a split happens only if the best gain beats the price
-of *naming* a split, `log₂(#candidates) + 2` bits. A useless mask leaves both children at
-H(½, 0, ½) — gain 0, no split.
+A split happens only if the best gain beats the price of *naming* it — `log₂(#candidates) + 2`
+bits — so a useless mask (gain 0, both children at the parent's entropy) buys nothing. The worked
+numbers are in the toy above: the `⊕`-fold's `= 0` mask splits its four boards into pure WIN/LOSS
+leaves, gain = 4 − 0 − 0 = 4 bits.
 
 ## Promote: abstraction buys depth
 
@@ -351,38 +327,6 @@ discovered end to end.
 For Nim the whole thing collapses to one fold: `fold(⊕, board, cell) = 0 → WIN` / `≠ 0 → LOSS`.
 Nim's only concept folds over *all* the cells — that is not a localised region, so no line layer
 ever forms. Its opt-out is an **absence**, not a special case.
-
-### The whole phenomenon in one picture
-
-```mermaid
-flowchart TD
-    classDef op fill:#9a3412,stroke:#7c2d12,color:#ffedd5
-    classDef ex fill:#0e7490,stroke:#155e75,color:#ecfeff
-    F["ONE OPERATION<br/>fold(rule, what-to-walk, value-of-each) → one number<br/>rule ∈ {⊕ + &amp; | max min}"]
-    subgraph L1["layer 1 — walk the board's cells"]
-      N["nim-sum<br/>fold(⊕, board, cell) = 0"]
-      LN["a line<br/>(c0 and c4 and c8) = 0"]
-    end
-    subgraph L2["layer 2 — walk the discovered lines"]
-      PE["each line, read against the move m:<br/>played = cells == m · empty = cells == 0"]
-      T["a threat<br/>fold(max, groups, test(played, empty)) = 1"]
-      PE --> T
-    end
-    F --> L1
-    LN -->|"its cells become a group"| PE
-    class F op
-    class N,LN,PE,T ex
-```
-
-Three facts pin the picture down:
-
-- **The move is the only perspective** — `m` is the token the last move placed, read from the
-  A → B diff. The board is never recoded; other pieces keep their face values, they're simply
-  not counted.
-- **A fold's domain is one discovered region** (a line), never a union glued from concepts —
-  combining regions is the rule tree's job.
-- **MDL keeps a fold iff it pays; the value decides WIN/LOSS** — the verdict is learned,
-  never asserted.
 
 ## Why a loss is a harder concept than a win
 

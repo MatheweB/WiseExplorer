@@ -8,11 +8,10 @@ longer needs. No heuristics, no training data, no game-specific code.**
 &nbsp;·&nbsp; 📄 [Research paper](https://digitalcommons.oberlin.edu/honors/116/)
 &nbsp;·&nbsp; 🌐 [mathewe.com](https://www.mathewe.com)
 
-Given only a record of which moves led to wins, Wise Explorer builds a theory of the
-game — **invented concepts you can read** plus game-theoretic values — and lets the
-*data itself* decide which to trust, move by move. Where the game can confirm a value by
-exhaustive proof, it stores the proof and **deletes the transitions that proof makes
-redundant**: on a solved game the database empties to nothing while play stays perfect.
+Given only a record of which moves led to wins, Wise Explorer builds a **readable theory** of the
+game — invented concepts plus game-theoretic values — and lets the *data itself* decide which to
+trust, move by move. Where the game can prove a value, it stores the proof and forgets the games
+that proof makes redundant. The Nim example below is the whole idea in one game.
 
 ## It invents the theorem that solves Nim — then proves it and forgets
 
@@ -169,16 +168,12 @@ Nim versus chess, only that some moves tend to precede wins.
 
 ## Inventing concepts (the discovery engine)
 
-Most self-play agents end up an opaque table of numbers. Wise Explorer additionally
-**invents the concepts** that explain its experience — as readable programs, *while it
-trains*.
-
-The whole language is three primitives — cell reads, a few operators (arithmetic, bitwise,
-sign/magnitude), and one combinator, **`fold(op, domain, body)`**: reduce a formula over a
-region of the board.
-Everything it has ever discovered is some nesting of that one shape, and each round builds
-its concepts *out of* the previous round's. The same loop runs a different number of
-rounds per game:
+Most self-play agents end up an opaque table of numbers. Wise Explorer also **invents the
+concepts that explain its experience** — readable programs, built *while it trains*, from one
+tiny algebra: cell reads, a few **operators** (arithmetic, bitwise, sign), and one combinator,
+**`fold(op, domain, body)`** (reduce a formula over a region). Everything it discovers is a
+nesting of that one shape, and each round builds out of the last — so the number of rounds is
+*decided by the data*, not a schedule:
 
 ```mermaid
 flowchart TD
@@ -203,69 +198,22 @@ flowchart TD
 ```
 
 Nim stops after one round because the nim-sum already explains everything; Tic-Tac-Toe
-takes a second because threats only become *expressible* once lines exist to fold over.
-The number of rounds is decided by the data, not by a schedule.
+needs a second, because threats only become *expressible* once lines exist to fold over.
 
-**How concepts are made.** Each round runs three stages — enumerate candidate programs,
-fit one greedy decision tree over library + candidates, keep the concepts the tree
-actually used — and stops the first round whose tree saves fewer bits than it costs:
+Each round does three things: **enumerate** every small program smallest-first (deduped by
+behavior — two formulas with the same column are one concept), **fit** one greedy decision tree
+whose every split must save more bits than it costs, then **promote** the concepts the tree used
+(each becomes a size-1 block, its cells a foldable group — a threat is cheap in round 2 only
+because round 1 paid for the lines). Leaves are labeled `[WIN]`/`[DRAW]`/`[LOSS]` by their
+heaviest **outcome mass** on the game's own `{0, ½, 1}` scale — for reading only; play ranks
+moves by the leaf's *value*. The keep test is **MDL** (Rissanen): a concept's bit savings must
+beat its description length `|c|·log₂ 12`, where a node costs `bits = n·H(outcome masses)`. The
+loop stops the moment a round can't pay — mini-chess at feasible scale gets **none**, and
+declining is a feature.
 
-```mermaid
-flowchart TD
-    classDef step fill:#1f2937,stroke:#475569,color:#e5e7eb
-    classDef tree fill:#0e7490,stroke:#155e75,color:#ecfeff
-    classDef gate fill:#9a3412,stroke:#7c2d12,color:#ffedd5
-    classDef out  fill:#065f46,stroke:#047857,color:#d1fae5
-    P["1 · ENUMERATE<br/>build every small program over the current language,<br/>keep one per distinct behavior, rank by value-variance removed"]
-    T["2 · FIT<br/>grow one greedy tree over library + candidates —<br/>every split must save more bits than it costs"]
-    G{"3 · did the round<br/>pay, in bits?"}
-    K["4 · PROMOTE<br/>concepts the tree used join the library:<br/>each becomes a size-1 block, its cells a foldable group"]
-    R["the last tree IS the model —<br/>its leaves are the WIN / DRAW / LOSS rules"]
-    P --> T --> G
-    G -->|"yes — the language just got richer"| K --> P
-    G -->|"no — stop"| R
-    class P,K step
-    class T tree
-    class G gate
-    class R out
-```
-
-The three stages, briefly — the full anatomy lives in
-[docs/concept-invention.md](docs/concept-invention.md), including **a toy example that
-builds one rule end to end on 2-pile Nim** (six boards, every number checkable by eye):
-
-- **Enumerate**, don't guess: every program up to a size budget is built smallest-first,
-  the six whole-board folds always offered (`fold(⊕, board, cell)` exists *before*
-  anything knows it matters), and two formulas that behave identically on the data count
-  as one concept — on 3-pile Nim that collapses the space to ≈ 13,600 distinct
-  behaviors, all scored in one vectorized pass.
-- **Fit**: on the data a program is a *column*, a threshold makes it a *mask*, and a
-  tree node is just an array of row indices the mask partitions. The node goes to the mask
-  saving the most bits:
-
-  $$\text{gain}(c) \;=\; \text{bits}(\text{node}) \;-\; \text{bits}(\text{node} \cap c) \;-\; \text{bits}(\text{node} \setminus c),
-  \qquad \text{bits}(\cdot) = n \cdot H(\text{outcome masses})$$
-
-- **Promote**: what the tree used becomes a size-1 block, its cells a foldable group — a
-  threat is cheap in round 2 only because round 1 already paid for the lines. A concept is
-  kept iff its savings beat its formula cost (`|c| · log₂ 12` — the **MDL** test of
-  Rissanen, DreamCoder, [Peano](https://arxiv.org/abs/2211.15864)); the loop stops the
-  moment a round can't pay. Mini-chess at feasible scale gets **none** — declining is a
-  feature.
-
-**Where the `[WIN]` / `[DRAW]` / `[LOSS]` labels come from.** No thresholds: each board's
-value splits its mass between the two **outcome anchors** it sits between — `{0, ½, 1}`,
-the game's own utility scale. A leaf pools its boards' masses; the heaviest mass names the
-leaf, and the entropy of the masses is the leaf's cost in bits. The label is for reading —
-play ranks moves by the leaf's *value*, never the word.
-
-**Discovery fits values the theory can trust.** Discovery runs inside the
-[value loop](docs/value-loop.md): each cycle recomputes values from raw counts, completes
-them with the current library (pricing the replies training never played), and *then*
-fits over those completed values — the system's best current belief. A sufficient library
-self-limits (the MDL search finds nothing left that pays). A library can also be **seeded
-from another game's DB** (`ConceptLibrary.seed_from`) — that's the transfer demo:
-programs carry over; their worth is re-fit locally.
+The full anatomy — the split-gain equation, the enumerate/fit/promote internals, the seeding
+that powers transfer, and a toy example that builds one rule end-to-end on 2-pile Nim (six
+boards, checkable by eye) — is in **[docs/concept-invention.md](docs/concept-invention.md)**.
 
 ---
 
@@ -574,34 +522,27 @@ tests/                          # mirrors src/   ·   data/memory/  SQLite DBs (
 
 ## Research contributions
 
-Beyond the 2019 thesis it re-implements, the ideas a reviewer may find notable — all
-zero-prior-knowledge and game-agnostic:
+All zero-prior-knowledge and game-agnostic; re-imagined and extended from my 2019 Oberlin
+honors thesis (concept invention, certified forgetting, and the propagation are independent
+research since):
 
-1. **Concept invention from zero-knowledge self-play** — a program-synthesis engine
-   (cell reads, arithmetic, one `fold` combinator) that invents the features explaining
-   its experience, MDL-gated and reusing its own discoveries to build higher ones
-   (lines → threats). On Nim it independently re-derives **Bouton's 1901 theorem**.
-2. **Certified forgetting** — invented values are proven by induction from the game's
-   terminals, and the transitions a proof reproduces are deleted. On a solved game the
-   database empties to nothing while play stays optimal; on a partial theory the residue
-   is a map of what remains unexplained. Self-healing: the proofs are facts, so they stand
-   even when the theory is corrupted.
-3. **Cross-scale knowledge transfer** — invented concepts are width-free programs, so a
-   rule discovered on a 120-position game plays a 362,880-position game perfectly with
-   zero training on it. Discover where the game is small; apply where it is big.
-4. **The value loop** — discoveries feed back into the value graph: backups range over
-   *all* legal replies, never-played ones priced by the concepts, proven boards pinned to
-   game truth. Self-distillation anchored by raw evidence and the MDL gate; at 1% coverage
-   it keeps retraining at 400/400 where the uncorrected system collapses.
-5. **The evidence ladder + parameter-free steering** — a single deterministic ranking
-   (proven > concept > statistics) replaces tuned multi-signal arbitration and *improves*
-   measured play; exploration drive is total remaining uncertainty in quadrature, zero on
-   proven ground, direction-blind so the theory can never wall off its own errors.
-6. **A principled N-player / non-zero-sum generalization of minimax** via an alignment
-   factor learned from cross-player outcomes, recovering zero-sum minimax as a special case.
-
-> Re-imagined and extended from my Oberlin honors thesis. The concept invention, certified
-> forgetting, Bellman propagation, and distribution sampling are independent research since 2019.
+1. **Concept invention from zero-knowledge self-play** — an MDL-gated program-synthesis engine
+   that invents the features explaining its experience and reuses them to build higher ones
+   (lines → threats → forks); on Nim it re-derives **Bouton's 1901 theorem**.
+2. **Certified forgetting** — invented values are *proven* by induction from the game's terminals
+   and the transitions a proof reproduces are deleted: a solved game's table empties to nothing, a
+   partial theory's residue maps what's unexplained, and the proofs survive a corrupted theory.
+3. **Cross-scale transfer** — concepts are width-free programs, so a rule found on a 120-position
+   game plays a 362,880-position game perfectly with zero training on it.
+4. **The value loop** — discoveries feed back as targets (backups range over *all* legal replies,
+   never-played ones priced by the concepts, proven boards pinned to truth); self-distillation
+   anchored by raw evidence + the MDL gate keeps 8-pile retraining at 400/400 where the uncorrected
+   system collapses.
+5. **Evidence ladder + parameter-free steering** — one deterministic ranking (proven > concept >
+   statistics) replaces tuned arbitration; exploration drive is remaining uncertainty in
+   quadrature, zero on proven ground and direction-blind, so the theory can't wall off its errors.
+6. **N-player / non-zero-sum minimax** — an alignment factor learned from cross-player outcomes,
+   recovering zero-sum minimax as a special case.
 
 ---
 

@@ -16,12 +16,14 @@ Statistics flow *into* rules ([concept-invention.md](concept-invention.md)); pro
 account for.
 
 Entry points: `TransitionMemory.frontier_certify` (the proof pass) and
-`TransitionMemory.collapse_proven` (deletion), run at the end of every value-loop cycle
-([value-loop.md](value-loop.md)).
+`TransitionMemory.collapse_proven` (deletion).
 
-## The cycle
+## Where it runs
 
-Certified forgetting is the last two steps of one value-loop cycle:
+Prove + forget is the **cheap tier** of the value loop ([value-loop.md](value-loop.md)): it runs
+**every wave**, so the certified frontier creeps forward continuously. It needs no refit — only
+the reply graph — which is why it can run so often. (The expensive rebuild that *discovers* the
+rules runs only on the games-doubling clock; certify + collapse just ride on top.)
 
 ```mermaid
 flowchart LR
@@ -29,10 +31,10 @@ flowchart LR
     classDef di fill:#065f46,stroke:#047857,color:#d1fae5
     classDef pr fill:#713f12,stroke:#a16207,color:#fef9c3
     classDef cut fill:#9a3412,stroke:#7c2d12,color:#ffedd5
-    S["solve · complete · fit · complete<br/>(the value loop — values + theory)"]:::ev --> F["frontier_certify<br/>prove by induction from terminals"]:::pr
+    P(["self-play<br/>every wave"]):::ev --> F["frontier_certify<br/>prove by induction from terminals"]:::pr
     F --> C["collapse_proven<br/>delete the rows the proofs reproduce"]:::cut
     C --> M[("what's left =<br/>the unproven residue")]:::di
-    M -.->|"steers the next round<br/>of exploration"| S
+    M -.->|"steers the next wave<br/>of exploration"| P
 ```
 
 ## Proof by induction — the frontier
