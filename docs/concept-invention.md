@@ -78,31 +78,53 @@ A promoted concept also plays a second role, as raw material: its cell-support b
 *group* that the next round's programs can fold over — round 1's line `(c0·c4·c8)`
 is what makes round 2's threat `fold(max, groups, …)` expressible at all.
 
-## One operation: the fold
+## The vocabulary: operators, fold, domains
 
-Everything the engine builds is a **fold** — the standard "running total" operation:
+A concept is a tiny program built from exactly **three kinds of part** — and the whole design
+fits in keeping them straight:
 
-> walk a list of items and merge them into a single number with one rule.
+- **operators** — pointwise rules on numbers: `⊕ (xor)  +  &  |  dist  max  min` combine two,
+  `sgn  abs` reshape one. This is the value algebra, nothing more.
+- **`fold`** — the one *combinator*: walk a list of items and merge them into a single number
+  with one operator. A "running total."
+- **domains** — *what* the fold walks (the shape): the cells, the whole board, the discovered
+  groups, or the cells those groups share.
 
-Add them up (`+`), keep the biggest (`max`), xor them (`⊕`)… We write it
-`fold(rule, what-to-walk, value-of-each-item)`, and it expands to nothing more than
+So every concept reads `fold(operator, domain, body)` — *over this shape, merge-with-this-rule
+the value of each item.* Operators say **how to combine**, the fold says **aggregate**, domains
+say **over what**. Growing the vocabulary means adding a new **domain** — never a new operator
+or a new fold.
+
+**The fold** expands to nothing more than
 
 $$\text{fold}(\oplus,\ \text{board},\ \text{cell}) \;=\; c_0 \oplus c_1 \oplus \cdots \oplus c_{n-1}$$
 
 for *whatever* `n` the board has — which is why a fold discovered on a small board is the
-identical program on a large one. The only requirement on the rule is that it is a **monoid**:
-associative, with an identity to start from (0 for `+`/`⊕`, all-ones for `&`). That is the
-entire justification for the operator set `⊕ + & | max min` — they are exactly the rules you
-can fold with.
+identical program on a large one. The only requirement on the operator is that it is a
+**monoid** (associative, with an identity: 0 for `+`/`⊕`, all-ones for `&`) — that is the whole
+reason the operator set is `⊕ + & | max min`: they are exactly the rules you can fold with.
+Three everyday concepts are the *same fold under a different operator*: `⊕` over every cell is
+the **nim-sum**; `&` over the cells of a line is **"is this line all one colour?"**; `+` over a
+line, of "is this cell the piece just played?", is **a count**. So "line" and "count" are not
+hand-coded — they are a fold with `&` or `+`.
 
-Three everyday concepts are the *same fold under a different rule*:
+**The domains** are the shapes the fold walks. A new domain is the only lever that grows what
+is expressible:
 
-- fold **`⊕`** over every cell → the **nim-sum**
-- fold **`&`** over the cells of a line → **"is this line all one colour?"**
-- fold **`+`** over a line, of "is this cell the piece just played?" → **a count**
+| domain | what it walks | what it buys |
+|---|---|---|
+| `board` / `cells` | every cell (width-free) | the nim-sum, whole-board sums |
+| `groups` | the lines round 1 discovered | threats, threat-counts — `fold(max/+, groups, …)` |
+| `cells×groups` | the cells those lines *share* — each cell sees only the lines through **it** | **forks** |
 
-So "line" and "count" are not hand-coded — they are a fold with `&` or `+`. Richer concepts
-are nested folds: a count inside a per-line test, aggregated across lines.
+The last one is the only *relational* shape, and the reason it was needed: a `groups` fold is
+**global** — it sees only the multiset of line-states, blind to which cell two lines share — so
+a fork (two distinct empty cells that each finish a line) was inexpressible. `cells×groups` is
+**local**: it folds over cells, and each cell carries only the raw states of *its* incident
+lines (how many hold 0/1/2 of yours, of theirs). It asserts no tactic — the search rediscovers
+that a fork is "empty cells that share a line where you already hold 2," and that tactic still
+has to earn its bits. `groups` and `cells×groups` exist only after round 1 finds atomic line-
+concepts whose cells become a group.
 
 ## A rule, built end to end — a toy example
 
@@ -223,7 +245,7 @@ flowchart TD
     end
     L --> R2
     subgraph R2["ROUND k ≥ 2 · reuse what earlier rounds kept"]
-      RU["the cells of each atomic keeper<br/>become a group (a line)"] --> C["search again: folds over those groups<br/>→ threats (∃), forks (count)"]
+      RU["the cells of each atomic keeper<br/>become a group (a line)"] --> C["search again: folds over those groups (threats)<br/>and over the cells they share (forks)"]
     end
     C --> G{"did the round pay,<br/>in bits?"}
     G -->|"yes — its keepers join the library;<br/>run round k+1"| R2
@@ -316,7 +338,8 @@ and renders to a readable formula. The build ladder for Tic-Tac-Toe:
 | round 1 (cells) | `fold(⊕, board, cell) = 0` | the nim-sum: xor every cell — width-free, the same program at any board size |
 | round 1 (cells) | `(c0 and c4 and c8) = 0` | a line is all one colour (an `&`-fold over those cells, written as a chain) |
 | round 2 (lines) | `fold(max, groups, <test of played & empty>) = 1` | ∃ a line passing a *discovered* test — a threat |
-| round 2 (lines) | `fold(+, groups, …)` thresholded | how many lines pass it — a fork |
+| round 2 (lines) | `fold(+, groups, …)` thresholded | how many lines pass it — a threat-count |
+| round 2 (shared cells) | `fold(+, cells×groups, …) = 2` | how many empty cells share a line you nearly hold — a **fork** (needs the local cell↔line shape, not a global line count) |
 | rules | `win → WIN`,  `threat → LOSS / WIN`,  `else → DRAW` | a leaf is labeled by its heaviest outcome mass — learned from the value, never asserted (play uses the leaf's *value*; the label is for reading) |
 
 The lines a round-2 fold walks are **discovered, not hand-listed**: they are the cell-supports

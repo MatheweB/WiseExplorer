@@ -280,7 +280,9 @@ class TestDiscoveredThreats:
         cands = S._group_fold_candidates(supports, B, target, min_leaf=5, m=m)
         assert cands, "expected at least one group-fold candidate"
         for c in cands:
-            assert isinstance(c.expr, S.Fold) and isinstance(c.expr.domain, S.GroupDomain)
+            # folds over the lines (GroupDomain) or the cells they share (IncidenceDomain)
+            assert isinstance(c.expr, S.Fold)
+            assert isinstance(c.expr.domain, (S.GroupDomain, S.IncidenceDomain))
             assert c.expr.op in ("max", "+")
             assert str(c.expr).startswith("fold(") and "groups" in str(c.expr)
         assert S._group_fold_candidates([], B, target, 5, m) == []   # no discovered groups → nothing

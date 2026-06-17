@@ -11,7 +11,7 @@ See ``docs/concept-invention.md`` and the ``invent`` CLI verb.
 """
 from wise_explorer.synthesis.exprs import (
     Expr, Cell, Lit, BinOp, UnaryOp, Named, Elem, Fold,
-    CellDomain, BoardDomain, GroupDomain, Concept,
+    CellDomain, BoardDomain, GroupDomain, IncidenceDomain, Concept,
     expr_to_dict, expr_from_dict, _OPS, _FOLD, _UNARY, _WORD,
 )
 from wise_explorer.synthesis.engine import (

@@ -10,7 +10,7 @@ import numpy as np
 
 from wise_explorer.synthesis.exprs import (
     Expr, Cell, Lit, BinOp, UnaryOp, Named, Elem, Fold,
-    CellDomain, BoardDomain, GroupDomain, Concept, _OPS, _UNARY, _FOLD,
+    CellDomain, BoardDomain, GroupDomain, IncidenceDomain, Concept, _OPS, _UNARY, _FOLD,
 )
 
 
@@ -225,24 +225,18 @@ def _residual(rules: list[Rule], V: np.ndarray) -> np.ndarray:
     return V - pred
 
 
-def _group_fold_candidates(supports, B: np.ndarray, target: np.ndarray, min_leaf: int, m) -> list[Concept]:
-    """Discover threats and forks over the discovered groups (``supports`` — the cells the
-    kept concepts read). Search per-group bodies over the (played, empty) counts with the
-    same synthesiser, then fold each body over the groups two ways: ``max`` (∃ a group
-    where the body fires — a threat) and ``+`` (count the groups where it fires — a fork).
-    One discovered body, two monoids. Each fold is thresholded and scored against the
-    residual, so a novel concept beats one that merely restates the win-lines."""
-    if not supports:
-        return []
-    dom = GroupDomain(supports)
+def _fold_search(dom, B, target, min_leaf, m, cap=None) -> list[tuple]:
+    """Search bodies over a fold domain's per-element features and fold each two ways: ``max``
+    (∃ an element where the body fires) and ``+`` (count the elements where it fires). Each fold
+    is thresholded and scored against the residual. Returns ``(gain, size, Concept)`` triples."""
     T = dom.tensor(B, m)
     N, K, F = T.shape
     flat = T.reshape(N * K, F)
-    bodies = _synthesize([Elem(j, dom.names) for j in range(F)], flat, max_size=5, cap=None)
-    scored = []
+    bodies = _synthesize([Elem(j, dom.names) for j in range(F)], flat, max_size=5, cap=cap)
+    out = []
     for body in bodies.values():
         per = body.eval(flat).reshape(N, K)
-        for op in ("max", "+"):                          # ∃ a group | count the groups
+        for op in ("max", "+"):
             fn, ident = _FOLD[op]
             vec = fn.reduce(per, axis=1, initial=ident).astype(np.int64)
             fold = Fold(op, dom, body)
@@ -253,7 +247,21 @@ def _group_fold_candidates(supports, B: np.ndarray, target: np.ndarray, min_leaf
                     continue
                 gain = target.var() - (n1/N*target[mask].var() + (N-n1)/N*target[~mask].var())
                 if gain > 0:
-                    scored.append((gain, fold.size, Concept(fold, "=", int(c), mask, fold.size)))
+                    out.append((gain, fold.size, Concept(fold, "=", int(c), mask, fold.size)))
+    return out
+
+
+def _group_fold_candidates(supports, B: np.ndarray, target: np.ndarray, min_leaf: int, m) -> list[Concept]:
+    """Discover threats and forks over the discovered groups (``supports`` — the cells the kept
+    concepts read). Two fold views compete on residual gain: GroupDomain folds over the lines
+    themselves (their (played, empty) counts — threats and threat-COUNTS), and IncidenceDomain
+    folds over the cells the lines share (how many lines each cell completes — the true FORK,
+    two distinct completion cells, which a flat line-count cannot tell from one shared cell).
+    The MDL gate keeps whichever a fold actually pays for."""
+    if not supports:
+        return []
+    scored = _fold_search(GroupDomain(supports), B, target, min_leaf, m) \
+        + _fold_search(IncidenceDomain(supports), B, target, min_leaf, m, cap=CAP)
     scored.sort(key=lambda x: (-x[0], x[1]))              # best residual gain, then smallest
     return [c for _, _, c in scored[:6]]                  # a residual-ranked handful
 

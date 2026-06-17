@@ -144,6 +144,39 @@ class GroupDomain:
     def __str__(self): return "groups"
 
 
+class IncidenceDomain:
+    """A fold over the CELLS the discovered groups cover, exposing for each cell how its incident
+    groups stand — the cell-SHARING structure a flat group-fold throws away (a group-fold sees
+    only the multiset of group states, never which cell two groups share). Per cell, three move-
+    raw counts — NOT tactics. Per cell: whether it is ``empty``, and a histogram of its incident
+    groups' line-states — how many hold ``played`` = 0/1/2 of the moved token (``p0/p1/p2``) and how
+    many hold ``other`` = 1/2 of some other token (``o1/o2``). It does NOT assert "gap"/"one-short":
+    the search rediscovers that a fork is empty cells whose incident groups sit at p2 (just as it
+    rediscovers a threat from a group's raw played/empty). A domain exposes structure (the cell↔group
+    incidence + raw states); strategy is earned through compression. Move-relative (played == m)."""
+    names = ("empty", "p0", "p1", "p2", "o1", "o2")
+    def __init__(self, groups):
+        self.groups = tuple(tuple(g) for g in groups)
+        self.cells = tuple(sorted({c for g in self.groups for c in g}))
+    def tensor(self, B, m):
+        N = B.shape[0]
+        T = np.zeros((N, len(self.cells), 6), dtype=np.int64)
+        for ci, c in enumerate(self.cells):
+            T[:, ci, 0] = (B[:, c] == 0)                        # the cell's own emptiness
+            for g in self.groups:
+                if c not in g:
+                    continue
+                cols = B[:, list(g)]
+                played = (cols == m[:, None]).sum(1)            # moved token in this incident group
+                other = len(g) - played - (cols == 0).sum(1)    # some other token
+                for k, j in ((0, 1), (1, 2), (2, 3)):           # p0, p1, p2
+                    T[:, ci, j] += (played == k)
+                for k, j in ((1, 4), (2, 5)):                   # o1, o2
+                    T[:, ci, j] += (other == k)
+        return T
+    def __str__(self): return "cells×groups"
+
+
 class Fold(Expr):
     """``fold(op, domain, body)`` — reduce ``body`` over every element of ``domain``
     with the monoid ``op``. The one combinator everything is built from: the nim-sum is
@@ -214,6 +247,8 @@ def expr_to_dict(e: Expr) -> dict:
             dom = {"t": "BoardDomain"}                          # width-free → the program transfers
         elif isinstance(e.domain, CellDomain):
             dom = {"t": "CellDomain", "cells": list(e.domain.cells)}
+        elif isinstance(e.domain, IncidenceDomain):
+            dom = {"t": "IncidenceDomain", "groups": [list(g) for g in e.domain.groups]}
         else:
             dom = {"t": "GroupDomain", "groups": [list(g) for g in e.domain.groups]}
         return {"t": "Fold", "op": e.op, "domain": dom, "body": expr_to_dict(e.body)}
@@ -242,6 +277,8 @@ def expr_from_dict(d: dict) -> Expr:
             dom = BoardDomain()
         elif dd["t"] == "CellDomain":
             dom = CellDomain(tuple(dd["cells"]))
+        elif dd["t"] == "IncidenceDomain":
+            dom = IncidenceDomain([tuple(g) for g in dd["groups"]])
         else:
             dom = GroupDomain([tuple(g) for g in dd["groups"]])
         return Fold(d["op"], dom, expr_from_dict(d["body"]))

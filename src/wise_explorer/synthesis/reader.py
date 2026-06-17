@@ -2,11 +2,13 @@
 named, one-floor-deep formulas with derived ⟺ readings."""
 from __future__ import annotations
 
+import itertools
+
 import numpy as np
 
 from wise_explorer.synthesis.exprs import (
     Expr, Cell, Lit, BinOp, UnaryOp, Named, Elem, Fold, CellDomain, BoardDomain,
-    GroupDomain, Concept, _OPS, _WORD, _FOLD,
+    GroupDomain, IncidenceDomain, Concept, _OPS, _WORD, _FOLD,
 )
 from wise_explorer.synthesis.engine import Rule, InventionResult
 
@@ -29,6 +31,8 @@ def meaning(c: Concept, tokens: tuple[int, ...] = (), brief: bool = False,
         body = "every cell" if isinstance(e.body, Elem) else f"{e.body} over every cell"
         rel = "is" if c.op == "=" else "exceeds"
         return f"the {word} of {body} {rel} {c.const}"
+    if isinstance(e.domain, IncidenceDomain):
+        return _incidence_meaning(e, c.op, c.const)
     if not isinstance(e.domain, GroupDomain):
         return None
     sizes = {len(g) for g in e.domain.groups}
@@ -70,6 +74,59 @@ def meaning(c: Concept, tokens: tuple[int, ...] = (), brief: bool = False,
             return None                                      # a table, not a sentence — KEY only
         scores = "; ".join(f"{d} → {v}" for v in sorted(by_val) if v != 0 for d in by_val[v])
         return f"group scores ({scores}) sum to {c.const}"
+    return None
+
+
+def _body_features(e: Expr) -> set:
+    """Which incidence features (0=empty, 1=played_short, 2=other_short) the body actually reads."""
+    out = set()
+    def walk(x):
+        if isinstance(x, Elem):
+            out.add(x.j)
+        elif isinstance(x, BinOp):
+            walk(x.a); walk(x.b)
+        elif isinstance(x, UnaryOp):
+            walk(x.a)
+    walk(e)
+    return out
+
+
+# the raw incidence features (after ``empty``), each a count of incident groups in one line-state
+_INC_SIDE = {1: ("you", 0), 2: ("you", 1), 3: ("you", 2), 4: ("they", 1), 5: ("they", 2)}
+
+
+def _incidence_meaning(e: Fold, op: str, const: int) -> str | None:
+    """Reading for a fold over the cell×group incidence. The body reads raw per-cell counts — how
+    many incident groups sit at each line-state — so, like the group reading, we state the
+    structure and let the reader draw the tactic: a cell that is empty AND shares a group where you
+    already hold 2 is a winning square; counting those (a `+` fold) is a fork. The legible forms are
+    counting empty cells, and counting/finding empty cells that share a group at one line-state;
+    arbitrary arithmetic on the counts gets no sentence (None — the formula speaks)."""
+    feats = _body_features(e.body)
+    if feats == {0}:                                       # the body reads only emptiness
+        if e.op == "+":
+            return f"how many cells are empty — the count is {const}"
+        return "some cell is empty" if e.op == "max" and const >= 1 else None
+    counts = sorted(feats - {0})
+    if 0 not in feats or not counts or any(c not in _INC_SIDE for c in counts):
+        return None                                        # not "emptiness + line-states" → no sentence
+    # the legible form: an empty cell that shares a group at one of these line-states. Confirm the
+    # body fires EXACTLY when the cell is empty AND at least one of the read counts is non-zero.
+    grid = [(emp, combo) for emp in (0, 1)
+            for combo in itertools.product(range(3), repeat=len(counts))]
+    arr = np.zeros((len(grid), 6), dtype=np.int64)
+    for r, (emp, combo) in enumerate(grid):
+        arr[r, 0] = emp
+        for c, n in zip(counts, combo):
+            arr[r, c] = n
+    vals = [int(v) for v in e.body.eval(arr)]
+    if [v > 0 for v in vals] != [bool(emp and any(combo)) for emp, combo in grid]:
+        return None
+    where = "a group where " + " or ".join(f"{s} hold {k}" for s, k in (_INC_SIDE[c] for c in counts))
+    if e.op == "max":
+        return f"no empty cell shares {where}" if const == 0 else f"some empty cell shares {where}"
+    if e.op == "+" and set(vals) <= {0, 1}:
+        return f"how many empty cells share {where} — the count is {const}"
     return None
 
 
