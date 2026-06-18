@@ -15,8 +15,9 @@ Statistics flow *into* rules ([concept-invention.md](concept-invention.md)); pro
 *replace* their statistics. What remains stored is precisely what the theory cannot yet
 account for.
 
-Entry points: `TransitionMemory.frontier_certify` (the proof pass) and
-`TransitionMemory.collapse_proven` (deletion).
+Entry points: `frontier_certify` (the proof pass) and `collapse_proven` (proof-floor deletion,
+every wave), plus `_forget_explained` (the theory's *earned* deletion, on the rebuild clock —
+it reads the freshly fit rules).
 
 ## Where it runs
 
@@ -69,26 +70,39 @@ replaced it: proofs instead of probabilities, and the verification bill dropped 
 
 ## The deletion invariant
 
-> A row may be deleted iff a **proof** reproduces its value.
+> A row may be deleted iff a **proof** — or the theory that proof has licensed —
+> reproduces its **verdict**.
 
-`collapse_proven` deletes a transition only where its completed value (`propagated_score`)
-matches the certificate of the board it lands on, within `ε = 0.25`:
+A board's value `v ∈ [0,1]` is a sliding scale — the minimax backup, e.g. `0.68`. Its
+**verdict** is which of the game's three outcomes that value is nearest:
 
-```sql
-DELETE FROM transitions WHERE propagated_score IS NOT NULL
-  AND EXISTS (SELECT 1 FROM certificates c WHERE c.board_hash = transitions.to_hash
-              AND ABS(transitions.propagated_score - c.value) <= ε)
+$$\text{verdict}(v)=\begin{cases}\text{LOSS}&v\le\tfrac14\\[2pt]\text{DRAW}&\tfrac14<v<\tfrac34\\[2pt]\text{WIN}&v\ge\tfrac34\end{cases}$$
+
+The cuts at `¼` and `¾` aren't tuned — they're where the loss/draw/win masses cross in
+`_verdicts`. A **certificate** is a proof, so *its* value is always an exact anchor (`0`, `½`,
+`1`). Forgetting then compares verdicts, never raw values, so it needs no tolerance: a draw row
+only has to land on the *draw side* of the scale, never exactly on `½`. Each completed row runs
+two gates in turn:
+
+```mermaid
+flowchart TD
+    classDef cut fill:#9a3412,stroke:#7c2d12,color:#ffedd5
+    classDef keep fill:#065f46,stroke:#047857,color:#d1fae5
+    R(["a completed row<br/>value = propagated_score"]) --> Q1{"verdict =<br/>certificate's?"}
+    Q1 -->|yes| D1["forget — proof floor<br/>collapse_proven"]:::cut
+    Q1 -->|no| Q2{"verdict =<br/>rule tree's?"}
+    Q2 -->|yes| D2["forget — earned<br/>_forget_explained"]:::cut
+    Q2 -->|no| K[("keep =<br/>the frontier")]:::keep
 ```
 
-Two properties make this safe:
+**Safe either way.** The proof floor compares against the *certificate* (the game's truth,
+never the library), so no theory can force a wrongful delete. Earned forgetting does consult
+the tree, but deletes only where it *agrees* with the backup — a wrong theory forgets less,
+never wrongly, and can never expand what's certified. On a provable game the proof catches up
+and the two gates converge; on one too large to prove out, earned forgetting is what keeps
+compression moving past the frontier.
 
-- **Sound under a wrong theory.** The comparison is against the *certified* value — the
-  game's, never the library's. A corrupted theory cannot cause a wrongful deletion, because
-  the theory's prices are not consulted here at all.
-- **Surgical, not blanket.** Rows whose value the proof *cannot* reproduce are kept — they
-  mark stale beliefs or genuine exceptions. Deletion removes redundancy, not evidence.
-
-`WISE_COLLAPSE=0` disables deletion; the cycle still completes and values stay sound, just
+`WISE_COLLAPSE=0` disables both gates; the cycle still completes and values stay sound, just
 with redundant rows retained.
 
 ## Proofs need no expiry
@@ -219,7 +233,9 @@ collapse answers to proofs, not to the library.
 | piece | place |
 |---|---|
 | inductive proof pass | `TransitionMemory.frontier_certify` |
-| proof-licensed deletion | `TransitionMemory.collapse_proven` |
+| proof-licensed deletion (floor) | `TransitionMemory.collapse_proven` |
+| earned forgetting (theory) | `TransitionMemory._forget_explained` |
+| verdict from value | `synthesis.engine._verdicts` |
 | proven-board pinning in completion | `TransitionMemory.complete_values` |
 | certificate store / cache | `GameMemory.certified_values` · `certificates` table |
 | the steering drive | `selection.select_move_for_training` |

@@ -630,22 +630,49 @@ class TransitionMemory(GameMemory):
             self._certified_cache = None
         return len(new)
 
-    def collapse_proven(self, eps: float = 0.25) -> int:
-        """Delete transitions whose completed value the proof reproduces.
+    def collapse_proven(self) -> int:
+        """Delete transitions whose value the proof reproduces — whose stored value carries the
+        same outcome verdict as the board's certificate (the game's own truth). Sound regardless
+        of the library: the comparison is against the cert. Rows the proof can't yet reproduce
+        stay — they mark stale values, not deletable redundancy. Verdict-based like earned
+        forgetting, so no tolerance to tune. Returns the number of rows deleted."""
+        rows = self.conn.execute(
+            "SELECT t.rowid, t.propagated_score, c.value FROM transitions t "
+            "JOIN certificates c ON t.to_hash = c.board_hash "
+            "WHERE t.propagated_score IS NOT NULL").fetchall()
+        if not rows:
+            return 0
+        from wise_explorer.synthesis.engine import _verdicts
+        prop = np.array([r[1] for r in rows])
+        cert = np.array([r[2] for r in rows])
+        forget = [(rows[i][0],) for i in np.flatnonzero(_verdicts(prop) == _verdicts(cert))]
+        if forget:
+            self.conn.executemany("DELETE FROM transitions WHERE rowid = ?", forget)
+            self.conn.commit()
+        return len(forget)
 
-        Sound regardless of the library's state: the comparison is against the
-        certified value, which is the game's. Rows the proof cannot reproduce
-        stay — they mark stale values, not deletable redundancy. Returns the
-        number of rows deleted.
-        """
-        cur = self.conn.cursor()
-        cur.execute(
-            "DELETE FROM transitions WHERE propagated_score IS NOT NULL "
-            "AND EXISTS (SELECT 1 FROM certificates c "
-            "WHERE c.board_hash = transitions.to_hash "
-            "AND ABS(transitions.propagated_score - c.value) <= ?)",
-            (eps,),
-        )
-        deleted = cur.rowcount
-        self.conn.commit()
-        return deleted
+    def _forget_explained(self) -> int:
+        """Earned forgetting: after a fit, drop the transitions whose outcome the THEORY now
+        calls correctly — keeping the ones it gets WRONG, the frontier it hasn't explained yet.
+        It compares verdicts (the same LOSS/DRAW/WIN the tree labels leaves with), so there's no
+        tolerance to tune and it extends to more outcome classes for free. The proof's collapse
+        runs first; this is the theory earning the right to replace raw evidence."""
+        if self.read_only or not self.concept_library.rules:
+            return 0
+        rows = self.conn.execute(
+            "SELECT t.rowid, b.board_data, b.to_move, t.wins, t.ties, t.losses, t.propagated_score "
+            "FROM transitions t JOIN boards b ON t.to_hash = b.board_hash "
+            "WHERE t.propagated_score IS NOT NULL").fetchall()
+        if not rows:
+            return 0
+        from wise_explorer.synthesis.engine import _verdicts
+        B = np.stack([np.frombuffer(r[1], dtype=np.int8).astype(np.int64) for r in rows])
+        to_move = np.array([r[2] for r in rows], dtype=np.int64)
+        pred = self.concept_library.values_for(B, np.where(to_move > 0, 3 - to_move, 0))
+        contest = np.array([self._board_value(Stats(r[3], r[4], r[5]), r[6]) for r in rows])
+        explained = ~np.isnan(pred) & (_verdicts(pred) == _verdicts(contest))
+        forget = [(rows[i][0],) for i in np.flatnonzero(explained)]
+        if forget:
+            self.conn.executemany("DELETE FROM transitions WHERE rowid = ?", forget)
+            self.conn.commit()
+        return len(forget)

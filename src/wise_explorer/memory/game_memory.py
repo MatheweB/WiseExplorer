@@ -366,16 +366,16 @@ class GameMemory(ABC):
         keys: list[tuple[str, str]] = []
         counts_l: list[Counts] = []
         bell_l: list[float] = []
+        certs = self.certified_values
         for from_hash, to_hash, w, t, l, bell in rows:
             if from_hash not in boards or to_hash not in boards:
                 continue
             s = Stats(w, t, l)
             if s.total <= 0:
                 continue
-            solo = s.utility if is_decisive(s) else s.mean_score
             keys.append((from_hash, to_hash))
             counts_l.append((w, t, l))
-            bell_l.append(bell if bell is not None else solo)
+            bell_l.append(self._board_value(s, bell, certs.get(to_hash)))
 
         if not keys:
             return boards, {}
@@ -384,6 +384,18 @@ class GameMemory(ABC):
             key: (counts_l[i], bell_l[i]) for i, key in enumerate(keys)
         }
         return boards, trans_scores
+
+    def _board_value(self, s: Stats, bell: float | None, cert: float | None = None) -> float:
+        """A board's value — used both to fit and to forget. A certificate is the game's own
+        truth; otherwise the minimax backup (`bell`), which is accurate wherever it converges;
+        raw counts serve only as the bootstrap fallback before any backup exists. (Measured:
+        preferring a decisive raw outcome over `bell` is *worse* — empirical self-play overstates,
+        e.g. on TTT |raw−true| ≈ 0.29 vs |bell−true| ≈ 0.03 — so the backup wins.)"""
+        if cert is not None:
+            return cert
+        if bell is not None:
+            return bell
+        return s.utility if is_decisive(s) else s.mean_score
 
     def grow_concepts(self, game=None) -> int:
         """Run one value-loop cycle: solve → complete → fit → complete → prove → forget.
@@ -432,7 +444,8 @@ class GameMemory(ABC):
         self.complete_values(game, graph)        # re-price with the rules just distilled
         self.frontier_certify(game, graph)       # prove what now chains to terminals
         if os.environ.get("WISE_COLLAPSE", "1") != "0":
-            self.collapse_proven()               # forget what the proofs reproduce
+            self.collapse_proven()               # forget what the PROOF reproduces (sound floor)
+            self._forget_explained()             # earned: forget what the THEORY now reproduces
         return kept
 
     def prove_and_forget(self, game) -> int:
@@ -478,8 +491,12 @@ class GameMemory(ABC):
         """Inductive proof pass. No-op for Markov memory."""
         return 0
 
-    def collapse_proven(self, eps: float = 0.25) -> int:
+    def collapse_proven(self) -> int:
         """Proof-licensed deletion. No-op for Markov memory."""
+        return 0
+
+    def _forget_explained(self) -> int:
+        """Earned forgetting — drop rows the theory reproduces. No-op for Markov memory."""
         return 0
 
     def _commit(self, transitions: dict[tuple[str, str], list[float]]) -> int:

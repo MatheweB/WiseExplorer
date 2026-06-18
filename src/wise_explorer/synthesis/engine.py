@@ -285,6 +285,14 @@ def _verdict(v: np.ndarray) -> str:
     return ["LOSS", "DRAW", "WIN"][int(_soft_counts(v).argmax())]   # heaviest outcome mass
 
 
+def _verdicts(v: np.ndarray) -> np.ndarray:
+    """Each value's outcome class (0=LOSS, 1=DRAW, 2=WIN) by the same anchors as ``_soft_counts``
+    — add an outcome anchor here and both the leaf labels and earned forgetting extend with it."""
+    ml = np.maximum(0.0, 1.0 - 2.0 * v)
+    mw = np.maximum(0.0, 2.0 * v - 1.0)
+    return np.argmax(np.stack([ml, 1.0 - ml - mw, mw]), axis=0)
+
+
 def _build_rules(concepts: list[Concept], V: np.ndarray, min_leaf: int):
     rules: list[Rule] = []
     split_cost = math.log2(max(len(concepts), 2)) + 2.0   # MDL: a split must beat its own description
