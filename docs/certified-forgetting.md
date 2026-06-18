@@ -110,6 +110,28 @@ earned forgetting compresses only the regions it has genuinely proven into theor
 `WISE_COLLAPSE=0` disables both gates; the cycle still completes and values stay sound, just
 with redundant rows retained.
 
+## Impurity is a tactical obligation, not a defect
+
+A leaf need not be pure. The library has two jobs: turn the **reusable** structure into theorems
+(the pure leaves) and leave the **irreducibly tactical** positions for the proof. An impure leaf
+marks that boundary — an obligation handed to the proof, not a failure to classify.
+
+On solved Tic-Tac-Toe the library splits the reachable positions into a clean won region, a clean
+lost region, and one impure lump: the contested middlegame, mixing losses and draws. No static
+feature separates that lump, because the line between a loss and a draw there *is* the minimax
+decision:
+
+$$\text{the just-moved player loses} \iff \text{the side to move can force a win} \iff V_{\text{minimax}}(\text{to move}) = \text{WIN}.$$
+
+A feature that cleanly split it would therefore *be* a search. So the library correctly declines,
+keeps the lump as frontier, and the proof settles it position by position. The standard to judge
+the whole system by follows — not leaf purity, but joint certification:
+
+$$\text{correct} \;\not\Leftrightarrow\; \text{every leaf pure} \qquad\qquad \text{correct} \;\Leftrightarrow\; \text{theory} \,\wedge\, \text{proof together certify play.}$$
+
+On a game small enough to prove out, they do (Tic-Tac-Toe, 100%); on one too large, the theory
+certifies what generalizes and the residue maps what the proof has yet to reach.
+
 ## Proofs need no expiry
 
 A certificate here is a game-theoretic **fact**, which dissolves machinery earlier designs

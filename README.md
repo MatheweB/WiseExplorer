@@ -279,8 +279,10 @@ flowchart LR
     M -.->|"steer exploration here"| F
 ```
 
-Deletion is sound even while the theory is wrong, because it compares each row against the
-**proven** value (the game's), never the library's. The result, by game:
+Deletion has a **sound floor** — a *proof* compares each row to the game's certificate, never
+the library's, so a wrong theory can never delete wrongly. The theory earns a weaker license
+too: it retires a region only once it is a **pure-leaf theorem** (value exactly `0`/`½`/`1`),
+never a coincidental average. The result, by game:
 
 | | complete theory (Nim-4) | partial theory (Tic-Tac-Toe) |
 |---|---|---|
