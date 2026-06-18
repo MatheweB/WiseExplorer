@@ -64,7 +64,6 @@ def train(
         return
     td = turn_depth or default_turn_depth(game.game_id())
     swarms = create_agent_swarms(list(range(1, game.num_players() + 1)), _SWARM)
-    step = max(1, games // 20)
     done = 0
     # The initial position: once the proof frontier certifies IT, the game is solved by
     # backward induction from the terminals. We also wait for a discovered concept, because
@@ -76,6 +75,7 @@ def train(
     # for any game (grinds the last few positions on a rare run that certifies the root early).
     root_hash = hash_board(game.get_state().board)
     with SimulationRunner(memory, workers, wave_size=wave_size, seed=seed) as runner:
+        step = max(1, runner.wave_size)          # report once per wave — the learning unit
         while done < games:
             batch = min(step, games - done)
             run_training(runner, swarms, game, simulations=batch,
@@ -87,6 +87,7 @@ def train(
                     and memory.concept_library.rules):
                 break                                    # solved AND theory captured → done
         memory.grow_concepts(game=game)
+    memory.add_games_trained(done)               # cumulative checkpoint depth (survives forgetting)
     if progress:
         progress(done, games, memory)            # `done` < games when solved early
 

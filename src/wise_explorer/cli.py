@@ -61,19 +61,32 @@ def run_train(argv: list[str]) -> None:
 
     game = create_game(a.game, size=a.size)
     memory = Memory.for_game(game, base_dir=MEMORY_DIR, markov=a.markov)
-    print(f"Training {game.game_id()} — {a.games:,} self-play games (cumulative).")
+    print(f"Training {game.game_id()} — {a.games:,} games "
+          f"(checkpoint: {memory.games_trained:,} trained so far).")
 
     t0 = time.time()
+    base_games = memory.games_trained
+    live = {"t": t0, "done": 0, "concepts": None, "rules": None}
 
     def report(done, total, mem):
-        elapsed = time.time() - t0
-        rate = done / elapsed if elapsed > 0 else 0
+        now = time.time()
+        dt = now - live["t"]
+        rate = (done - live["done"]) / dt if dt > 0 else 0.0   # recent rate, not lifetime average
         info = mem.get_info()
-        rows = info.get("transitions", info.get("unique_states", 0))
+        concepts = info["concepts"]
+        rules = len(mem.concept_library.rules)
         proven = 0 if mem.is_markov else len(mem.certified_values)
+        rows = info.get("transitions", info.get("unique_states", 0))
+        # A synthesis wave that CHANGED the library is a "making" event — logged as a kept line
+        # above the live one. The quiet stretches between are the frozen waves (held, or no fire).
+        if live["rules"] is not None and (concepts, rules) != (live["concepts"], live["rules"]):
+            sys.stdout.write(
+                f"\r\033[K  ✦ {base_games + done:,} games — library "
+                f"{live['concepts']}→{concepts} concepts, {live['rules']}→{rules} rules\n")
+        live.update(t=now, done=done, concepts=concepts, rules=rules)
         sys.stdout.write(
-            f"\r  {done:,}/{total:,} games · {rate:,.0f}/s · "
-            f"{info['concepts']} concepts · {proven:,} proven · {rows:,} rows    ")
+            f"\r\033[K  {base_games + done:,} total · run {done:,}/{total:,} · {rate:,.0f}/s · "
+            f"{concepts} concepts · {rules} rules · {proven:,} proven · {rows:,} rows")
         sys.stdout.flush()
 
     kwargs = {"progress": report}

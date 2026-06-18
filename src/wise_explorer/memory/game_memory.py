@@ -154,6 +154,26 @@ class GameMemory(ABC):
             self.concept_library._load()
             self._certified_cache = None
 
+    @property
+    def games_trained(self) -> int:
+        """Cumulative self-play games this checkpoint has trained on. Lives in `metadata`,
+        so unlike `total_samples` it survives forgetting — deleted rows don't decrement it."""
+        try:
+            row = self.conn.execute(
+                "SELECT value FROM metadata WHERE key='games_trained'").fetchone()
+            return int(row[0]) if row else 0
+        except sqlite3.Error:
+            return 0
+
+    def add_games_trained(self, n: int) -> None:
+        """Bump the cumulative games-trained counter (skipped on read-only handles)."""
+        if self.read_only or n <= 0:
+            return
+        self.conn.execute(
+            "INSERT OR REPLACE INTO metadata (key, value) VALUES ('games_trained', ?)",
+            (str(self.games_trained + n),))
+        self.conn.commit()
+
     # -------------------------------------------------------------------------
     # Move Evaluation
     # -------------------------------------------------------------------------
