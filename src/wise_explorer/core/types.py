@@ -10,8 +10,6 @@ from __future__ import annotations
 import math
 from typing import NamedTuple
 
-import numpy as np
-
 from wise_explorer.agent.agent import State
 
 Counts = tuple[float, float, float]
@@ -24,8 +22,6 @@ Counts = tuple[float, float, float]
 L_WEIGHT = 0.0   # Utility for a LOSS
 T_WEIGHT = 0.5   # Utility for a TIE
 W_WEIGHT = 1.0   # Utility for a WIN
-
-WEIGHTS = (W_WEIGHT, T_WEIGHT, L_WEIGHT)
 
 SCORE_MIN = L_WEIGHT   # 0.0
 SCORE_MAX = W_WEIGHT   # 1.0
@@ -45,9 +41,6 @@ class Stats(NamedTuple):
     wins: float = 0
     ties: float = 0
     losses: float = 0
-
-    def as_tuple(self) -> tuple[float, float, float]:
-        return (self.wins, self.ties, self.losses)
 
     @property
     def total(self) -> float:
@@ -99,15 +92,6 @@ class Stats(NamedTuple):
     def certainty(self) -> float:
         """Confidence in estimate, [0, 1]."""
         return max(0.0, min(1.0, 1.0 - self.std_error))
-
-    def sample_score(self, method: str = 'dirichlet') -> float:
-        """Thompson sampling from posterior."""
-        if method == 'dirichlet':
-            alpha = [self.wins + 1, self.ties + 1, self.losses + 1]
-            probs = np.random.dirichlet(alpha)
-            return probs[0] * W_WEIGHT + probs[1] * T_WEIGHT + probs[2] * L_WEIGHT
-
-        raise ValueError(f"Unknown method: {method}")
 
 
 # ---------------------------------------------------------------------------
