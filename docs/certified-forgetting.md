@@ -70,8 +70,9 @@ replaced it: proofs instead of probabilities, and the verification bill dropped 
 
 ## The deletion invariant
 
-> A row may be deleted iff a **proof** — or the theory that proof has licensed —
-> reproduces its **verdict**.
+> A row may be deleted iff an **exact-anchor explanation** reproduces its outcome — a
+> **proof** (its certificate) or a **theorem** (a pure rule-tree leaf). A coincidental lump
+> never licenses deletion.
 
 A board's value `v ∈ [0,1]` is a sliding scale — the minimax backup, e.g. `0.68`. Its
 **verdict** is which of the game's three outcomes that value is nearest:
@@ -79,28 +80,32 @@ A board's value `v ∈ [0,1]` is a sliding scale — the minimax backup, e.g. `0
 $$\text{verdict}(v)=\begin{cases}\text{LOSS}&v\le\tfrac14\\[2pt]\text{DRAW}&\tfrac14<v<\tfrac34\\[2pt]\text{WIN}&v\ge\tfrac34\end{cases}$$
 
 The cuts at `¼` and `¾` aren't tuned — they're where the loss/draw/win masses cross in
-`_verdicts`. A **certificate** is a proof, so *its* value is always an exact anchor (`0`, `½`,
-`1`). Forgetting then compares verdicts, never raw values, so it needs no tolerance: a draw row
-only has to land on the *draw side* of the scale, never exactly on `½`. Each completed row runs
-two gates in turn:
+`_verdicts`. The two things that can *license* a deletion are always exact anchors (`0`, `½`,
+`1`): a **certificate** is a proof, and a **pure leaf** is a theorem — a leaf whose boards are
+all one outcome (`avg` lands exactly on an anchor). An **impure leaf** (`avg≈0.33`) is a mix
+the concepts couldn't separate; it explains nothing, so its rows are kept. The row's own backup
+only has to land on the right side of the scale — never exactly on `½` — so no tolerance is
+tuned. Each completed row runs two gates in turn:
 
 ```mermaid
 flowchart TD
     classDef cut fill:#9a3412,stroke:#7c2d12,color:#ffedd5
     classDef keep fill:#065f46,stroke:#047857,color:#d1fae5
-    R(["a completed row<br/>value = propagated_score"]) --> Q1{"verdict =<br/>certificate's?"}
+    R(["a completed row<br/>value = propagated_score"]) --> Q1{"certificate =<br/>row's verdict?"}
     Q1 -->|yes| D1["forget — proof floor<br/>collapse_proven"]:::cut
-    Q1 -->|no| Q2{"verdict =<br/>rule tree's?"}
+    Q1 -->|no| Q2{"PURE leaf =<br/>row's verdict?"}
     Q2 -->|yes| D2["forget — earned<br/>_forget_explained"]:::cut
     Q2 -->|no| K[("keep =<br/>the frontier")]:::keep
 ```
 
 **Safe either way.** The proof floor compares against the *certificate* (the game's truth,
-never the library), so no theory can force a wrongful delete. Earned forgetting does consult
-the tree, but deletes only where it *agrees* with the backup — a wrong theory forgets less,
-never wrongly, and can never expand what's certified. On a provable game the proof catches up
-and the two gates converge; on one too large to prove out, earned forgetting is what keeps
-compression moving past the frontier.
+never the library), so no theory can force a wrongful delete. Earned forgetting deletes only
+against a *pure* leaf — a region the concepts turned into a theorem — and only where it agrees
+with the backup, so a wrong or half-formed theory forgets less, never wrongly, and can never
+expand what's certified. An impure leaf is held as frontier, which is exactly why a washed-out
+region (a game so deep the backup sits at `≈½` everywhere) is never mistaken for explained. On
+a provable game the proof catches up and the gates converge; on one too large to prove out,
+earned forgetting compresses only the regions it has genuinely proven into theorems.
 
 `WISE_COLLAPSE=0` disables both gates; the cycle still completes and values stay sound, just
 with redundant rows retained.

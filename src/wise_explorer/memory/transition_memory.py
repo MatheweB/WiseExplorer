@@ -652,11 +652,12 @@ class TransitionMemory(GameMemory):
         return len(forget)
 
     def _forget_explained(self) -> int:
-        """Earned forgetting: after a fit, drop the transitions whose outcome the THEORY now
-        calls correctly — keeping the ones it gets WRONG, the frontier it hasn't explained yet.
-        It compares verdicts (the same LOSS/DRAW/WIN the tree labels leaves with), so there's no
-        tolerance to tune and it extends to more outcome classes for free. The proof's collapse
-        runs first; this is the theory earning the right to replace raw evidence."""
+        """Earned forgetting: after a fit, drop the transitions the THEORY has turned into a
+        theorem — boards landing in a *pure* leaf (the tree predicts an exact anchor `0`/`½`/`1`)
+        whose outcome matches the board's. An impure leaf (`avg≈0.33`) is a coincidental lump,
+        not an explanation, so its rows are KEPT — the frontier the theory hasn't resolved. The
+        anchor test is exact, so there's no tolerance to tune. The proof's collapse runs first;
+        this is the theory earning the right to replace raw evidence with a proven region."""
         if self.read_only or not self.concept_library.rules:
             return 0
         rows = self.conn.execute(
@@ -670,7 +671,8 @@ class TransitionMemory(GameMemory):
         to_move = np.array([r[2] for r in rows], dtype=np.int64)
         pred = self.concept_library.values_for(B, np.where(to_move > 0, 3 - to_move, 0))
         contest = np.array([self._board_value(Stats(r[3], r[4], r[5]), r[6]) for r in rows])
-        explained = ~np.isnan(pred) & (_verdicts(pred) == _verdicts(contest))
+        pure = np.isclose(pred * 2.0, np.round(pred * 2.0))      # the leaf is a theorem, not a bin
+        explained = ~np.isnan(pred) & pure & (_verdicts(pred) == _verdicts(contest))
         forget = [(rows[i][0],) for i in np.flatnonzero(explained)]
         if forget:
             self.conn.executemany("DELETE FROM transitions WHERE rowid = ?", forget)
