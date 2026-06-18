@@ -37,6 +37,7 @@ class GameJob:
     player_map: dict[int, int]  # player_id -> agent_index
     max_turns: int
     prune_players: set[int]  # Player IDs that should play worst moves
+    seed: int | None = None   # per-game RNG seed; None = worker's global RNG (legacy, nondeterministic)
 
 
 @dataclass

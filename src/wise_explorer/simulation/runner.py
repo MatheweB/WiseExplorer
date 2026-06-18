@@ -30,6 +30,11 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_WORKER_COUNT = max(1, mp.cpu_count() - 1)
 
+# Games committed (and proven against) together as one wave — the learning granularity,
+# independent of num_workers. Bigger waves reweight coverage toward the high mode and cut
+# prove/commit overhead; smaller ones keep stats fresher. 50 is the chosen default.
+DEFAULT_WAVE_SIZE = 50
+
 # ---------------------------------------------------------------------------
 # Process cleanup
 # ---------------------------------------------------------------------------
@@ -85,13 +90,25 @@ class SimulationRunner:
     """
     Manages parallel game simulations with synchronized wave-based learning.
     
-    Games run in waves of num_workers. Each wave completes and writes to DB
-    before the next wave starts, ensuring subsequent games see updated statistics.
+    Games run in waves of wave_size (default: DEFAULT_WAVE_SIZE — independent of num_workers).
+    Each wave completes and writes to DB before the next starts, so subsequent games see updated
+    statistics; the pool spreads a wave across num_workers — parallelism only, not learning.
     """
 
-    def __init__(self, memory: GameMemory, num_workers: int = DEFAULT_WORKER_COUNT):
+    def __init__(self, memory: GameMemory, num_workers: int = DEFAULT_WORKER_COUNT,
+                 wave_size: int | None = None, seed: int | None = None):
         self.memory = memory
         self.num_workers = num_workers
+        # A wave is the unit of learning — games committed together before the next ones see
+        # updated stats and the proof frontier advances — independent of num_workers (which is
+        # parallelism only; the pool spreads a wave across the workers it has).
+        self.wave_size = max(1, wave_size if wave_size is not None else DEFAULT_WAVE_SIZE)
+        # With a base seed the run is reproducible regardless of worker scheduling: job assignment
+        # draws from a dedicated RNG and each game carries its own seed, so a game's play is fixed
+        # no matter which worker runs it. seed=None keeps the old nondeterministic behaviour.
+        self.base_seed = seed
+        self._rng = random.Random(seed) if seed is not None else random
+        self._job_counter = 0
         self._pool: Pool | None = None
         # The value loop runs two tiers (see run_batch). The cheap march — prove + forget —
         # runs EVERY wave, so the proof frontier keeps advancing. The expensive synthesis search
@@ -169,8 +186,8 @@ class SimulationRunner:
 
         try:
             while job_idx < len(all_jobs):
-                # Get next wave of jobs (one per worker)
-                wave_jobs = all_jobs[job_idx : job_idx + self.num_workers]
+                # Get next wave of jobs (spread across however many workers exist)
+                wave_jobs = all_jobs[job_idx : job_idx + self.wave_size]
 
                 # Run wave: in-process for single worker, pool for multi
                 if single_worker:
@@ -213,19 +230,22 @@ class SimulationRunner:
     ) -> list[GameJob]:
         players = sorted(swarms.keys())
         indices = {
-            pid: [random.randrange(len(swarms[pid])) for _ in range(count)]
+            pid: [self._rng.randrange(len(swarms[pid])) for _ in range(count)]
             for pid in players
         }
 
-        return [
-            GameJob(
+        jobs = []
+        for i in range(count):
+            seed = None if self.base_seed is None else self.base_seed + self._job_counter
+            self._job_counter += 1
+            jobs.append(GameJob(
                 game=game.deep_clone(),
                 player_map={pid: indices[pid][i] for pid in players},
                 max_turns=max_turns,
                 prune_players=prune_players,
-            )
-            for i in range(count)
-        ]
+                seed=seed,
+            ))
+        return jobs
 
     def _commit(self, results: list[JobResult]) -> tuple[int, int]:
         """

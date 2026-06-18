@@ -39,6 +39,8 @@ def train(
     workers: int = DEFAULT_WORKER_COUNT,
     turn_depth: int | None = None,
     full_budget: bool = False,
+    wave_size: int | None = None,
+    seed: int | None = None,
     progress: Callable[[int, int, GameMemory], None] | None = None,
 ) -> None:
     """Run `games` self-play games from `game`'s state into `memory`, cumulatively.
@@ -51,6 +53,12 @@ def train(
     exists — nothing more can be learned. `full_budget=True` disables that and runs
     all `games` regardless (useful to grind the last few positions on a rare run that
     certifies the root before covering everything).
+
+    `wave_size` is how many games commit (and are proven against) together before the next
+    ones see updated stats — the learning granularity, independent of `workers` (parallelism).
+
+    `seed` makes a run reproducible regardless of worker scheduling (default `None` =
+    nondeterministic); the same `seed` and `wave_size` reproduce a run exactly.
     """
     if games <= 0:
         return
@@ -67,7 +75,7 @@ def train(
     # certifies within the budget (e.g. minichess) just run to the end; `full_budget` forces that
     # for any game (grinds the last few positions on a rare run that certifies the root early).
     root_hash = hash_board(game.get_state().board)
-    with SimulationRunner(memory, workers) as runner:
+    with SimulationRunner(memory, workers, wave_size=wave_size, seed=seed) as runner:
         while done < games:
             batch = min(step, games - done)
             run_training(runner, swarms, game, simulations=batch,

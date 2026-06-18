@@ -7,6 +7,9 @@ database. Workers receive GameJob objects and return JobResult objects.
 
 from __future__ import annotations
 
+import random
+
+import numpy as np
 
 from wise_explorer.memory import open_readonly
 from wise_explorer.selection import select_move_for_training
@@ -27,6 +30,12 @@ def run_game(job: GameJob) -> JobResult:
     """Execute a single game simulation."""
     if _worker_memory is None:
         raise RuntimeError("Worker not initialized")
+
+    # Seed this game's RNG from the job so its play is fixed regardless of which worker runs it;
+    # the only nondeterminism left is across base seeds, which is real exploration.
+    if job.seed is not None:
+        random.seed(job.seed)
+        np.random.seed(job.seed % (2**32))
 
     # pick up concepts/certificates from any value-loop cycle the main process ran
     # since this worker's last game, so steering uses the current theory, not a stale one
