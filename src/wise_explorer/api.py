@@ -38,6 +38,7 @@ def train(
     *,
     workers: int = DEFAULT_WORKER_COUNT,
     turn_depth: int | None = None,
+    full_budget: bool = False,
     progress: Callable[[int, int, GameMemory], None] | None = None,
 ) -> None:
     """Run `games` self-play games from `game`'s state into `memory`, cumulatively.
@@ -45,6 +46,11 @@ def train(
     Training is split into chunks so the value loop's doubling cadence runs
     throughout and `progress(done, total, memory)` can report live; one closing
     cycle (solve → complete → fit → prove → forget) fits the final library.
+
+    A solved game (e.g. Nim) stops early once the root is certified and a concept
+    exists — nothing more can be learned. `full_budget=True` disables that and runs
+    all `games` regardless (useful to grind the last few positions on a rare run that
+    certifies the root before covering everything).
     """
     if games <= 0:
         return
@@ -57,8 +63,9 @@ def train(
     # proofs reach the root FASTER than discovery finds the law (Nim's root is proven by ~game
     # 200; the nim-sum forms later) — and that concept is the readable theory the showcase
     # prints and the width-free program that TRANSFERS to bigger boards, so stopping on the
-    # proof alone would skip it. With both, nothing more can be learned. Unsolved games (TTT,
-    # minichess) never certify the root, so they run their full budget.
+    # proof alone would skip it. With both, nothing more can be learned. Games whose root never
+    # certifies within the budget (e.g. minichess) just run to the end; `full_budget` forces that
+    # for any game (grinds the last few positions on a rare run that certifies the root early).
     root_hash = hash_board(game.get_state().board)
     with SimulationRunner(memory, workers) as runner:
         while done < games:
@@ -68,7 +75,8 @@ def train(
             done += batch
             if progress:
                 progress(done, games, memory)
-            if root_hash in memory.certified_values and memory.concept_library.rules:
+            if (not full_budget and root_hash in memory.certified_values
+                    and memory.concept_library.rules):
                 break                                    # solved AND theory captured → done
         memory.grow_concepts(game=game)
     if progress:

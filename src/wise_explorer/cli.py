@@ -51,6 +51,8 @@ def run_train(argv: list[str]) -> None:
                    help="Worker processes (default: CPU count − 1)")
     p.add_argument("--markov", action="store_true",
                    help="Path-independent (state) memory instead of transitions")
+    p.add_argument("--full-budget", action="store_true",
+                   help="Run all --games even if the game solves early (skip the early stop)")
     a = p.parse_args(argv)
 
     game = create_game(a.game, size=a.size)
@@ -73,6 +75,8 @@ def run_train(argv: list[str]) -> None:
     kwargs = {"progress": report}
     if a.workers:
         kwargs["workers"] = a.workers
+    if a.full_budget:
+        kwargs["full_budget"] = True
     train(memory, game, a.games, **kwargs)
     print("\n")
     summary = memory.concept_library.summary()

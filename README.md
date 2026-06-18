@@ -424,7 +424,7 @@ evidence ladder behind each move; `--verbose` dumps every candidate.
 | Command | Key flags | Description |
 |---|---|---|
 | `play` | `-g` game · `-p` seats · `--watch` · `--learn` · `--ponder N` · `--explain` · `--verbose` | Play (default), **frozen**. `--learn` / `--ponder N` self-plays from the current position before each AI move (`--ponder 0` = frozen). |
-| `train` | `-g` game · `--games N` (default 2000) · `-w` workers · `--markov` | Run N self-play games into the cumulative database. |
+| `train` | `-g` game · `--games N` (default 2000) · `-w` workers · `--markov` · `--full-budget` (no early stop) | Run N self-play games into the cumulative database. |
 | `eval` | `-g` game · `-n` size | Optimal-move rate of the trained model vs a perfect oracle (Nim, Tic-Tac-Toe). |
 | `invent` | `-g` game · `--ledger` · `--expand` | Print the discovered rules. `--ledger` re-runs discovery with the full bits ledger. |
 | `transfer` | `--piles N` · `--full` | Discover the nim-sum on 4 piles, play N-pile Nim zero-shot. |
