@@ -150,6 +150,30 @@ dense residue that maps what's still unproven. Either way the certificates are a
 audit of the *library*: `|library(b) − proven(b)|` over proven boards measured the TTT library
 mispricing ~30% of them — matching the ~31% the rollout prototype found by playing games.
 
+**The champion gate: forgetting can't wash out the best theory.** That audit is also a *gate*.
+Discovery refits the rule tree each cycle — but once the proof has emptied the rows (above), a
+refit has almost no data left and comes back as a near-empty stub. So a rebuild replaces the
+library only if it predicts the certificates with *strictly lower* error than the reigning tree;
+otherwise the reigning tree stays. The certs are a held-out answer key the tree never fit, so the
+best-generalizing theory survives even as forgetting deletes every proven row. A toy with four
+proven boards (a board the tree can't value reads as the neutral 0.5, as a missing rung does in
+selection):
+
+| proven board | certificate | reigning tree | post-collapse stub |
+|---|--:|--:|--:|
+| b₁ (win)  | 1.0 | 1.0 | 1.0 |
+| b₂ (loss) | 0.0 | 0.0 | 0.5 |
+| b₃ (draw) | 0.5 | 0.5 | 0.5 |
+| b₄ (win)  | 1.0 | 1.0 | 0.5 |
+| **mean `\|pred − cert\|`** | — | **0.00** | **0.25** |
+
+The stub only covers b₁; the rest fall back to 0.5, so it errs on the loss and a win → 0.25 >
+0.00, loses, and is discarded. Parameterless (lower error wins; ties keep the incumbent;
+`WISE_CHAMPION=0` disables it). It's a ratchet, not a freeze — a genuinely better-generalizing
+tree still takes the title — but once the game is proven and its data forgotten there's nothing
+left to learn, so the best theory simply stands. Measured (TTT, cumulative to 5k, collapse on):
+with the gate the tree holds at 14–18 rules and 100%; without it it caves 15 → 8 → 3.
+
 **The evidence ladder beats the old arbitration.** Ablating the deleted machinery (hiding
 the four-signal stack's bell + anchors from competitive selection, leaving only
 proven > concept > statistics) was an A/B from identical (pre-fix) Tic-Tac-Toe snapshots,

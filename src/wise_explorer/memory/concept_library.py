@@ -16,6 +16,7 @@ An empty library is inert (every value is ``None``), so its selection signal has
 until concepts have actually been discovered.
 """
 import json
+import os
 import sqlite3
 
 import numpy as np
@@ -32,6 +33,13 @@ CREATE TABLE IF NOT EXISTS concept_rules (
     verdict TEXT DEFAULT '', n INTEGER DEFAULT 0
 );
 """
+
+# Champion gate (WISE_CHAMPION=0 disables): a rebuild replaces the library only if it
+# predicts the game's certificates with strictly lower error — the certs are a held-out
+# answer key the rule tree never fit, so forgetting can shrink the fit data to nothing yet
+# never wash out the best theory. Parameterless: lower mean |prediction − cert| wins (a
+# board the tree can't value reads as the neutral 0.5, exactly as selection treats a missing
+# rung); the gate simply waits until there's a champion and any certs to judge against.
 
 
 class ConceptLibrary:
@@ -67,8 +75,9 @@ class ConceptLibrary:
             keep = np.random.default_rng(0).choice(len(B), S.CAP, replace=False)
             B, V, M = B[keep], V[keep], M[keep]
         if len(B) >= S.MIN_BOARDS:
+            champ = (self.kept, self.rules)                       # the reigning champion
             res = S.invent_from_boards(B, V, M, max_size=max_size, cap=cap, seed=self.kept)
-            self.kept, self.rules = res.concepts, res.rules
+            self.kept, self.rules = self._defend_champion(champ, (res.concepts, res.rules))
             self._forget()
         self.save()
         return len(self.kept)
@@ -86,6 +95,45 @@ class ConceptLibrary:
             return
         live = {id(c) for c in S.closure_concepts(self.rules, self.kept)}
         self.kept = [c for c in self.kept if id(c) in live or S._is_atomic(c.expr)]
+
+    def _defend_champion(self, champ, cand):
+        """Return whichever of the reigning library (``champ``) and the fresh rebuild
+        (``cand``) predicts the certificates with lower error — so forgetting can empty the
+        fit data without washing out the best theory. Until there's a champion and an answer
+        key to judge against, the challenger takes the title (the theory has to form first)."""
+        if os.environ.get("WISE_CHAMPION", "1") == "0":
+            return cand
+        if not champ[1]:                                   # no incumbent yet
+            return cand
+        cb, cv, cm = self._cert_boards()
+        if not len(cb):                                    # no answer key yet
+            return cand
+        return cand if self._error(cand[1], cb, cv, cm) < self._error(champ[1], cb, cv, cm) else champ
+
+    def _cert_boards(self):
+        """The certified boards as (boards, values, movers): a persistent, growing answer key
+        — certs and the boards table both survive collapse, so this is exactly the held-out
+        truth the rule tree never fit."""
+        try:
+            rows = self.conn.execute(
+                "SELECT b.board_data, b.to_move, c.value FROM certificates c "
+                "JOIN boards b ON c.board_hash = b.board_hash").fetchall()
+        except sqlite3.OperationalError:
+            rows = []
+        if not rows:
+            return np.empty((0, 0)), np.empty(0), np.empty(0)
+        B = np.stack([np.frombuffer(r[0], dtype=np.int8).astype(np.int64) for r in rows])
+        to_move = np.array([r[1] for r in rows], dtype=np.int64)
+        V = np.array([r[2] for r in rows], dtype=float)
+        M = np.where(to_move > 0, 3 - to_move, 0)          # the just-moved seat = placed token
+        return B, V, M
+
+    def _error(self, rules, B, V, M):
+        """Mean |prediction − cert| of a rule tree over the certs; a board it can't value
+        reads as the neutral 0.5 (as a missing rung does in selection)."""
+        pred = self.values_for(B, M, rules=rules)
+        pred = np.where(np.isnan(pred), 0.5, pred)
+        return float(np.mean(np.abs(pred - V)))
 
     def summary(self, expand: bool = False) -> str:
         """What training discovered: the rule tree (each split shown once, with derived
@@ -138,15 +186,18 @@ class ConceptLibrary:
                             None if m is None else np.array([m]))[0]
         return None if np.isnan(v) else float(v)
 
-    def values_for(self, B: np.ndarray, M: np.ndarray | None = None) -> np.ndarray:
+    def values_for(self, B: np.ndarray, M: np.ndarray | None = None,
+                   rules: list | None = None) -> np.ndarray:
         """One value per row of ``B`` (NaN where no rule matches), via a single batched
-        rule-walk. ``M`` gives each row's just-played token. This is what lets the value
-        loop price thousands of never-visited boards in one pass."""
+        rule-walk. ``M`` gives each row's just-played token; ``rules`` defaults to the
+        library's own tree (the champion gate passes a candidate's tree to score it). This
+        is what lets the value loop price thousands of never-visited boards in one pass."""
+        rules = self.rules if rules is None else rules
         out = np.full(len(B), np.nan)
-        if not self.rules or not len(B):
+        if not rules or not len(B):
             return out
         unmatched = np.ones(len(B), dtype=bool)
-        for r in self.rules:
+        for r in rules:
             hit = np.ones(len(B), dtype=bool)
             for con, sense in r.path:
                 v = con.expr.eval(B, M)
