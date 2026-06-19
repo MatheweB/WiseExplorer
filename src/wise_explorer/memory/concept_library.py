@@ -30,7 +30,7 @@ CREATE TABLE IF NOT EXISTS concepts (
 );
 CREATE TABLE IF NOT EXISTS concept_rules (
     id INTEGER PRIMARY KEY, path_json TEXT NOT NULL, avg REAL NOT NULL,
-    verdict TEXT DEFAULT '', n INTEGER DEFAULT 0
+    verdict TEXT DEFAULT '', n INTEGER DEFAULT 0, mix TEXT DEFAULT ''
 );
 """
 
@@ -52,7 +52,7 @@ class ConceptLibrary:
         self.rules: list[S.Rule] = []       # the value model: rule paths with leaf values
         if not read_only:
             self.conn.executescript(_SCHEMA)
-            for col in ("verdict TEXT DEFAULT ''", "n INTEGER DEFAULT 0"):
+            for col in ("verdict TEXT DEFAULT ''", "n INTEGER DEFAULT 0", "mix TEXT DEFAULT ''"):
                 try:                                     # migrate pre-verdict DBs in place
                     self.conn.execute(f"ALTER TABLE concept_rules ADD COLUMN {col}")
                 except sqlite3.OperationalError:
@@ -219,9 +219,10 @@ class ConceptLibrary:
              for i, c in enumerate(self.kept)],
         )
         cur.executemany(
-            "INSERT INTO concept_rules (id, path_json, avg, verdict, n) VALUES (?,?,?,?,?)",
+            "INSERT INTO concept_rules (id, path_json, avg, verdict, n, mix) VALUES (?,?,?,?,?,?)",
             [(ri, json.dumps([[idx[id(con)], bool(s)] for con, s in r.path if id(con) in idx]),
-              float(r.avg), r.verdict, int(r.n)) for ri, r in enumerate(self.rules)],
+              float(r.avg), r.verdict, int(r.n), ",".join(f"{x:.4f}" for x in r.mix))
+             for ri, r in enumerate(self.rules)],
         )
         self.conn.commit()
 
@@ -262,14 +263,15 @@ class ConceptLibrary:
         rules = []
         try:
             rows = self.conn.execute(
-                "SELECT path_json, avg, verdict, n FROM concept_rules ORDER BY id").fetchall()
-        except sqlite3.OperationalError:                 # a pre-verdict DB opened read-only
-            rows = [(pj, avg, "", 0) for pj, avg in self.conn.execute(
+                "SELECT path_json, avg, verdict, n, mix FROM concept_rules ORDER BY id").fetchall()
+        except sqlite3.OperationalError:                 # a pre-mix/verdict DB opened read-only
+            rows = [(pj, avg, "", 0, "") for pj, avg in self.conn.execute(
                 "SELECT path_json, avg FROM concept_rules ORDER BY id").fetchall()]
-        for pj, avg, verdict, n in rows:
+        for pj, avg, verdict, n, mix in rows:
             try:
                 path = [(concepts[cid], bool(s)) for cid, s in json.loads(pj) if cid in concepts]
             except Exception:
                 continue
-            rules.append(S.Rule(path, verdict or "", int(n or 0), float(avg), 0.0))
+            mt = tuple(float(x) for x in mix.split(",")) if mix else (0.0, 0.0, 0.0)
+            rules.append(S.Rule(path, verdict or "", int(n or 0), float(avg), 0.0, mt))
         self.rules = rules

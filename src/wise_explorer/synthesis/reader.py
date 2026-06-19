@@ -354,7 +354,13 @@ def _tree_lines(rules: list[Rule], cond) -> list[str]:
     def leaf(r):
         if not r.verdict:                                # a pre-verdict DB: values only
             return f"value {r.avg:.2f}"
-        return f"[{r.verdict:<4}] n={r.n:<6} avg={r.avg:.2f}"
+        if sum(r.mix) <= 0:                              # a pre-mix DB: label only
+            return f"[{r.verdict:<4}] n={r.n:<6} avg={r.avg:.2f}"
+        if sum(x > 1e-9 for x in r.mix) == 1:            # one outcome — a genuine theorem
+            return f"[{r.verdict:<4}] n={r.n:<6} avg={r.avg:.2f}  (pure)"
+        l, d, w = (round(100 * x) for x in r.mix)        # concepts can't separate these — no
+        return (f"[mixed] n={r.n:<6} avg={r.avg:.2f}  ·  "   # verdict claimed; the proof settles them
+                f"L/D/W {l}/{d}/{w}%")
 
     def rec(rs, depth, pre):
         con = rs[0].path[depth][0]

@@ -132,6 +132,21 @@ $$\text{correct} \;\not\Leftrightarrow\; \text{every leaf pure} \qquad\qquad \te
 On a game small enough to prove out, they do (Tic-Tac-Toe, 100%); on one too large, the theory
 certifies what generalizes and the residue maps what the proof has yet to reach.
 
+A leaf cannot be forced pure by splitting harder. With Tic-Tac-Toe fully proven, **32% of
+reachable boards share a concept-fingerprint with a board of a different proven value** — one
+class holds 204 boards identical to every concept yet split 64 loss / 116 draw / 24 win. No
+concept separates them; the only "purifying" split is board identity, i.e. a lookup table. So the
+tree states a verdict only where it has a *theorem* and refuses to claim one otherwise:
+
+- a **pure** leaf prints its verdict and `(pure)`;
+- an **impure** leaf prints `[mixed] … L/D/W 58/5/38%` — no verdict, the proof settles those boards.
+
+The mix is taken over the **completed values** (the minimax backup, proven boards pinned to their
+certificate), never the raw `W/T/L` counts — exploration contaminates those with the prune phase's
+deliberately-bad moves, so they are trustworthy only at terminals. (This is also why there are
+rarely clean DRAW leaves: a draw is the minimax *residual* — "neither side can force a win" — not a
+pattern the concepts can assert, so draws scatter into mixed regions the proof resolves.)
+
 ## Proofs need no expiry
 
 A certificate here is a game-theoretic **fact**, which dissolves machinery earlier designs

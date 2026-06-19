@@ -275,6 +275,9 @@ class Rule:
     n: int
     avg: float
     resid: float
+    mix: tuple = (0.0, 0.0, 0.0)             # fraction of the leaf's boards per outcome, each
+                                             # classed to its nearest anchor on the COMPLETED
+                                             # values (cert-pinned backup) — NOT raw counts
     def render(self) -> str:
         if not self.path:
             return "(everything)"
@@ -302,11 +305,13 @@ def _build_rules(concepts: list[Concept], V: np.ndarray, min_leaf: int):
         n = len(idx)
         here = _bits(v)
         verd = _verdict(v)
+        mix = tuple(np.bincount(_verdicts(v), minlength=3) / n)   # fraction of boards per outcome,
+        #                          each board classed to its nearest anchor — a pure leaf is all-one
         # a node whose total bits don't exceed the cost of naming one split can never
         # pay — this single derived test is the whole leaf condition (it also bounds the
         # depth: every split must pay >= split_cost out of a finite bit budget)
         if here <= split_cost:
-            rules.append(Rule(list(path), verd, n, float(v.mean()), here))
+            rules.append(Rule(list(path), verd, n, float(v.mean()), here, mix))
             return
         best = None
         for con in concepts:
@@ -318,7 +323,7 @@ def _build_rules(concepts: list[Concept], V: np.ndarray, min_leaf: int):
             if best is None or g > best[0]:
                 best = (g, con, m)
         if best is None or best[0] <= split_cost:
-            rules.append(Rule(list(path), verd, n, float(v.mean()), here))
+            rules.append(Rule(list(path), verd, n, float(v.mean()), here, mix))
             return
         _, con, m = best
         grow(idx[m], path + [(con, True)])
